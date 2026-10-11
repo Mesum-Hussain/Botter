@@ -4,11 +4,9 @@
 #include "fwl.h"
 
 /*
- * The FWL interpreter: runs an agent's FLOW.md statement by statement.
- * Structure is executed by botcore itself (variables, IF/FOR/WHILE/RETRY,
- * EXECUTE tool, ASK USER, SAVE, comparisons such as IS EQUAL TO); the LLM is
- * used only where a statement needs judgement: plain-English instructions,
- * INVOKE SKILL, DELEGATE TO (a sub-agent), and conditions or values written in prose.
+ * The FWL interpreter: runs an agent's FLOW.fwl line by line. The structure is botcore's own
+ * (IF / ELSE IF / ELSE, FOR EACH, WHILE, RETRY, ASK, RETURN, and conditions that compare
+ * values); every sentence, and every condition that needs judgement, goes to the model.
  */
 typedef struct {
     /* An LLM turn with tools, shown to the user like a normal reply. 0 ok, 1 interrupted, -1 failed. */
@@ -21,10 +19,8 @@ typedef struct {
     void (*say)(void *ud, const char *text);
     /* Show a progress line (STEP headings, retries). */
     void (*status)(void *ud, const char *text);
-    /* Run a tool (with the usual guards and status line); malloc'd result, "ERROR: ..." on failure. */
-    char *(*tool)(void *ud, const char *name, const char *args_json);
-    /* Hand a task to a sub-agent (its own conversation and persona). 0 ok, 1 interrupted, -1 failed. */
-    int (*agent)(void *ud, const char *name, const char *task, char **reply);
+    /* What this tool returned the last time it ran in the turn just finished (malloc'd), or NULL. */
+    char *(*last_result)(void *ud, const char *tool);
     void *ud;
 } sq_io;
 

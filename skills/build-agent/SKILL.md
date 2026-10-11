@@ -19,7 +19,7 @@ Sealing keys (optional, before the build): vault_seal {} asks the user, directly
 What the build does: copies the botcore runtime (the same engine botter runs on) and appends the project files to it. No compiler or linker runs. The result is one static x86-64 executable. Rebuilding replaces the old .bot.
 
 ## Warnings you may see
-- "FLOW.md:N: error: ...": FLOW.md does not compile (FWL): wrong indentation or a block line without its ':', an unknown tool or skill, a skill not listed under IMPORT:, a name written in backticks instead of $name, a variable used before it is set, a keyword typo. The build stops until it is fixed; read the write-flow skill. "FLOW.md:N: warning: ..." should be fixed too.
+- "FLOW.fwl:N: error: ...": FLOW.fwl does not compile (FWL): wrong indentation or a block line without its ':', a $tool, #skill or @agent that does not exist, a {value} read before anything fills it, an old statement such as EXECUTE or IMPORT, a variable used before it is set, a keyword typo. The build stops until it is fixed; read the write-flow skill. "FLOW.fwl:N: warning: ..." should be fixed too.
 
 ## Errors you may see
 - "tools/bin/X has no descriptor tools/doc/X.json": add the descriptor (see write-tool).

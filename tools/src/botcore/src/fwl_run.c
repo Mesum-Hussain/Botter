@@ -269,89 +269,29 @@ static char *unquote(const char *s, size_t n)
     return o;
 }
 
-/* A JSON payload template: $refs become their JSON, bare keys get quotes. */
-static cJSON *eval_payload(rt_t *r, const char *s)
+/* Expression without prose: terms joined by + (one term keeps its type). */
+/* Text with its {values} filled in. */
+static char *fill(rt_t *r, const char *t)
 {
-    size_t cap = strlen(s) * 2 + 64, len = 0;
-    char *o = malloc(cap);
-    if (!o) {
-        return NULL;
+    char *out = NULL;
+    size_t len = 0;
+    for (const char *c = t; *c;) {
+        size_t n = sq_val(c);
+        cJSON *v = n ? ref_value(r, c + 1, n - 2) : NULL;
+        char *piece = v ? show_text(v) : strndup(c, n ? n : 1);
+        cJSON_Delete(v);
+        show_cat(&out, &len, piece ? piece : "");
+        free(piece);
+        c += n ? n : 1;
     }
-#define PUT(p, n)                                                                                                      \
-    do {                                                                                                               \
-        size_t n_ = (n);                                                                                               \
-        if (len + n_ + 1 > cap) {                                                                                      \
-            cap = (len + n_ + 1) * 2;                                                                                  \
-            char *t_ = realloc(o, cap);                                                                                \
-            if (!t_) {                                                                                                 \
-                free(o);                                                                                               \
-                return NULL;                                                                                           \
-            }                                                                                                          \
-            o = t_;                                                                                                    \
-        }                                                                                                              \
-        memcpy(o + len, (p), n_);                                                                                      \
-        len += n_;                                                                                                     \
-    } while (0)
-    for (const char *c = s; *c;) {
-        if (*c == '"') {
-            const char *q = c + 1;
-            while (*q && *q != '"') {
-                q += *q == '\\' && q[1] ? 2 : 1;
-            }
-            q = *q ? q + 1 : q;
-            PUT(c, (size_t)(q - c));
-            c = q;
-        } else if (*c == '$' && sq_dollar(c)) {
-            const char *q = c + sq_dollar(c) - 1;
-            cJSON *v = ref_value(r, c + 1, (size_t)(q - c));
-            char *j = v ? cJSON_PrintUnformatted(v) : strdup("null");
-            cJSON_Delete(v);
-            if (j) {
-                PUT(j, strlen(j));
-                free(j);
-            }
-            c = q + 1;
-        } else if (isalpha((unsigned char)*c) || *c == '_') {
-            const char *e = c;
-            while (isalnum((unsigned char)*e) || *e == '_') {
-                e++;
-            }
-            const char *a = e;
-            while (*a == ' ') {
-                a++;
-            }
-            if (*a == ':') { /* bare key */
-                PUT("\"", 1);
-                PUT(c, (size_t)(e - c));
-                PUT("\"", 1);
-            } else {
-                PUT(c, (size_t)(e - c));
-            }
-            c = e;
-        } else {
-            PUT(c, 1);
-            c++;
-        }
-    }
-    o[len] = '\0';
-#undef PUT
-    cJSON *j = cJSON_Parse(o);
-    free(o);
-    return j;
+    return out ? out : strdup("");
 }
 
-/* Expression without prose: terms joined by + (one term keeps its type). */
 static cJSON *eval_literal(rt_t *r, const char *expr)
 {
     const char *s = expr;
     while (isspace((unsigned char)*s)) {
         s++;
-    }
-    if (*s == '{' || *s == '[') {
-        cJSON *j = eval_payload(r, s);
-        if (j) {
-            return j;
-        }
     }
     cJSON *one = NULL;
     char *acc = strdup("");
@@ -369,13 +309,14 @@ static cJSON *eval_literal(rt_t *r, const char *expr)
             while (*q && *q != '"') {
                 q += *q == '\\' && q[1] ? 2 : 1;
             }
-            char *t = unquote(c + 1, (size_t)(q - c - 1));
-            v = cJSON_CreateString(t ? t : "");
+            char *t = unquote(c + 1, (size_t)(q - c - 1)), *f = t ? fill(r, t) : NULL; /* "Dear {name}" */
+            v = cJSON_CreateString(f ? f : "");
             free(t);
+            free(f);
             c = *q ? q + 1 : q;
-        } else if (*c == '$' && sq_dollar(c)) {
-            size_t dn = sq_dollar(c);
-            v = ref_value(r, c + 1, dn - 1);
+        } else if (sq_val(c)) {
+            size_t dn = sq_val(c);
+            v = ref_value(r, c + 1, dn - 2);
             c += dn;
         } else {
             const char *e = c;
@@ -423,20 +364,19 @@ static char *named_values(rt_t *r, const char *text)
 {
     char *acc = NULL;
     size_t len = 0;
-    for (const char *c = strchr(text, '$'); c; c = strchr(c, '$')) {
-        size_t dn = sq_dollar(c);
+    for (const char *c = strchr(text, '{'); c; c = strchr(c, '{')) {
+        size_t dn = sq_val(c);
         if (!dn) {
             c++;
             continue;
         }
         const char *e = c + dn - 1;
-        size_t n = strcspn(c + 1, ".[");
-        n = n < dn - 1 ? n : dn - 1;
+        size_t n = strcspn(c + 1, ".[}");
         char name[65];
         snprintf(name, sizeof(name), "%.*s", (int)(n < 64 ? n : 64), c + 1);
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(r->vars, name);
         char tag[80];
-        snprintf(tag, sizeof(tag), "$%s =", name);
+        snprintf(tag, sizeof(tag), "{%s} =", name);
         if (v && !(acc && strstr(acc, tag))) {
             char *t = val_text(v), *line = NULL;
             if (asprintf(&line, "%s %.3000s%s\n", tag, t ? t : "", t && strlen(t) > 3000 ? " ...(cut)" : "") >= 0) {
@@ -534,8 +474,8 @@ static const char *find_op(const char *s, const char *op)
                 q += *q == '\\' && q[1] ? 2 : 1;
             }
             c = *q ? q : q - 1;
-        } else if (*c == '$' && sq_dollar(c)) {
-            c += sq_dollar(c) - 1;
+        } else if (sq_val(c)) {
+            c += sq_val(c) - 1;
         } else if (strncmp(c, op, n) == 0) {
             return c;
         }
@@ -552,12 +492,13 @@ static int atom(rt_t *r, const char *s)
     }
     char *a = t + strspn(t, " ");
     int neg = 0;
-    if (strncmp(a, "NOT ", 4) == 0) {
+    if (strncmp(a, "not ", 4) == 0) {
         neg = 1;
         a += 4;
     }
-    static const char *const ops[] = {" IS NOT EQUAL TO ", " IS EQUAL TO ", " IS GREATER THAN ", " IS LESS THAN ",
-                                      " CONTAINS ", " IS NOT EMPTY", " IS EMPTY", NULL};
+    /* Decided here only when both sides are values ({x}, "text", a number); "is about billing" is the model's call. */
+    static const char *const ops[] = {" is not empty", " is empty", " is greater than ", " is less than ",
+                                      " is not ", " is ", " contains ", NULL};
     int res = -1;
     for (int i = 0; ops[i] && res == -1; i++) {
         const char *p = find_op(a, ops[i]);
@@ -566,18 +507,20 @@ static int atom(rt_t *r, const char *s)
         }
         char *lhs = strndup(a, (size_t)(p - a));
         const char *rhs = p + strlen(ops[i]);
-        int unary = i >= 5;
+        int unary = i < 2;
         if (!lhs || !sq_is_literal(lhs) || (unary ? *rhs != '\0' : !sq_is_literal(rhs))) {
             free(lhs);
             break;
         }
         cJSON *L = eval_literal(r, lhs), *R = unary ? NULL : eval_literal(r, rhs);
         switch (i) {
-        case 0: res = !val_eq(L, R); break;
-        case 1: res = val_eq(L, R); break;
+        case 0: res = !is_empty(L); break;
+        case 1: res = is_empty(L); break;
         case 2: res = val_num(L) > val_num(R); break;
         case 3: res = val_num(L) < val_num(R); break;
-        case 4:
+        case 4: res = !val_eq(L, R); break;
+        case 5: res = val_eq(L, R); break;
+        case 6:
             if (cJSON_IsArray(L)) {
                 res = 0;
                 const cJSON *e;
@@ -596,14 +539,12 @@ static int atom(rt_t *r, const char *s)
                 free(y);
             }
             break;
-        case 5: res = !is_empty(L); break;
-        case 6: res = is_empty(L); break;
         }
         cJSON_Delete(L);
         cJSON_Delete(R);
         free(lhs);
     }
-    if (res == -1 && sq_is_literal(a)) { /* IF $flag: truthiness */
+    if (res == -1 && sq_is_literal(a)) { /* IF {flag}: truthiness */
         cJSON *v = eval_literal(r, a);
         res = !is_empty(v);
         cJSON_Delete(v);
@@ -618,7 +559,7 @@ static int cond_literal(rt_t *r, const char *s)
     char *t = strdup(s);
     int any = 0, res = -1;
     for (char *part = t; part && res != 1;) {
-        const char *o = find_op(part, " OR ");
+        const char *o = find_op(part, " or ");
         char *next = NULL;
         if (o) {
             next = (char *)o + 4;
@@ -626,7 +567,7 @@ static int cond_literal(rt_t *r, const char *s)
         }
         int all = 1;
         for (char *q = part; q;) {
-            const char *a = find_op(q, " AND ");
+            const char *a = find_op(q, " and ");
             char *qn = NULL;
             if (a) {
                 qn = (char *)a + 5;
@@ -691,81 +632,12 @@ static char *skill_text(const char *name)
     return e && e->kind == VFS_DATA ? strndup(e->data, e->len) : NULL;
 }
 
-/* The tool's parameter schema (for building arguments from prose). */
-static char *tool_schema(const char *name)
-{
-    cJSON *all = tools_schema(), *t;
-    char *out = NULL;
-    cJSON_ArrayForEach(t, all)
-    {
-        cJSON *fn = cJSON_GetObjectItemCaseSensitive(t, "function");
-        cJSON *nm = cJSON_GetObjectItemCaseSensitive(fn, "name");
-        if (cJSON_IsString(nm) && !strcmp(nm->valuestring, name)) {
-            out = cJSON_PrintUnformatted(fn);
-            break;
-        }
-    }
-    cJSON_Delete(all);
-    return out ? out : strdup("{}");
-}
-
-static int st_exec(rt_t *r, sq_node *x)
-{
-    cJSON *args = NULL;
-    int abort = 0;
-    if (x->np) {
-        args = cJSON_CreateObject();
-        for (int i = 0; i < x->np && !abort; i++) {
-            cJSON_AddItemToObject(args, x->pk[i], eval(r, x->pv[i], &abort));
-        }
-    } else {
-        const char *a = strchr(x->b, '{'), *b = strrchr(x->b, '}');
-        if (a && b > a) {
-            char *p = strndup(a, (size_t)(b - a + 1));
-            args = p ? eval_payload(r, p) : NULL;
-            free(p);
-        }
-        const char *rest = x->b;
-        size_t w = strncasecmp(rest, "with payload", 12) == 0 ? 12 : strncasecmp(rest, "with parameters", 15) == 0 ? 15 : 0;
-        rest += w;
-        rest += strspn(rest, " :");
-        if (!args && *rest) { /* prose arguments: the LLM builds them from the tool's schema */
-            char *schema = tool_schema(x->a);
-            char *q = step_msg(r, 0,
-                               "[FWL] Build the JSON arguments for the tool %s for this request: %s\nThe tool: %s\nReply "
-                               "with only the JSON object of arguments.",
-                               x->a, x->b, schema);
-            char *ans = NULL;
-            int rc = q ? r->io->ask_llm(r->io->ud, q, &ans) : -1;
-            free(q);
-            free(schema);
-            if (rc == 1) {
-                return Q_ABORT;
-            }
-            args = ans ? parse_reply_json(ans) : NULL;
-            free(ans);
-        }
-        if (!args) {
-            args = cJSON_CreateObject();
-        }
-    }
-    if (abort) {
-        cJSON_Delete(args);
-        return Q_ABORT;
-    }
-    char *aj = cJSON_PrintUnformatted(args);
-    cJSON_Delete(args);
-    char *res = r->io->tool(r->io->ud, x->a, aj ? aj : "{}");
-    int failed = !res || strncmp(res, "ERROR: ", 7) == 0;
-    cJSON *v = res && !failed ? cJSON_Parse(res) : NULL;
-    set_var(r, "result", v ? v : cJSON_CreateString(res ? res : "ERROR: tool failed"));
-    note(r, "Tool %s %s returned: %.3000s", x->a, aj ? aj : "{}", res ? res : "ERROR: tool failed");
-    free(aj);
-    free(res);
-    return term_interrupted() ? Q_ABORT : failed ? Q_FAIL : Q_OK;
-}
-
 /* A step for the LLM (plain English or a skill): a turn with tools, shown to the user. */
+static const char *sq_trail(const char *s)
+{
+    return s + strspn(s, " 	.)");
+}
+
 static int llm_step(rt_t *r, const char *msg, char **reply)
 {
     char *out = NULL;
@@ -783,77 +655,109 @@ static int llm_step(rt_t *r, const char *msg, char **reply)
     return failed ? Q_FAIL : Q_OK;
 }
 
-static int st_instr(rt_t *r, sq_node *x)
+/* A value from text the model or a tool gave: JSON when it is JSON, else the text. */
+static cJSON *to_value(const char *t)
 {
-    char *m = step_msg(r, 1,
-                       "[FWL step, line %d] %s\nDo only this step now, using your tools if needed, then reply briefly "
-                       "with what you did or found. If it cannot be done, start your reply with FAILED: and say why.",
-                       x->line, x->a);
-    int rc = m ? llm_step(r, m, NULL) : Q_FAIL;
-    free(m);
-    return rc;
+    cJSON *v = t ? parse_reply_json(t) : NULL;
+    return v ? v : cJSON_CreateString(t ? t : "");
 }
 
-static int st_invoke(rt_t *r, sq_node *x)
+/*
+ * A sentence: the model carries it out, with its tools. The marks make it exact about what to
+ * use: a #skill's playbook is put in front of the model, a $tool or @agent is named as the one
+ * to use. The values the sentence fills (a {name} first mentioned here, one without a value yet,
+ * or one named "as {name}") are stored afterwards: what the one tool or agent it names returned,
+ * as it is, else what the model says the value is.
+ */
+static int st_instr(rt_t *r, sq_node *x)
 {
-    int abort = 0;
-    cJSON *ctx = x->b && *x->b ? eval(r, x->b, &abort) : NULL;
-    if (abort) {
-        return Q_ABORT;
+    char skills[8][65], tools[8][65], agents[8][65], *extra = NULL;
+    size_t el = 0;
+    int ns = sq_marks(x->a, '#', skills, 8), nt = sq_marks(x->a, '$', tools, 8), na = sq_marks(x->a, '@', agents, 8);
+    char line[400];
+    for (int i = 0; i < nt; i++) {
+        snprintf(line, sizeof(line), "\n$%s means your tool %s: use exactly that tool for it.", tools[i], tools[i]);
+        show_cat(&extra, &el, line);
     }
-    for (int i = 0; i < x->np; i++) { /* "with parameters:" lines join the context */
-        if (!cJSON_IsObject(ctx)) {
-            cJSON *o = cJSON_CreateObject();
-            if (ctx) {
-                cJSON_AddItemToObject(o, "context", ctx);
-            }
-            ctx = o;
+    for (int i = 0; i < na; i++) {
+        snprintf(line, sizeof(line), "\n@%s means the agent \"%s\": hand it that part with the delegate tool (agent: \"%s\"), "
+                                     "giving it everything it needs.", agents[i], agents[i], agents[i]);
+        show_cat(&extra, &el, line);
+    }
+    /* What this step fills: a value first named here, one that has no value yet, or one named "as {x}". */
+    char outs[8][65];
+    int no = 0;
+    for (const char *c = x->a; *c; c++) {
+        size_t n = sq_val(c);
+        char root[65];
+        if (!n || !sq_ref(c + 1, n - 2, root)) {
+            continue;
         }
-        cJSON_AddItemToObject(ctx, x->pk[i], eval(r, x->pv[i], &abort));
-    }
-    char *ct = val_text(ctx);
-    cJSON_Delete(ctx);
-    char *out = NULL;
-    const char *var = "skill_output";
-    int rc;
-    if (x->kind == SQ_DELEGATE) { /* the sub-agent sees only this context, not the conversation */
-        var = "agent_output";
-        int a = r->io->agent(r->io->ud, x->a, ct, &out);
-        rc = a > 0 ? Q_ABORT : a < 0 || !out || !strncmp(out, "ERROR:", 6) ? Q_FAIL : Q_OK;
-        if (rc != Q_ABORT) {
-            note(r, "DELEGATE TO %s -> %.300s", x->a, out ? out : "");
+        int fills = !cJSON_GetObjectItemCaseSensitive(r->vars, root);
+        for (int i = 0; i < x->np; i++) {
+            fills |= !strcmp(x->pk[i], root);
         }
-        free(ct);
-        goto done;
+        static const char *const as[] = {" as ", "call it ", "call them ", " into "};
+        for (int i = 0; i < 4 && strlen(root) == n - 2; i++) {
+            size_t al = strlen(as[i]);
+            fills |= (size_t)(c - x->a) >= al && !strncasecmp(c - al, as[i], al);
+        }
+        for (int i = 0; i < no; i++) {
+            fills &= strcmp(outs[i], root) != 0;
+        }
+        if (fills && no < 8) {
+            snprintf(outs[no++], 65, "%s", root);
+            snprintf(line, sizeof(line), "\n{%s} is what this step produces.", root);
+            show_cat(&extra, &el, line);
+        }
+        c += n - 1;
     }
-    char *sk = skill_text(x->a);
+    for (int i = 0; i < ns; i++) {
+        char *sk = skill_text(skills[i]);
+        snprintf(line, sizeof(line), "\n#%s means your skill %s: follow it for this step.\n--- skills/%s/SKILL.md ---\n",
+                 skills[i], skills[i], skills[i]);
+        show_cat(&extra, &el, line);
+        show_cat(&extra, &el, sk ? sk : "(skill not found)");
+        free(sk);
+    }
+    char *nv = named_values(r, x->a);
     char *m = step_msg(r, 1,
-                       "[FWL step, line %d] Follow the skill \"%s\" for this context, using your tools if needed. Reply "
-                       "with the result only (if it cannot be done, start with FAILED: and say why).\nContext: %s\n"
-                       "--- skills/%s/SKILL.md ---\n%s",
-                       x->line, x->a, ct, x->a, sk ? sk : "(skill not found)");
-    free(ct);
-    free(sk);
-    rc = m ? llm_step(r, m, &out) : Q_FAIL;
+                       "[FWL step, line %d] %s\nDo only this step now, using your tools if needed, then reply briefly "
+                       "with what you did or found. If it cannot be done, start your reply with FAILED: and say why.%s%s%s",
+                       x->line, x->a, *nv ? "\n" : "", nv, extra ? extra : "");
+    free(nv);
+    free(extra);
+    char *out = NULL;
+    int rc = m ? llm_step(r, m, &out) : Q_FAIL;
     free(m);
-done:
-    if (rc != Q_ABORT) {
-        cJSON *v = out ? cJSON_Parse(out) : NULL;
-        const char *o = out ? out + strspn(out, " \t\r\n") : "";
-        if (!v && !strncmp(o, "```", 3) && strchr(o, '\n')) { /* ```json fenced JSON */
-            char *in = strdup(strchr(o, '\n') + 1), *end = in ? strstr(in, "```") : NULL;
-            if (end) {
-                *end = '\0';
-                v = cJSON_Parse(in);
+    for (int i = 0; i < no && rc == Q_OK; i++) {
+        /* one tool or agent named: its own answer is the value, untouched by the model */
+        char *got = nt == 1 && no == 1 ? r->io->last_result(r->io->ud, tools[0])
+                    : !nt && na == 1 && no == 1 ? r->io->last_result(r->io->ud, "delegate") : NULL;
+        if (!got) {
+            char *q = NULL, *ans = NULL;
+            if (asprintf(&q, "[FWL] Work out the value of {%s} from the step you just did (line %d: %s). Reply with only "
+                             "the value: JSON for a list or for something with fields, otherwise just the text.",
+                         outs[i], x->line, x->a) < 0) {
+                q = NULL;
             }
-            free(in);
+            int a = q ? r->io->ask_llm(r->io->ud, q, &ans) : -1;
+            free(q);
+            if (a == 1) {
+                free(ans);
+                free(out);
+                return Q_ABORT;
+            }
+            got = ans;
         }
-        set_var(r, var, v ? v : cJSON_CreateString(out ? out : ""));
+        set_var(r, outs[i], to_value(got));
+        free(got);
     }
     free(out);
     return rc;
 }
 
+/* ASK: botcore itself shows the question and waits. With choices, only one of them is an answer. */
 static int st_ask(rt_t *r, sq_node *x)
 {
     int abort = 0;
@@ -862,93 +766,57 @@ static int st_ask(rt_t *r, sq_node *x)
         return Q_ABORT;
     }
     char *qt = show_text(q), *ans = NULL;
+    size_t ql = strlen(qt ? qt : "");
     cJSON_Delete(q);
-    if (r->io->ask_user(r->io->ud, qt, &ans) != 0) {
-        free(qt);
+    for (int i = 0; i < x->np; i++) {
+        char c[300];
+        snprintf(c, sizeof(c), "%s  %d) %.200s", i ? "\n" : "\n\n", i + 1, x->pk[i]);
+        show_cat(&qt, &ql, c);
+    }
+    const char *a = "";
+    for (int tries = 0;; tries++) {
         free(ans);
-        return Q_ABORT;
-    }
-    /* Botter's UI tags chat messages "[N] text": the answer is the text */
-    const char *a = ans ? ans : "";
-    if (a[0] == '[') {
-        const char *e = a + 1;
-        while (isdigit((unsigned char)*e)) {
-            e++;
+        ans = NULL;
+        if (r->io->ask_user(r->io->ud, tries ? "Please pick one of the choices: type its number or the word." : qt, &ans) != 0) {
+            free(qt);
+            free(ans);
+            return Q_ABORT;
         }
-        if (e > a + 1 && e[0] == ']' && e[1] == ' ') {
-            a = e + 2;
+        a = ans ? ans : "";
+        if (a[0] == '[') { /* Botter's UI tags chat messages "[N] text": the answer is the text */
+            const char *e = a + 1;
+            while (isdigit((unsigned char)*e)) {
+                e++;
+            }
+            a = e > a + 1 && e[0] == ']' && e[1] == ' ' ? e + 2 : a;
+        }
+        if (!x->np) {
+            break;
+        }
+        int pick = -1, starts = 0;
+        char *end;
+        long k = strtol(a, &end, 10);
+        if (end != a && !*sq_trail(end) && k >= 1 && k <= x->np) {
+            pick = (int)k - 1;
+        }
+        for (int i = 0; i < x->np && pick < 0; i++) {
+            if (!strcasecmp(x->pk[i], a)) {
+                pick = i;
+            } else if (*a && !strncasecmp(x->pk[i], a, strlen(a))) {
+                starts = starts ? -1 : i + 1; /* "y" for yes, unless two choices start that way */
+            }
+        }
+        pick = pick < 0 && starts > 0 ? starts - 1 : pick;
+        if (pick >= 0) {
+            a = x->pk[pick];
+            break;
         }
     }
-    set_var(r, "answer", cJSON_CreateString(a));
+    set_var(r, x->b ? x->b : "answer", cJSON_CreateString(a));
     note(r, "Asked the user: %.1500s\nThe user answered: %.1500s", qt, a);
     free(qt);
     free(ans);
     return Q_OK;
-}
-
-static cJSON *save_source(rt_t *r, const char *src, int *abort)
-{
-    static const char *const implicit[] = {"result", "skill_output", "answer", "agent_output"};
-    for (int i = 0; i < 4; i++) {
-        if (!strcmp(src, implicit[i])) {
-            cJSON *v = cJSON_GetObjectItemCaseSensitive(r->vars, implicit[i]);
-            return v ? cJSON_Duplicate(v, 1) : cJSON_CreateNull();
-        }
-    }
-    return eval(r, src, abort);
-}
-
-static int mkdir_parents(char *path)
-{
-    for (char *p = path + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            int rc = mkdir(path, 0755);
-            *p = '/';
-            if (rc != 0 && errno != EEXIST) {
-                return -1;
-            }
-        }
-    }
-    return 0;
-}
-
-static int st_save_file(rt_t *r, sq_node *x)
-{
-    int abort = 0;
-    char res[PATH_MAX], m[PATH_MAX + 100];
-    int inside = 0;
-    cJSON *v = save_source(r, x->a, &abort);
-    if (abort) {
-        return Q_ABORT;
-    }
-    if (guard_plan()) {
-        r->io->status(r->io->ud, "(Plan mode: not saving files)");
-        cJSON_Delete(v);
-        return Q_FAIL;
-    }
-    if (guard_resolve(x->b, res, &inside) != 0 || !inside) {
-        snprintf(m, sizeof(m), "(SAVE TO FILE: %s is not inside the working directory)", x->b);
-        r->io->status(r->io->ud, m);
-        cJSON_Delete(v);
-        return Q_FAIL;
-    }
-    char *text = cJSON_IsString(v) ? strdup(v->valuestring) : cJSON_Print(v);
-    cJSON_Delete(v);
-    int ok = 0;
-    if (text && mkdir_parents(res) == 0) {
-        int fd = open(res, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
-        if (fd >= 0) {
-            size_t n = strlen(text);
-            ok = write(fd, text, n) == (ssize_t)n && write(fd, "\n", 1) == 1;
-            close(fd);
-        }
-    }
-    free(text);
-    snprintf(m, sizeof(m), ok ? "  · Saved %s" : "  · Could not save %s", x->b);
-    r->io->status(r->io->ud, m);
-    note(r, "%s %s", ok ? "Saved" : "Could not save", x->b);
-    return ok ? Q_OK : Q_FAIL;
 }
 
 static int st_return(rt_t *r, sq_node *x)
@@ -978,35 +846,10 @@ static int run_node(rt_t *r, sq_node *x)
         snprintf(m, sizeof(m), "Step %d · %s", x->n, x->a ? x->a : "");
         r->io->status(r->io->ud, m);
         return Q_OK;
-    case SQ_LOAD:
-        return Q_OK; /* skills are read when INVOKEd */
     case SQ_INSTR:
         return st_instr(r, x);
-    case SQ_EXEC:
-        return st_exec(r, x);
-    case SQ_INVOKE:
-    case SQ_DELEGATE:
-        return st_invoke(r, x);
     case SQ_ASK:
         return st_ask(r, x);
-    case SQ_SAVE_VAR: {
-        cJSON *v = save_source(r, x->a, &abort);
-        if (abort) {
-            return Q_ABORT;
-        }
-        set_var(r, x->b, v);
-        return Q_OK;
-    }
-    case SQ_SAVE_FILE:
-        return st_save_file(r, x);
-    case SQ_SET: {
-        cJSON *v = eval(r, x->b, &abort);
-        if (abort) {
-            return Q_ABORT;
-        }
-        set_var(r, x->a, v);
-        return Q_OK;
-    }
     case SQ_IF:
         for (int i = 0; i < x->nbr; i++) {
             int take = !x->br[i].cond || cond(r, x->br[i].cond, &abort);
@@ -1092,8 +935,6 @@ static int run_node(rt_t *r, sq_node *x)
         }
         note(r, "The steps retried on line %d still failed after %d tries.", x->line, x->n);
         return r->retry ? Q_FAIL : Q_OK;
-    case SQ_PAR: /* independent steps: run one after another */
-        return run_list(r, &x->body);
     case SQ_RETURN:
         return st_return(r, x);
     }

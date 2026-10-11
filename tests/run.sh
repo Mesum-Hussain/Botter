@@ -78,66 +78,62 @@ section "Packaging and FWL"
 "$PACK" check "$ROOT" "$CORE" >"$T/self.log" 2>&1
 check "botter's own project builds with 0 warnings" "$T/self.log" "check passed.* 0 warning"
 
-# FWL (FLOW.md): a valid flow compiles; each kind of mistake is an error with its line and stops the build
+# FWL (FLOW.fwl): a valid flow compiles; each kind of mistake is an error with its line and stops the build
 mkagent "$T/flow_good"
 mkdir -p "$T/flow_good/skills/pitching"
 printf -- '---\nname: pitching\ndescription: p\n---\n' >"$T/flow_good/skills/pitching/SKILL.md"
-cp "$TESTS/fwl_good.md" "$T/flow_good/FLOW.md"
+cp "$TESTS/good.fwl" "$T/flow_good/FLOW.fwl"
 "$PACK" check "$T/flow_good" "$CORE" >"$T/lint.log" 2>&1
-check_not "FWL: a valid FLOW.md has no errors or warnings" "$T/lint.log" "FLOW.md"
-# sq_bad NAME OLD NEW PATTERN: fwl_good.md with OLD replaced by NEW must report PATTERN
+check_not "FWL: a valid FLOW.fwl has no errors or warnings" "$T/lint.log" "FLOW.fwl"
+# sq_bad NAME OLD NEW PATTERN: good.fwl with OLD replaced by NEW must report PATTERN
 sq_bad() {
     rm -rf "$T/flow_bad" "$T/flow_bad.bot"
     cp -r "$T/flow_good" "$T/flow_bad"
     python3 -c 'import sys;p=sys.argv[1];s=open(p).read();assert sys.argv[2] in s;open(p,"w").write(s.replace(sys.argv[2],sys.argv[3],1))' \
-        "$T/flow_bad/FLOW.md" "$2" "$3"
+        "$T/flow_bad/FLOW.fwl" "$2" "$3"
     "$PACK" build "$T/flow_bad" "$CORE" "$T/flow_bad.bot" >"$T/lint.log" 2>&1
     check "FWL: $1" "$T/lint.log" "$4"
 }
-sq_bad "capital pseudo-code is not a statement" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not an FWL statement'
-sq_bad "placeholder text in a tool argument is an error" '{ "path": $folder }' '{ "path": "TODO" }' 'error: "TODO" is placeholder text'
-sq_bad "... for left-out arguments is an error" '{ "path": $folder }' '{ "path": $folder, ... }' 'error: "..." in a tool'"'"'s arguments'
+sq_bad "capital pseudo-code is not FWL" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not FWL: only ASK, IF, ELSE'
 sq_bad "BREAK is not FWL" 'Skip it.' 'BREAK' 'error: FWL has no BREAK'
-sq_bad "keyword typo is an error with its line" 'INVOKE SKILL' 'INVOCATE SKILL' 'FLOW.md:16: error: unknown keyword INVOCATE; did you mean INVOKE'
+sq_bad "keyword typo is an error with its line" 'RETRY 2 times:' 'RETRI 2 times:' 'FLOW.fwl:11: error: unknown keyword RETRI; did you mean RETRY'
 if [ -e "$T/flow_bad.bot" ]; then fail "FWL: a flow with errors is not built"; else pass "FWL: a flow with errors is not built"; fi
-sq_bad "unknown tool" '$fs_read' '$fs_reed' 'no such tool'
-sq_bad "skill used without IMPORT" 'INVOKE SKILL $pitching' 'INVOKE SKILL $other' 'INVOKE SKILL \$other: list \$other under IMPORT:'
-sq_bad "IMPORT names a skill that exists" '    $pitching' '    $pitching
-    $ghost' 'IMPORT \$ghost: there is no skills/ghost/SKILL.md'
-sq_bad "LOAD is gone" 'IMPORT:' 'LOAD SKILL "pitching"
-IMPORT:' 'FWL has no LOAD: list the agent.s skills under IMPORT:'
-sq_bad "backtick names are gone" '{ "path": $folder }' '{ "path": `folder` }' 'write \$folder, not `folder`: FWL names start with \$'
-sq_bad "a quoted skill name is an error" 'INVOKE SKILL $pitching' 'INVOKE SKILL "pitching"' 'INVOKE reads: INVOKE SKILL \$name'
-sq_bad "variable used before it is set" '$folder }' '$fodler }' '\$fodler is used before it is set'
-sq_bad "loop variable used after its loop" 'RETURN "Read "' 'RETURN $f.name + "Read "' 'only exists inside its FOR EACH'
-sq_bad "END lines are gone" 'RETURN "Read "' 'END FOR
-RETURN "Read "' 'FLOW.md:23: error: FWL has no END FOR line: a block ends where its indentation ends'
+sq_bad "a \$tool must exist" '$fs_read' '$fs_reed' 'FLOW.fwl:12: error: \$fs_reed: no such tool'
+sq_bad "a #skill must exist" '#pitching' '#ghost' '#ghost: no such skill \(there is no skills/ghost/SKILL.md\)'
+sq_bad "an @agent must exist" 'Skip it.' 'Ask @nobody about it.' '@nobody: no such agent'
+sq_bad "marks inside quotes are only text" 'Skip it.' 'Tell the user "mail @nobody about #ghost for $5".' 'wrote .*flow_bad.bot'
+sq_bad "the old statements say what to write instead" 'Skip it.' 'EXECUTE tool $fs_read' 'FWL has no EXECUTE: say it in a sentence that names the tool'
+sq_bad "nothing is imported" 'STEP 1: GATHER' 'IMPORT:
+STEP 1: GATHER' 'FWL has no IMPORT: nothing is imported any more'
+sq_bad "ELIF is ELSE IF" '    ELSE IF {f} is empty:' '    ELIF {f} is empty:' 'FWL has no ELIF: write ELSE IF'
+sq_bad "backtick names are gone" 'List {folder} with' 'List `folder` with' 'write \{folder\}, not `folder`'
+sq_bad "a value read before anything fills it" 'IF {f.name} is "notes.txt":' 'IF {g.name} is "notes.txt":' 'FLOW.fwl:6: error: \{g\} has no value here'
+sq_bad "loop value used after its loop" 'RETURN "Read' 'RETURN "{f.name} Read' 'only exists inside its FOR EACH'
+sq_bad "a value filled and never used is a warning" 'Skip it.' 'Skip it and call the reason {reson}.' 'FLOW.fwl:9: warning: \{reson\} is filled here and never used again'
+sq_bad "END lines are gone" 'RETURN "Read' 'END FOR
+RETURN "Read' 'FLOW.fwl:13: error: FWL has no END line: a block ends where its indentation ends'
 sq_bad "THEN is gone" '"notes.txt":' '"notes.txt" THEN' 'IF reads: IF <condition>:  \(no THEN'
 sq_bad "IF without its colon" '"notes.txt":' '"notes.txt"' 'IF reads: IF <condition>:'
-sq_bad "a block with nothing indented under it" '            EXECUTE tool $fs_read' 'EXECUTE tool $fs_read' 'FLOW.md:20: error: this line opens a block, but nothing is indented under it'
+sq_bad "a block with nothing indented under it" '            Read {f.name}' 'Read {f.name}' 'FLOW.fwl:11: error: this line opens a block, but nothing is indented under it'
 sq_bad "indentation that matches no block" '        Skip it.' '        Skip it.
-      Skip it again.' 'FLOW.md:19: error: this line.s indentation matches no block'
-sq_bad "indentation with no block above it" '2. SAVE answer' '    2. SAVE answer' 'FLOW.md:10: error: this line is indented deeper than the lines around it'
-sq_bad "ELSE lines up with its IF" '    ELSE:' '        ELSE:' 'ELSE lines up with its IF \(the IF on line 15\)'
+      Skip it again.' 'FLOW.fwl:10: error: this line.s indentation matches no block'
+sq_bad "indentation with no block above it" 'List {folder}' '    List {folder}' 'FLOW.fwl:3: error: this line is indented deeper than the lines around it'
+sq_bad "ELSE lines up with its IF" '    ELSE:' '        ELSE:' 'ELSE lines up with its IF \(the IF on line 6\)'
 sq_bad "tabs are not indentation" '        Skip it.' '	Skip it.' 'indent with spaces, not tabs'
-sq_bad "CONNECT points to config.json" 'IMPORT:' 'CONNECT mcp://x AS y
-IMPORT:' 'FWL has no CONNECT: list MCP servers in config.json'
-sq_bad "the file must start with \`\`\`fwl" '```fwl
----' '---' 'starts with ```fwl on its first line; the frontmatter goes inside the block'
-sq_bad "the old name gets a hint" '```fwl
----' '```owl
----' 'Owl is now called FWL: start FLOW.md with ```fwl'
-sq_bad "the block must be closed" 'RETURN "Read " + $files.length + " files"
-```' 'RETURN "Read " + $files.length + " files"' 'never closed: end the file with ```'
-sq_bad "nothing may follow the block" 'RETURN "Read " + $files.length + " files"
-```' 'RETURN "Read " + $files.length + " files"
-```
-More text' 'nothing may follow the closing ```'
-sq_bad "Markdown step headings are rejected" 'STEP 1: GATHER' '## STEP 1: GATHER' 'write the step label as FWL, without #: STEP n: NAME'
-sq_bad "other Markdown is rejected" 'IMPORT:' '# My flow
-IMPORT:' 'Markdown \(headings, <!-- comments -->\) is not part of FWL'
+sq_bad "CONNECT points to config.json" 'STEP 1: GATHER' 'CONNECT mcp://x AS y
+STEP 1: GATHER' 'FWL has no CONNECT: list MCP servers in config.json'
+sq_bad "no Markdown fence" 'STEP 1: GATHER' '```fwl
+STEP 1: GATHER' 'FLOW.fwl is plain FWL: no ``` fence'
+sq_bad "Markdown headings are rejected" 'STEP 1: GATHER' '## STEP 1: GATHER' 'Markdown .* is not part of FWL'
 sq_bad "STEP labels are numbered in order" 'STEP 2: WORK' 'STEP 3: WORK' 'warning: STEP 3 follows STEP 1'
-sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.md:18: warning: write 'if' as an FWL statement"
+sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.fwl:9: warning: write 'if' as FWL structure"
+sq_bad "ASK choices come at least in twos" '"Which folder?" into' '"Which folder?" [one] into' 'ASK \[...\] needs at least two choices'
+sq_bad "ASK USER is just ASK" 'ASK "Which folder?"' 'ASK USER "Which folder?"' 'ASK reads: ASK "question"'
+sq_bad "a WHILE wants a bound" 'RETRY 2 times:' 'WHILE {f} is not empty:' 'warning: give the WHILE loop a bound'
+mv "$T/flow_good/FLOW.fwl" "$T/flow_good/FLOW.md"
+build "$T/flow_good" "$T/flow_bad.bot"
+check "FWL: an old FLOW.md is reported" "$T/build.log" "FLOW.md: the flow is now FLOW.fwl"
+mv "$T/flow_good/FLOW.md" "$T/flow_good/FLOW.fwl"
 
 # config.json: checked by the build, shown by list, --version, the start-up line and the system prompt
 mkagent "$T/meta" '{"name": "meta-agent", "display_name": "Meta Agent", "version": "1.2.3", "description": "Tests metadata."}'
@@ -170,7 +166,7 @@ check "config.json: an old agent.json is reported" "$T/build.log" "agent.json is
 mkagent "$T/flow_old"
 printf '```sqnc\nRETURN "x"\n```\n' >"$T/flow_old/SQNC.md"
 "$PACK" check "$T/flow_old" "$CORE" >"$T/build.log" 2>&1
-check "an old SQNC.md is reported" "$T/build.log" "SQNC.md is now FLOW.md"
+check "an old SQNC.md is reported" "$T/build.log" "SQNC.md: the flow is now FLOW.fwl"
 # skills / tools lists choose what is compiled in
 mkagent "$T/pick" '{"name": "pick", "version": "1.0.0", "description": "d", "skills": ["keep"], "tools": ["tkeep"], "requires": ["python3"]}'
 mkdir -p "$T/pick/skills/keep" "$T/pick/skills/drop" "$T/pick/tools/bin" "$T/pick/tools/doc"
@@ -229,7 +225,7 @@ echo comment-ok"
 drive "$T/on.bot" "$T/ws"
 check "classifier: an apostrophe in a # comment does not make a command unsafe" "$T/rec/tool.txt" "comment-ok"
 check "online agent: system prompt says internet access" "$T/rec/system.txt" "You have internet access"
-check_not "no FLOW.md: no flow instruction in the system prompt" "$T/rec/system.txt" "driven by its FLOW.md"
+check_not "no FLOW.fwl: no flow instruction in the system prompt" "$T/rec/system.txt" "driven by its FLOW.fwl"
 
 shell_call "python3 -c \"import socket;socket.create_connection(('127.0.0.1',$PORT));print('NET-OK')\""
 drive "$T/on.bot" "$T/ws"
@@ -328,13 +324,13 @@ drive "$T/skilled.bot" "$T/ws"
 check "system prompt lists skills with their frontmatter descriptions" "$T/rec/system.txt" "skills/pitching/SKILL.md: Write one specific idea per lead"
 
 mkagent "$T/flowagent"
-cp -r "$T/flow_good/FLOW.md" "$T/flow_good/skills" "$T/flowagent/"
+cp -r "$T/flow_good/FLOW.fwl" "$T/flow_good/skills" "$T/flowagent/"
 build "$T/flowagent" "$T/flow.bot"
 stub_start --text /dev/null
 (cd "$T/ws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nhello after the flow\n/exit\n' "$PORT" |
     timeout 60 "$T/flow.bot" >"$T/out" 2>&1)
-check "FLOW.md present: the flow starts by itself" "$T/out" "Which folder\\?"
-check "FLOW.md present: system prompt explains the [FWL] steps" "$T/rec/system.txt" "session is driven by its FLOW.md flow"
+check "FLOW.fwl present: the flow starts by itself" "$T/out" "Which folder\\?"
+check "FLOW.fwl present: system prompt explains the [FWL] steps" "$T/rec/system.txt" "session is driven by its FLOW.fwl flow"
 
 stub_start --text /dev/null
 drive "$T/meta.bot" "$T/ws"
@@ -345,29 +341,32 @@ build "$T/needcmd" "$T/needcmd.bot"
 drive "$T/needcmd.bot" "$T/ws"
 check "config.json requires: missing programs are reported at start" "$T/out" "not installed here: definitely-not-installed-cmd"
 
-# FWL interpreter: botcore runs the structure; only prose goes to the LLM
+# FWL interpreter: botcore follows the structure; sentences and judgements go to the LLM
 mkagent "$T/sqagent"
-cp "$TESTS/fwl_run.md" "$T/sqagent/FLOW.md"
+cp "$TESTS/run.fwl" "$T/sqagent/FLOW.fwl"
 build "$T/sqagent" "$T/sq.bot"
+check_not "FWL: the interpreter test flow builds" "$T/build.log" "error"
 sq_drive() {
     rm -rf "$T/sqws"; mkdir -p "$T/sqws"
-    (cd "$T/sqws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nAlice\n/exit\n' "$PORT" |
+    (cd "$T/sqws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nAlice\npurple\n2\n/exit\n' "$PORT" |
         timeout 60 "$T/sq.bot" >"$T/out" 2>&1)
 }
 stub_start --fwl yes
 sq_drive
-check "FWL: ASK USER shows the question" "$T/out" "What is your name\\?"
-check "FWL: RETURN joins the answer, a prose decision and .length" "$T/out" "Hi Alice, mood happy, 3 items"
+check "FWL: ASK shows the question" "$T/out" "What is your name\\?"
+check "FWL: RETURN fills in values, a prose decision, .length, a choice and a tool's own output" "$T/out" "Hi Alice, mood happy, 3 items, green, tool-ran"
 check "FWL: decisions get the history as text, no tool calls (Gemini answers those with a call)" "$T/rec/decide_hist.txt" "tool messages: 0, tools offered: 0"
 check "FWL: STEP headings are shown" "$T/out" "Step 2 · WORK"
-check "FWL: EXECUTE runs the tool itself" "$T/out" "Running a command"
+check "FWL: a sentence that names a tool runs it" "$T/out" "Running a command"
+check "FWL: the model is told which tool \$name means" "$T/rec/user_all.txt" 'shell_exec means your tool shell_exec: use exactly that tool'
+check "FWL: and which value the step produces" "$T/rec/user_all.txt" '\{out\} is what this step produces'
 check "FWL: RETRY repeats a failing step" "$T/out" "Retrying \\(2 of 2\\)"
-check "FWL: SAVE TO FILE writes the value" "$T/sqws/out/items.json" '"b"'
-n=$(grep -c "" "$T/rec/fwl.txt" 2>/dev/null)
-if [ "$n" = 2 ]; then pass "FWL: only prose reaches the LLM (2 calls for the whole flow)"; else fail "FWL: only prose reaches the LLM (2 calls for the whole flow)" "LLM calls: $n"; fi
-check "FWL: FOR EACH + IF run the plain-English step for the matching item" "$T/rec/fwl.txt" "line 16\\] Mention the letter"
-check "FWL: a prose condition is decided by the LLM" "$T/rec/fwl.txt" 'Decide whether this condition is true right now: the user \$name seems happy'
-check "FWL: a decision shows the variables it names in full" "$T/rec/decide.txt" '^\$name = Alice'
+check "FWL: ASK with choices lists them" "$T/out" "1\\) red"
+check "FWL: an answer that is no choice is asked again" "$T/out" "Please pick one of the choices"
+check "FWL: FOR EACH + IF run the sentence for the matching item" "$T/rec/fwl.txt" "line 12\\] Mention the letter"
+check_not "FWL: a comparison of values is decided without the LLM" "$T/rec/fwl.txt" 'Decide whether this condition is true right now: \{it\}'
+check "FWL: a condition that needs judgement is decided by the LLM" "$T/rec/fwl.txt" 'Decide whether this condition is true right now: the user \{name\} seems happy'
+check "FWL: a decision shows the values it names in full" "$T/rec/decide.txt" '^\{name\} = Alice'
 stub_start --fwl no
 sq_drive
 check "FWL: the LLM's 'no' takes the ELSE branch" "$T/out" "Hi Alice, mood sad"
@@ -377,13 +376,13 @@ mkagent "$T/team"
 mkdir -p "$T/team/agents/helper"
 printf -- '---\ndescription: Answers pings.\n---\nYou are ZETA, the helper.\n' >"$T/team/agents/helper/agent.md"
 cp -r "$T/team" "$T/team2"
-printf '```fwl\n---\nspec-version: "fwl-1"\ntitle: "Team"\n---\nDELEGATE TO @helper USING context "ping"\nSAVE agent_output INTO VARIABLE $got\nRETURN "Got: " + $got\n```\n' >"$T/team/FLOW.md"
+printf 'Ask @helper this: "ping". Keep its answer as {got}.\nRETURN "Got: {got}"\n' >"$T/team/FLOW.fwl"
 build "$T/team" "$T/team.bot"
 check_not "sub-agents: a flow that delegates builds" "$T/build.log" "error"
 echo "pong-from-sub" >"$T/pong"
-stub_start --text "$T/pong"
+stub_start --fwl yes --text "$T/pong"
 drive "$T/team.bot" "$T/ws"
-check "sub-agents: DELEGATE TO returns the sub-agent's reply" "$T/out" "Got: pong-from-sub"
+check "sub-agents: a sentence that names @agent gets the sub-agent's own reply" "$T/out" "Got: pong-from-sub"
 check "sub-agents: the sub-agent runs on its own persona" "$T/rec/subsystem.txt" "You are ZETA, the helper"
 check_not "sub-agents: the frontmatter is not part of the persona" "$T/rec/subsystem.txt" "description: Answers"
 check "sub-agents: it sees only the context it was given" "$T/rec/subuser.txt" "^ping"
@@ -396,9 +395,9 @@ drive "$T/team2.bot" "$T/ws"
 check "sub-agents: the model can delegate by itself" "$T/out" "Handing work to another agent"
 check "sub-agents: the task reaches the sub-agent" "$T/rec/subuser.txt" "^ping2"
 check "sub-agents: its result comes back as the tool result" "$T/rec/tool.txt" "^done"
-sed -i 's/@helper/@nobody/' "$T/team/FLOW.md"
+sed -i 's/@helper/@nobody/' "$T/team/FLOW.fwl"
 build "$T/team" "$T/team_bad.bot"
-check "sub-agents: delegating to a missing one is an error" "$T/build.log" 'DELEGATE TO @nobody: no such agent \(a sub-agent agents/nobody/agent.md'
+check "sub-agents: delegating to a missing one is an error" "$T/build.log" '@nobody: no such agent \(a sub-agent agents/nobody/agent.md'
 echo "You are a helper." >"$T/team2/agents/helper/agent.md"
 build "$T/team2" "$T/team_bad.bot"
 check "sub-agents: one without a description is an error" "$T/build.log" 'agents/helper/agent.md: start it with a frontmatter'
@@ -412,12 +411,12 @@ mkagent "$T/net" "{\"name\": \"net\", \"version\": \"1.0.0\", \"description\": \
   \"mcp\": {\"new\": {\"url\": \"http://127.0.0.1:$RPORT/mcp-new\", \"token\": \"MCP_TOKEN\"},
             \"old\": {\"url\": \"http://127.0.0.1:$RPORT/mcp-old\", \"token\": \"MCP_TOKEN\"}},
   \"agents\": {\"peer\": {\"url\": \"http://127.0.0.1:$RPORT/peer\", \"token\": \"PEER_TOKEN\", \"description\": \"Says things back.\"}}}"
-printf '```fwl\n---\nspec-version: "fwl-1"\ntitle: "Net"\n---\nEXECUTE tool $new_echo with payload { "text": "hi" }\nSAVE result INTO VARIABLE $a\nEXECUTE tool $old_echo with payload { "text": "yo" }\nSAVE result INTO VARIABLE $b\nDELEGATE TO @peer USING context "ping"\nRETURN $a + " | " + $b + " | " + $agent_output\n```\n' >"$T/net/FLOW.md"
+printf 'Echo with $new_echo, passing {"text": "hi"}, and keep its answer as {a}.\nEcho with $old_echo, passing {"text": "yo"}, and keep its answer as {b}.\nAsk @peer this: "ping". Keep its answer as {c}.\nRETURN "{a} | {b} | {c}"\n' >"$T/net/FLOW.fwl"
 build "$T/net" "$T/net.bot"
 check_not "MCP/A2A: a flow that uses an MCP tool and a remote agent builds" "$T/build.log" "error"
 rm -rf "$T/netws"; mkdir -p "$T/netws"
 printf 'MCP_TOKEN=tok-mcp\nexport PEER_TOKEN="tok-a2a"\n' >"$T/netws/.env"
-stub_start --text /dev/null
+stub_start --fwl yes
 drive "$T/net.bot" "$T/netws"
 check "MCP: the servers' tools are listed at start" "$T/out" "MCP new: 1 tool"
 check "MCP + A2A: tools on both kinds of server and the remote agent answer" "$T/out" "echo:hi \\| echo:yo \\| remote says: ping"
@@ -477,7 +476,7 @@ send({"method": "session/cancel", "params": {"sessionId": sid}})
 print(json.dumps(until(2)), "after %.1fs" % (time.time() - t))
 PY
 check "ACP: session/cancel stops a running turn" "$T/acp.log" '"stopReason": "cancelled".* after [0-2]\.'
-stub_start --text "$T/said"
+stub_start --fwl yes --text "$T/said"
 printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\nA2A_TOKEN=open-sesame\n' "$PORT" >"$T/sws/.env"
 APORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 (cd "$T/sws" && exec "$T/served.bot" --a2a "$APORT" >"$T/a2a.out" 2>&1) &
@@ -515,7 +514,7 @@ check "A2A: there are no tasks to get" "$T/a2a.log" '^task .*"code": -32001'
 # one Botter agent calling another
 mkagent "$T/caller" "{\"name\": \"caller\", \"version\": \"1.0.0\", \"description\": \"Calls the served agent.\",
   \"agents\": {\"served\": {\"url\": \"http://127.0.0.1:$APORT\", \"token\": \"SERVED_TOKEN\"}}}"
-printf '```fwl\n---\nspec-version: "fwl-1"\ntitle: "Caller"\n---\nDELEGATE TO @served USING context "are you there?"\nRETURN "Served said: " + $agent_output\n```\n' >"$T/caller/FLOW.md"
+printf 'Ask @served this: "are you there?". Keep its answer as {reply}.\nRETURN "Served said: {reply}"\n' >"$T/caller/FLOW.fwl"
 build "$T/caller" "$T/caller.bot"
 rm -rf "$T/cws"; mkdir -p "$T/cws"
 echo "SERVED_TOKEN=open-sesame" >"$T/cws/.env"
@@ -526,17 +525,17 @@ printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$
 (cd "$T/sws" && timeout 10 "$T/served.bot" --a2a "0.0.0.0:$APORT" >"$T/a2a.out" 2>&1)
 check "A2A: listening for other machines without a token is refused" "$T/a2a.out" "put A2A_TOKEN=<secret> in .env first"
 
-# fwl_review: the LLM's logic check of a project's FLOW.md (builder agents only)
+# fwl_review: the LLM's logic check of a project's FLOW.fwl (builder agents only)
 mkagent "$T/builder" '{"builder": true}'
 build "$T/builder" "$T/builder.bot"
 mkdir -p "$T/revws"
-cp "$TESTS/fwl_run.md" "$T/revws/FLOW.md"
+cp "$TESTS/run.fwl" "$T/revws/FLOW.fwl"
 echo "An agent that greets people." >"$T/revws/agent.md"
 tool_call fwl_review '{}'
 drive "$T/builder.bot" "$T/revws"
 check "fwl_review: the verdict reaches the agent" "$T/rec/tool.txt" '"makes_sense":false'
 check "fwl_review: the report says why and what to do instead" "$T/rec/tool.txt" "why: reads a file that is never written"
-check "fwl_review: the reviewer gets FLOW.md with line numbers and agent.md" "$T/rec/review.txt" "An agent that greets people"
+check "fwl_review: the reviewer gets FLOW.fwl with line numbers and agent.md" "$T/rec/review.txt" "An agent that greets people"
 tool_call fwl_review '{}'
 drive "$T/on.bot" "$T/revws"
 check "fwl_review: not available to ordinary agents" "$T/rec/tool.txt" "unknown tool 'fwl_review'"

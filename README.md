@@ -15,7 +15,7 @@ Here's an agent:
 ```
 lead-outreach/
   agent.md       who it is
-  FLOW.md        what it does
+  FLOW.fwl       what it does, step by step
   skills/        how it does it
   tools/         the jobs it can't do with words alone
 ```
@@ -36,7 +36,7 @@ Markdown is where you start, not where the agent's power stops. The same single 
 
 | You want | Botter gives you |
 |---|---|
-| Multi-step work that runs the same way every time | **FWL** flows: loops, branches, retries and variables, run by an interpreter, with the model called only for judgement |
+| Multi-step work that happens in order, every time | **FWL** flows: plain sentences inside loops, branches and retries that an interpreter follows exactly |
 | A team, not one agent | **Sub-agents**, each with its own persona, handed work by the flow or by the main agent |
 | Real capabilities | **Tools** in any language, plus file, shell and scheduling tools built in |
 | Other people's tools | **MCP** servers, called over HTTPS with nothing started locally |
@@ -101,7 +101,7 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 | File | What it is | Who can write it |
 |---|---|---|
 | `agent.md` | Persona and rules: who the agent is, what it must never do | Anyone |
-| `FLOW.md` | The program, written in **FWL** | Anyone |
+| `FLOW.fwl` | What the agent does, step by step, in **FWL** | Anyone |
 | `skills/<name>/SKILL.md` | Playbooks for specific tasks | Anyone |
 | `agents/<name>/agent.md` | Sub-agents: a persona of their own for one kind of job | Anyone |
 | `tools/` | Executables plus a JSON description of each | Anyone who can code a little |
@@ -109,7 +109,7 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 **Skills** follow the `SKILL.md` convention. The agent sees a one-line summary of each and opens the full playbook only when the task calls for it, so it can carry dozens without stuffing its context window.
 
-**Sub-agents** live in the same file as the agent. Each gets its own persona and a fresh conversation, does one job with the agent's tools, and hands back only its result. A flow gives one work with `DELEGATE TO @researcher USING context $lead`, and the agent can also delegate on its own. No second process, no second binary.
+**Sub-agents** live in the same file as the agent. Each gets its own persona and a fresh conversation, does one job with the agent's tools, and hands back only its result. A flow gives one work by naming it in a sentence, like `Have @researcher look into {lead}.`, and the agent can also delegate on its own. No second process, no second binary.
 
 **Tools** are any executable at all: Python, bash, Go, Rust, C. A tool gets one JSON object on stdin and prints its answer. That's the whole protocol. A tool brings its own needs with it, so a Python tool needs Python on the box and a static binary needs nothing. Users never see tool names or JSON. They see *"Searching for leads…"*.
 
@@ -118,7 +118,7 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 Most agent runtimes reach the outside world by launching things: a tool server here, a bridge there. A Botter agent is still one process.
 
 - **MCP.** Name a server's URL in `config.json` and its tools join the agent's own. Each call is one HTTPS request from the agent's built-in client, using the stateless 2026 revision of the protocol, and falling back to the older session handshake for servers that still want it. Nothing is installed and nothing is started.
-- **A2A, calling out.** List another agent's URL under `agents` and a flow hands it work with `DELEGATE TO @billing`, exactly like a sub-agent.
+- **A2A, calling out.** List another agent's URL under `agents` and a flow hands it work by naming it `@billing` in a sentence, exactly like a sub-agent.
 - **A2A, being called.** `./myagent.bot --a2a 8080` publishes an agent card and answers other agents. This is the only mode that listens, and only when you ask for it.
 - **ACP.** `./myagent.bot --acp` is what an editor such as Zed runs to put the agent in its sidebar, with tool calls and permission prompts shown in the editor.
 
@@ -131,75 +131,77 @@ Most agent runtimes reach the outside world by launching things: a tool server h
 
 `token` is only a name, never the secret itself. The value comes from the agent's sealed vault, or from a line of that name in a `.env` file next to where the agent runs. All four protocols together add about 16 KB to the binary.
 
-## FWL: pseudocode that actually runs
+## FWL: plain English that runs the same way every time
 
 Prompts are a terrible way to write a program. You say *"first do X, then Y, and if Z then stop"*, and the model nods and does something adjacent.
 
-So Botter has a language. **FWL** (the Flow Writeup Language) is English for the steps, CAPITALS for the keywords, `$names` for the data and indentation for the blocks. A human can review it in a pull request. A model can read it without a manual.
+So Botter has a language. **FWL** (the Flow Writeup Language) is plain sentences inside a little structure. Only the structure is in CAPITALS; everything else is English.
 
-```fwl
-IMPORT:
-    $pitching
+```
+STEP 1: Find leads
+ASK "What do you sell, and to whom?" into {target}
+RETRY 2 times:
+    Find leads for {target} with $scrape_leads and keep them as {leads}.
+IF {leads} is empty:
+    RETURN "No leads found. Try a broader search."
 
-STEP 1: GATHER
-ASK USER "What do you sell, and to which kind of clients?"
-SAVE answer INTO VARIABLE $target
-RETRY UP TO 2 TIMES:
-    EXECUTE tool $scrape_leads with payload { "query": $target, "limit": 20 }
-SAVE result INTO VARIABLE $leads
-IF $leads IS EMPTY:
-    RETURN "No leads found. Try a broader client type or another city."
+STEP 2: Pitch each one
+FOR EACH {lead} in {leads}:
+    Write a pitch for {lead} as #pitching says and keep it as {pitch}.
+    Have @reviewer check {pitch}, and fix what it finds.
+    ASK "Send this to {lead.name}?\n\n{pitch}" [yes, no] into {send}
+    IF {send} is "yes":
+        Send {pitch} to {lead.email} with $send_email.
+    ELSE:
+        Skip this lead.
 
-STEP 2: OUTREACH
-FOR EACH $lead IN $leads:
-    INVOKE SKILL $pitching USING context $lead
-    SAVE skill_output INTO VARIABLE $pitch
-    ASK USER "Send this message?\n\n" + $pitch
-    IF $answer IS EQUAL TO "yes":
-        EXECUTE tool $send_email with parameters:
-           - to: $lead.email
-           - body: $pitch
-    ELSE IF the user asked for changes:
-        Rewrite $pitch with the user's changes and send it.
+RETURN "Done."
 ```
 
-Look at that `ELSE IF the user asked for changes:`. It's a condition written in English, sitting inside a real control structure, and that's the whole idea.
+That is the whole agent's behaviour, in a file called `FLOW.fwl`. Four marks say what a sentence is talking about:
+
+| Mark | Means |
+|---|---|
+| `$send_email` | a tool |
+| `#pitching` | a skill |
+| `@reviewer` | an agent |
+| `{lead}` | a remembered value |
+
+Nothing is imported or declared. The first sentence that mentions a new `{value}` fills it, and the model decides what goes in.
+
+### What it buys you: certainty
+
+Botter follows the structure itself. The loop runs once per lead, the `IF` branches the way it says, and the steps happen in order. The model carries out one sentence at a time and cannot run ahead or skip one.
+
+Two things are never left to the model:
+
+- **`ASK` is asked.** Botter shows the question and waits. With choices, the answer is one of them. Nothing is sent until the user says yes.
+- **A tool's answer is the tool's answer.** When a sentence names one tool and keeps its result, the value is exactly what the tool returned, not the model's retelling of it.
+
+A condition that compares values, like `{send} is "yes"` or `{leads} is empty`, is decided exactly. One that needs judgement, like `IF the customer is asking about their own account:`, is one short question to the model.
 
 ### It refuses to build nonsense
 
 FWL comes with a linter, and Botter runs it before every build. Break the flow above and you get this:
 
 ```
-FLOW.md:15: error: this line opens a block, but nothing is indented under it (indent the lines that belong to it)
-FLOW.md:20: error: unknown keyword INVOCATE; did you mean INVOKE?
-FLOW.md:27: error: ELSE lines up with its IF (the IF on line 23), not with the lines inside it
+FLOW.fwl:15: error: ELSE lines up with its IF (the IF on line 13), not with the lines inside it
+FLOW.fwl:18: error: {lead} only exists inside its FOR EACH loop
+FLOW.fwl:11: warning: {pich} is filled here and never used again: a typo, or drop the name
+FLOW.fwl:10: error: #pitchng: no such skill (there is no skills/pitchng/SKILL.md)
+FLOW.fwl:11: error: @reviewr: no such agent (a sub-agent agents/reviewr/agent.md, or one listed in config.json "agents")
+FLOW.fwl:14: error: $send_mail: no such tool (built-in, tools/bin/send_mail, or <server>_<tool> of a config.json "mcp" server)
 ```
 
-Fix the shape, and it checks the names:
-
-```
-FLOW.md:24: error: EXECUTE tool $send_mail: no such tool (built-in, or tools/bin/send_mail with tools/doc/send_mail.json)
-FLOW.md:26: error: $pich is used before it is set (SAVE ... INTO VARIABLE $pich, SET $pich TO ..., or FOR EACH $pich IN ...)
-FLOW.md:29: error: $lead only exists inside its FOR EACH loop
-```
-
-Line numbers, a typo suggestion, indentation and scope checking, and tools and skills checked against what's actually in the folder. These are compiler errors for a language that's mostly English.
+Line numbers, indentation and scope checking, and every tool, skill and agent checked against what the agent actually has. These are compiler errors for a language that is mostly English.
 
 ### Then it gets a second opinion
 
-Valid syntax doesn't mean the flow makes sense, so before building, your model reviews the logic. Can each step actually be done with the tool it names? Does the payload fit that tool's parameters? Does anything get sent, paid for or deleted without an `ASK USER` first? Can every loop end? You get the line, the reason and a suggested fix. Nothing changes until you say yes.
-
-### The model only shows up when it's needed
-
-At run time, an FWL interpreter inside the binary executes the flow one statement at a time. Tool calls, questions, variables, loops, retries and comparisons all run as plain code. No tokens, no guessing. The model is called only for the parts that need judgement: English instructions, skills, and conditions like *"the user asked for changes"*.
-
-The result: a test flow with a question, a tool call, a loop, a branch, a retry and a file write made **two LLM calls, total**. It's cheaper and faster, and the model can't quietly skip step 3.
+A flow that builds can still make no sense, so before building, your model reviews the logic. Can each step actually be done with the tool it names? Is anything sent, paid for or deleted without an `ASK` first? Can every loop end? Does a value look like a typo of another? You get the line, the reason and a suggested fix. Nothing changes until you say yes.
 
 ### Data stays data
 
-Values live in `$variables`, never mixed into instructions, and the model is told outright that whatever a variable holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
-
-A flow can hand work to sub-agents with `DELEGATE TO`. Running them side by side is next.
+Values live in `{braces}`, never mixed into instructions, and the model is told outright that whatever a value holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
 
 ## What's inside 396 KB
 
@@ -256,7 +258,7 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ## Where it's going
 
-- **Parallel sub-agents.** Sub-agents work one at a time today; `IN PARALLEL` will run them side by side.
+- **Parallel sub-agents.** Sub-agents work one at a time today; running several side by side is next.
 - **Streaming over A2A.** An agent called over A2A answers each message whole today.
 - **Windows (WSL) and macOS.** Same single file, more places to run it.
 
@@ -269,7 +271,7 @@ BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```
 
-`tools/src/botcore` is the runtime, `tools/src/pack` is the packer, and `tui/` is Botter's full-screen UI. `agent.md`, `FLOW.md` and `skills/` are Botter itself.
+`tools/src/botcore` is the runtime, `tools/src/pack` is the packer, and `tui/` is Botter's full-screen UI. `agent.md`, `FLOW.fwl` and `skills/` are Botter itself.
 
 ## License
 

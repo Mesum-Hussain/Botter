@@ -4,31 +4,35 @@
 #include <stddef.h>
 
 /*
- * FWL ("sequence"): the language of an agent's FLOW.md. The whole file is
- * one ```fwl block: a frontmatter (spec-version: "fwl-1"), then UPPERCASE
- * statements; every other line is a plain-English instruction (no Markdown). A line ending
- * in ':' opens a block; the lines indented under it are the block. This file is the shared front end:
- * sq_parse() builds the syntax tree (syntax errors), sq_check() checks names
- * and variables (botter_pack, at build time), fwl_run.c interprets the tree
- * (botcore, at run time). No dependencies beyond libc.
+ * FWL, the Flow Writeup Language: an agent's FLOW.fwl. Plain English sentences, one per
+ * line, inside a little structure:
+ *
+ *   IF <condition>:  /  ELSE IF <condition>:  /  ELSE:
+ *   FOR EACH {item} in {list}:
+ *   WHILE <condition>, at most N times:
+ *   RETRY N times:
+ *   ASK "question" [choice, choice] into {name}
+ *   STEP n: NAME            a label, shown as progress
+ *   RETURN <what the user gets>
+ *
+ * A line ending in ':' opens a block; the lines indented under it are the block. Only these
+ * words are in CAPITALS. Every other line is a sentence the model carries out. Sentences and
+ * conditions name things with marks: $tool, #skill, @agent, and {value} for something
+ * remembered: the first sentence that mentions a new {value} fills it.
+ *
+ * This file is the shared front end: sq_parse() builds the tree, reports syntax errors and
+ * works out which sentence fills which value; sq_check() checks the marks against what the
+ * agent has (botter_pack, at build time); fwl_run.c runs the tree (botcore, at run time).
  */
 
 enum {
-    SQ_INSTR = 1, /* plain-English instruction            a = text */
-    SQ_STEP,      /* STEP n: NAME label                   a = NAME, n = n */
-    SQ_LOAD,      /* IMPORT: $a (one node per skill)      */
-    SQ_EXEC,      /* EXECUTE tool $a <b>                 b = rest (payload / prose), pk/pv = "- k: v" lines */
-    SQ_INVOKE,    /* INVOKE SKILL $a [USING <b>]            b = rest after the name (may start with USING) */
-    SQ_DELEGATE,  /* DELEGATE TO @a [USING <b>]            a sub-agent (agents/a/agent.md) or a remote agent does it */
-    SQ_ASK,       /* ASK USER <a>                         */
-    SQ_SAVE_VAR,  /* SAVE <a> INTO VARIABLE $b           */
-    SQ_SAVE_FILE, /* SAVE <a> TO FILE "b"                 */
-    SQ_SET,       /* SET $a TO <b>                       */
-    SQ_IF,        /* IF <cond>: / ELSE IF <cond>: / ELSE: br[] (cond NULL = ELSE) */
-    SQ_FOR,       /* FOR EACH $a IN <b>:                 */
-    SQ_WHILE,     /* WHILE <a> [AT MOST n TIMES]:         n = bound (0 = none) */
-    SQ_RETRY,     /* RETRY UP TO n TIMES:                 */
-    SQ_PAR,       /* IN PARALLEL:                         */
+    SQ_INSTR = 1, /* a sentence                           a = text, pk[] = the values it fills */
+    SQ_STEP,      /* STEP n: NAME                         a = NAME, n = n */
+    SQ_ASK,       /* ASK <a> [pk...] into {b}             pk[] = choices, b = value name ("answer" if none) */
+    SQ_IF,        /* IF / ELSE IF / ELSE                  br[] (cond NULL = ELSE) */
+    SQ_FOR,       /* FOR EACH {a} in <b>:                 */
+    SQ_WHILE,     /* WHILE <a>, at most n times:          n = bound (0 = none) */
+    SQ_RETRY,     /* RETRY n times:                       */
     SQ_RETURN,    /* RETURN <a>                           */
 };
 
@@ -49,8 +53,7 @@ struct sq_node {
     int        kind, line;
     char      *a, *b;
     int        n;
-    char     **pk, **pv; /* "with parameters:" lines */
-    int       *pl;       /* their line numbers */
+    char     **pk; /* names: values a sentence fills, or the choices of an ASK */
     int        np;
     sq_list    body;
     sq_branch *br;
@@ -66,20 +69,20 @@ typedef struct {
     void *ud;
 } sq_prog;
 
-/* Parse FLOW.md text. Syntax errors go to p->diag; returns the error count. */
+/* Parse FLOW.fwl text. Errors go to p->diag; returns the error count. */
 int  sq_parse(const char *src, size_t n, sq_prog *p);
 void sq_free(sq_prog *p);
 
-/* Build-time checks on a parsed program: tools and skills exist, IMPORT before INVOKE,
- * sub-agents exist,
- * variables set before use, result/skill_output/agent_output/answer after their producers. */
+/* Build-time: every $tool, #skill and @agent a line names must exist. */
 void sq_check(sq_prog *p, int (*has_tool)(const char *), int (*has_skill)(const char *), int (*has_agent)(const char *));
 
-/* Length of the $name.field[n] reference at c (the '$' included), or 0 if c is not one. */
-size_t sq_dollar(const char *c);
-/* Reference syntax (without the '$'): identifier then .field / [n] parts; root name into root[65]. */
+/* Length of the {name.field[n]} value reference at c (braces included), or 0 if c is not one. */
+size_t sq_val(const char *c);
+/* Reference syntax (without the braces): identifier then .field / [n] parts; root name into root[65]. */
 int  sq_ref(const char *s, size_t n, char root[65]);
-/* Expression contains only "strings", $refs, numbers, true/false/null, + and {..}/[..] JSON (no prose). */
+/* The names with this mark ('$' tool, '#' skill, '@' agent) in text, outside "strings". Returns how many (<= max). */
+int  sq_marks(const char *text, char mark, char out[][65], int max);
+/* Expression made only of "strings", {values}, numbers, true/false/null and + (no prose). */
 int  sq_is_literal(const char *expr);
 
 #endif

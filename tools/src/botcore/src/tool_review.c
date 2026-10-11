@@ -1,5 +1,5 @@
 /*
- * fwl_review: the logic check of an agent project's FLOW.md, by the connected
+ * fwl_review: the logic check of an agent project's FLOW.fwl, by the connected
  * LLM (a fresh request, no conversation). The syntax and names are checked by
  * the build (fwl.c); this asks whether the steps make sense: can each step be
  * done with the named tool or skill and the data available then, do payloads
@@ -81,7 +81,7 @@ static void sb_fmt(sb_t *b, const char *fmt, ...)
 static void diag_collect(void *ud, int line, int error, const char *msg)
 {
     if (error) {
-        sb_fmt(ud, "FLOW.md:%d: %s\n", line, msg);
+        sb_fmt(ud, "FLOW.fwl:%d: %s\n", line, msg);
     }
 }
 
@@ -129,29 +129,27 @@ static void add_capabilities(sb_t *b, const char *dir)
 }
 
 static const char REVIEWER[] =
-    "You review FLOW.md, the step-by-step flow of an AI agent, written in FWL. Its syntax and names are already "
-    "checked; judge only whether the LOGIC makes sense. How FWL runs: botcore executes the structure itself "
-    "(EXECUTE tool calls the tool with the payload or parameters, its output is $result; ASK USER shows the "
-    "question and waits, the reply is $answer; SAVE/SET store values; IF, FOR EACH, WHILE ... AT MOST N TIMES, "
-    "RETRY UP TO N TIMES (repeats its body while a step in it fails) and IN PARALLEL control the order; comparisons "
-    "such as IS EQUAL TO, CONTAINS, IS EMPTY are evaluated exactly). Plain-English lines, INVOKE SKILL, and "
-    "conditions or values written in prose are handed to an LLM, one step at a time, which can use the agent's "
-    "tools but cannot ask the user anything during that step. RETURN ends the flow.\n"
+    "You review FLOW.fwl, the step-by-step flow of an AI agent, written in FWL. Its syntax and names are already "
+    "checked; judge only whether the LOGIC makes sense. How FWL runs: botcore follows the structure itself (IF / "
+    "ELSE IF / ELSE, FOR EACH {item} in {list}, WHILE <condition>, at most N times, RETRY N times, which repeats "
+    "its lines while one of them fails; ASK \"question\" [choices] into {name} shows the question and waits for "
+    "the user; RETURN ends the flow). Every other line is a plain sentence handed to an LLM, one at a time, "
+    "which can use the agent's tools but cannot ask the user anything during that step. In a sentence $name is a "
+    "tool, #name a skill whose playbook the LLM gets, @name an agent the work is handed to, and {name} a "
+    "remembered value: the first sentence that mentions a new {name} fills it (also a sentence that says 'as "
+    "{name}'), later ones read it. A condition that compares values ({x} is \"yes\", {x} is empty, {x} contains "
+    "\"text\") is decided exactly; any other condition is judged by the LLM.\n"
     "Find real problems only: a step that cannot be done with the named tool or skill or the data available at "
-    "that point; payload keys that do not match the tool's parameters, or required parameters missing; a value "
-    "of the wrong kind (FOR EACH over a single text, a comparison against something never set to that form); a "
-    "condition that nothing earlier lets anyone decide; a RETRY around steps that cannot fail or a loop that "
-    "cannot end; something outward-facing or irreversible (sending, posting, paying, deleting) with no ASK USER "
-    "approval before it; a plain-English step that needs the user's input (it cannot ask: use ASK USER first); "
-    "unreachable or pointless steps; a flow that does not do what agent.md says the agent is for; a RETURN that "
-    "tells the user nothing useful. Ignore style and wording.\n"
-    "Suggestions must be valid FWL. Its only statements: STEP n: NAME, IMPORT: (one $skill per indented line), EXECUTE tool $name, INVOKE SKILL, DELEGATE TO @agent (a sub-agent from agents/ or a remote agent from config.json; its reply is agent_output), "
-    "SAVE result|answer|skill_output INTO VARIABLE, SAVE $x TO FILE \"path\", SET $x TO, ASK USER, "
-    "IF <condition>: / ELSE IF <condition>: / ELSE:, FOR EACH $x IN ...:, WHILE ... AT MOST N TIMES:, "
-    "RETRY UP TO N TIMES:, IN PARALLEL:, RETURN, and plain-English lines. A line ending in ':' opens a block: the "
-    "lines indented under it are the block and it ends where the indentation ends (no THEN, DO or END lines). Values: $x.field, $x.length (size of a list or text), \"strings\", numbers, "
-    "joined with +. There is "
-    "no CONTINUE, BREAK, GOTO or function: to skip an item, put the rest of the loop body inside an IF.\n"
+    "that point; a value of the wrong kind (FOR EACH over a single text, a comparison against something never "
+    "filled in that form); a {name} that looks like a typo of another; a condition that nothing earlier lets "
+    "anyone decide; a RETRY around steps that cannot fail or a loop that cannot end; something outward-facing or "
+    "irreversible (sending, posting, paying, deleting) with no ASK approval before it; a sentence that needs the "
+    "user's input (it cannot ask: put an ASK before it); unreachable or pointless steps; a flow that does not do "
+    "what agent.md says the agent is for; a RETURN that tells the user nothing useful. Ignore style and wording.\n"
+    "Suggestions must be valid FWL: only ASK, IF, ELSE IF, ELSE, FOR EACH, WHILE, RETRY, STEP and RETURN are "
+    "written in capitals, a line ending in ':' opens a block and the lines indented under it are the block, and "
+    "everything else is a plain sentence. There is no CONTINUE, BREAK, GOTO or function: to skip an item, put the "
+    "rest of the loop body inside an IF.\n"
     "Reply with only JSON: {\"makes_sense\": true or false, \"summary\": \"one sentence\", \"problems\": "
     "[{\"line\": N, \"statement\": \"the line\", \"why\": \"why it does not make sense\", \"suggestion\": \"the "
     "corrected FWL line(s), or what to do instead\"}]}. makes_sense is false only if there is at least one real "
@@ -171,10 +169,10 @@ static bool fwl_review(const cJSON *in, char *result, size_t rl)
         snprintf(result, rl, "'%s' must be a project folder inside the working directory", dir);
         return false;
     }
-    snprintf(f, sizeof(f), "%s/FLOW.md", res);
+    snprintf(f, sizeof(f), "%s/FLOW.fwl", res);
     char *src = slurp(f, 200000);
     if (!src) {
-        snprintf(result, rl, "%s has no FLOW.md", dir);
+        snprintf(result, rl, "%s has no FLOW.fwl", dir);
         return false;
     }
 
@@ -188,7 +186,7 @@ static bool fwl_review(const cJSON *in, char *result, size_t rl)
     sq_free(&prog);
     if (ne) {
         snprintf(result, rl,
-                 "{\"makes_sense\": false, \"summary\": \"FLOW.md has syntax errors; fix them first (agent_build "
+                 "{\"makes_sense\": false, \"summary\": \"FLOW.fwl has syntax errors; fix them first (agent_build "
                  "dry_run shows them)\", \"problems\": [], \"report\": %s}",
                  "\"see the syntax errors below\"");
         size_t l = strlen(result);
@@ -205,7 +203,7 @@ static bool fwl_review(const cJSON *in, char *result, size_t rl)
     sb_fmt(&q, "## agent.md (what the agent is for)\n%s\n", agent ? agent : "(none)");
     free(agent);
     add_capabilities(&q, res);
-    sb_add(&q, "\n## FLOW.md (with line numbers)\n");
+    sb_add(&q, "\n## FLOW.fwl (with line numbers)\n");
     int line = 1;
     for (char *l = src, *nl; l && *l; l = nl ? nl + 1 : NULL, line++) {
         nl = strchr(l, '\n');
@@ -269,7 +267,7 @@ static bool fwl_review(const cJSON *in, char *result, size_t rl)
 
 const tool_t TOOLS_REVIEW[] = {
     {"fwl_review",
-     "Check whether an agent project's FLOW.md makes sense (its logic, not its syntax) with a fresh LLM review: "
+     "Check whether an agent project's FLOW.fwl makes sense (its logic, not its syntax) with a fresh LLM review: "
      "steps that cannot work, payloads that do not fit the tools, missing approvals before outward-facing steps, "
      "loops that cannot end, a flow that does not fit agent.md. Returns JSON {makes_sense, summary, problems: "
      "[{line, statement, why, suggestion}], report}. Run it after agent_build dry_run passes; if makes_sense is "

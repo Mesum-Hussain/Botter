@@ -692,17 +692,13 @@ static int is_kw(const char *s, size_t n)
 static int id_char(char ch) { return isalnum((unsigned char)ch) || ch == '_' || (unsigned char)ch >= 0x80; }
 
 /*
- * FWL (botter FLOW.md): UPPERCASE keywords (EXECUTE, IF ...:, FOR EACH,
+ * FWL (FLOW.fwl): the few UPPERCASE keywords (ASK, IF ...:, FOR EACH,
  * IS EQUAL TO ..., STEP n:), $variables, "strings", numbers, list markers,
  * headings and frontmatter. Everything else is plain English.
  */
 static int fwl_kw(const char *s, size_t n)
 {
-    static const char *const KW[] = {"STEP", "IMPORT", "SKILL", "EXECUTE", "INVOKE", "DELEGATE", "USING", "SAVE", "INTO", "VARIABLE",
-                                     "TO", "FILE", "SET", "ASK", "USER", "IF", "ELSE", "FOR", "EACH",
-                                     "IN", "WHILE", "AT", "MOST", "TIMES", "RETRY", "UP", "PARALLEL", "RETURN",
-                                     "IS", "EQUAL", "NOT", "GREATER", "LESS", "THAN", "EMPTY", "CONTAINS", "AND", "OR",
-                                     "CONNECT", "AS", NULL};
+    static const char *const KW[] = {"STEP", "ASK", "IF", "ELSE", "FOR", "EACH", "WHILE", "RETRY", "RETURN", NULL};
     for (int k = 0; KW[k]; k++) {
         if (strlen(KW[k]) == n && strncmp(KW[k], s, n) == 0) {
             return 1;
@@ -722,7 +718,7 @@ static void fwl_line(tcells_t *c, const char *s, size_t n)
         i++;
     }
     tc_add(c, s, i, plain);
-    if (i < n && (s[i] == '#' || (n - i >= 3 && !strncmp(s + i, "---", 3)))) { /* heading / frontmatter fence */
+    if (i < n && ((s[i] == '#' && i + 1 < n && s[i + 1] == ' ') || (n - i >= 3 && !strncmp(s + i, "---", 3)))) { /* heading / frontmatter fence */
         tc_add(c, s + i, n - i, s[i] == '#' ? head : mut);
         return;
     }
@@ -747,14 +743,18 @@ static void fwl_line(tcells_t *c, const char *s, size_t n)
             e = e < n ? e + 1 : n;
             tc_add(c, s + i, e - i, str);
             i = e;
-        } else if ((ch == '$' || (ch == '@' && (i == 0 || s[i - 1] == ' '))) && i + 1 < n &&
+        } else if (ch == '{' && memchr(s + i, '}', n - i) && i + 1 < n && (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
+            size_t e = (size_t)((const char *)memchr(s + i, '}', n - i) - s) + 1; /* {value} */
+            tc_add(c, s + i, e - i, var);
+            i = e;
+        } else if ((ch == '$' || ch == '#' || ch == '@') && (i == 0 || !isalnum((unsigned char)s[i - 1])) && i + 1 < n &&
                    (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
-            size_t e = i + 1; /* $name, $name.field, $skill-name, @agent-name */
+            size_t e = i + 1; /* $tool, #skill, @agent */
             while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '_' ||
-                             ((s[e] == '.' || s[e] == '-') && e + 1 < n && isalnum((unsigned char)s[e + 1])))) {
+                             (s[e] == '-' && e + 1 < n && isalnum((unsigned char)s[e + 1])))) {
                 e++;
             }
-            tc_add(c, s + i, e - i, var);
+            tc_add(c, s + i, e - i, head);
             i = e;
         } else if (isdigit((unsigned char)ch) && (i == 0 || !id_char(s[i - 1]))) {
             size_t e = i;
@@ -768,8 +768,7 @@ static void fwl_line(tcells_t *c, const char *s, size_t n)
             while (e < n && id_char(s[e])) {
                 e++;
             }
-            int k = fwl_kw(s + i, e - i) || (e - i == 4 && !strncmp(s + i, "tool", 4) && i >= 8 &&
-                                             !strncmp(s + i - 8, "EXECUTE ", 8));
+            int k = fwl_kw(s + i, e - i);
             tc_add(c, s + i, e - i, k ? kw : plain);
             i = e;
         } else {

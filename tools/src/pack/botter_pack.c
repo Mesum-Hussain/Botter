@@ -6,8 +6,8 @@
  *   botter_pack list  <file.bot>
  *
  * Embeds (read-only) from <agent-dir>:
- *   agent.md, config.json, FLOW.md, skills/, agents/, tools/doc/ (recursive)   plain files
- *       (FLOW.md is optional: the session flow in FWL, checked by botcore/src/fwl.c; errors stop the build)
+ *   agent.md, config.json, FLOW.fwl, skills/, agents/, tools/doc/ (recursive)   plain files
+ *       (FLOW.fwl is optional: the session flow in FWL, checked by botcore/src/fwl.c; errors stop the build)
  *       (config.json: how to build and run the agent, read by load_config/check_config:
  *        name, display_name, version, description, internet, skills, tools, requires, builder)
  *   tools/bin/<name>                                 tool executables: either a
@@ -319,11 +319,11 @@ static int has_item(const char *path)
 
 #include "../botcore/src/fwl.c"
 
-/* FWL diagnostics in compiler form: FLOW.md:LINE: error|warning: message */
+/* FWL diagnostics in compiler form: FLOW.fwl:LINE: error|warning: message */
 static void fwl_diag(void *ud, int line, int error, const char *msg)
 {
     (void)ud;
-    fprintf(stderr, "FLOW.md:%d: %s: %s\n", line, error ? "error" : "warning", msg);
+    fprintf(stderr, "FLOW.fwl:%d: %s: %s\n", line, error ? "error" : "warning", msg);
     if (error) {
         errors++;
     } else {
@@ -969,7 +969,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     load_config(dir);
     add_root_file(dir, "agent.md");
     add_root_file(dir, "config.json");
-    add_root_file(dir, "FLOW.md");
+    add_root_file(dir, "FLOW.fwl");
     add_root_file(dir, "secrets.vault"); /* opt-in: the agent's keys, encrypted with a password (vault_seal) */
     add_tree(dir, "skills", K_DATA, 0);
     add_tree(dir, "agents", K_DATA, 0);
@@ -996,22 +996,26 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     free(mf);
     char *oldflow = join(dir, "SQNC.md");
     if (access(oldflow, F_OK) == 0) {
-        err("%s: SQNC.md is now FLOW.md and its fence is ```fwl (see the write-flow skill)%s", oldflow, NULL);
+        err("%s: the flow is now FLOW.fwl, plain FWL (see the write-flow skill)%s", oldflow, NULL);
+    }
+    free(oldflow);
+    oldflow = join(dir, "FLOW" ".md");
+    if (access(oldflow, F_OK) == 0) {
+        err("%s: the flow is now FLOW.fwl, plain FWL without the ``` fence (see the write-flow skill)%s", oldflow, NULL);
     }
     free(oldflow);
     for (size_t i = 0; i < n_items; i++) {
-        if (strcmp(items[i].path, "FLOW.md") == 0 && items[i].data) {
+        if (strcmp(items[i].path, "FLOW.fwl") == 0 && items[i].data) {
             sq_prog prog;
             memset(&prog, 0, sizeof(prog));
             prog.diag = fwl_diag;
-            if (sq_parse(items[i].data, items[i].len, &prog) == 0) {
-                sq_check(&prog, fwl_has_tool, fwl_has_skill, fwl_has_agent);
-            }
+            sq_parse(items[i].data, items[i].len, &prog);
+            sq_check(&prog, fwl_has_tool, fwl_has_skill, fwl_has_agent); /* every mistake in one go */
             sq_free(&prog);
         }
     }
-    if (errors) { /* a FLOW.md that does not compile is not built */
-        fprintf(stderr, "botter_pack: FLOW.md has %d error(s); nothing was built\n", errors);
+    if (errors) { /* a FLOW.fwl that does not compile is not built */
+        fprintf(stderr, "botter_pack: FLOW.fwl has %d error(s); nothing was built\n", errors);
         return 1;
     }
 
