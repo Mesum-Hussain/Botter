@@ -22,7 +22,7 @@
  *
  * This file is the shared front end: sq_parse() builds the tree, reports syntax errors and
  * works out which sentence fills which value; sq_check() checks the marks against what the
- * agent has (botter_pack, at build time); fwl_run.c runs the tree (botcore, at run time).
+ * agent has (packer, at build time); fwl_run.c runs the tree (botcore, at run time).
  */
 
 enum {

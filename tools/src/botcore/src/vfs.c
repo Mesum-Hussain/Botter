@@ -44,7 +44,7 @@ const char *vfs_error(void)
     return g_err;
 }
 
-/* Patched by botter_pack in every .bot (see blob.h); all zero after the magic in plain botcore. */
+/* Patched by packer in every .bot (see blob.h); all zero after the magic in plain botcore. */
 __attribute__((used, aligned(8))) static volatile const unsigned char g_packref[PACKREF_SIZE] = PACKREF_MAGIC;
 
 static char g_errbuf[200];

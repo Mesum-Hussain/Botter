@@ -15,14 +15,14 @@
  *
  * agent_build needs a botcore runtime to put the agent on. It uses the running
  * agent itself: the botter process is "botcore + pack", and everything in
- * front of its pack is the pristine runtime (see botter_pack.c). botcore hands
+ * front of its pack is the pristine runtime (see packer.c). botcore hands
  * tools a read-only fd of its own executable (BOTCORE_RUNTIME_FD, fd 3): a
  * sandboxed tool cannot open /proc/<parent>/exe itself.
  * Build:  see ../../../Makefile  (static musl, links ../pack and cJSON)
  */
 #define _GNU_SOURCE
 #define main pack_main
-#include "../pack/botter_pack.c"
+#include "../packer/packer.c"
 #undef main
 
 #include <libgen.h>

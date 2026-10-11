@@ -1,9 +1,9 @@
 /*
- * botter_pack: attach an agent project to a prebuilt botcore executable.
+ * packer: attach an agent project to a prebuilt botcore executable.
  *
- *   botter_pack build <agent-dir> <botcore|file.bot> <out.bot>
- *   botter_pack check <agent-dir> <botcore|file.bot>        (validate only)
- *   botter_pack list  <file.bot>
+ *   packer build <agent-dir> <botcore|file.bot> <out.bot>
+ *   packer check <agent-dir> <botcore|file.bot>        (validate only)
+ *   packer list  <file.bot>
  *
  * Embeds (read-only) from <agent-dir>:
  *   agent.md, config.json, FLOW.fwl, skills/, agents/, tools/doc/ (recursive)   plain files
@@ -62,13 +62,13 @@ static cJSON  *g_cfg; /* the project's config.json (NULL if absent or invalid) *
 
 static void die(const char *msg)
 {
-    fprintf(stderr, "botter_pack: %s\n", msg);
+    fprintf(stderr, "packer: %s\n", msg);
     exit(1);
 }
 
 static void err(const char *fmt, const char *a, const char *b)
 {
-    fprintf(stderr, "botter_pack: error: ");
+    fprintf(stderr, "packer: error: ");
     fprintf(stderr, fmt, a, b ? b : "");
     fputc('\n', stderr);
     errors++;
@@ -76,7 +76,7 @@ static void err(const char *fmt, const char *a, const char *b)
 
 static void warn(const char *fmt, const char *a)
 {
-    fprintf(stderr, "botter_pack: warning: ");
+    fprintf(stderr, "packer: warning: ");
     fprintf(stderr, fmt, a);
     fputc('\n', stderr);
     warnings++;
@@ -1015,7 +1015,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
         }
     }
     if (errors) { /* a FLOW.fwl that does not compile is not built */
-        fprintf(stderr, "botter_pack: FLOW.fwl has %d error(s); nothing was built\n", errors);
+        fprintf(stderr, "packer: FLOW.fwl has %d error(s); nothing was built\n", errors);
         return 1;
     }
 
@@ -1024,7 +1024,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
         for (size_t i = 0; i < n_items; i++) {
             nx += items[i].kind != K_DATA;
         }
-        fprintf(stderr, "botter_pack: check passed (runtime botcore %s): %zu files (%zu tools), %d warning(s)\n",
+        fprintf(stderr, "packer: check passed (runtime botcore %s): %zu files (%zu tools), %d warning(s)\n",
                 g_core_version[0] ? g_core_version : "?", n_items, nx, warnings);
         return 0;
     }
@@ -1116,7 +1116,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     for (size_t i = 0; i < n_items; i++) {
         nexec += items[i].kind != K_DATA;
     }
-    fprintf(stderr, "botter_pack: wrote %s (runtime botcore %s): %zu files (%zu tools), pack %llu bytes, total %llu bytes", out,
+    fprintf(stderr, "packer: wrote %s (runtime botcore %s): %zu files (%zu tools), pack %llu bytes, total %llu bytes", out,
             g_core_version[0] ? g_core_version : "?", n_items,
             nexec, (unsigned long long)pos, (unsigned long long)(base + pos + FOOTER_SIZE));
     if (saved) {

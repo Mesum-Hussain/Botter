@@ -1,6 +1,6 @@
 /*
  * FWL front end: parser (syntax tree, syntax errors, which sentence fills which value) and
- * build-time checks. Shared by botcore (fwl_run.c runs the tree) and botter_pack (which
+ * build-time checks. Shared by botcore (fwl_run.c runs the tree) and packer (which
  * #includes this file and runs sq_check). See fwl.h and skills/write-flow.
  */
 #define _GNU_SOURCE

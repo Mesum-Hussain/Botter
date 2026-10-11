@@ -7,7 +7,7 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TESTS=$ROOT/tests
-PACK=$ROOT/artifacts/botter_pack
+PACK=$ROOT/artifacts/packer
 CORE=$ROOT/artifacts/botcore
 BOTTER=$ROOT/botter
 T=$(mktemp -d "${TMPDIR:-/tmp}/botter-test.XXXXXX")

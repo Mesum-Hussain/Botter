@@ -1273,7 +1273,7 @@ static int read_user_line(chat_t *chat, char **line)
 #ifndef BC_VERSION
 #define BC_VERSION "dev"
 #endif
-/* The runtime's version, findable in the binary: botter_pack reports which botcore it packs. */
+/* The runtime's version, findable in the binary: packer reports which botcore it packs. */
 static const char BC_VERSION_TAG[] = "BOTCORE_VERSION=" BC_VERSION;
 
 int main(int argc, char **argv)

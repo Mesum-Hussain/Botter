@@ -2,7 +2,7 @@
 #   make            dev build with the host compiler (dynamic)      -> ./botcore
 #   make release    static musl build, stripped (what botter ships) -> ./botcore-static
 #   make clean
-# The agent packer (botter_pack) lives outside this repo.
+# The agent packer (packer) lives outside this repo.
 # TLS: vendored BearSSL (lib/bearssl, MIT) built as a static archive; CA anchors in lib/ca.
 
 # also drop compiler notes (Fedora annobin adds ~15KB) that plain strip keeps

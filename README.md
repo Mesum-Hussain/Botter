@@ -4,7 +4,7 @@
 
 ### The Markdown-first agent framework.<br>Every agent ships as one portable executable.
 
-**396 KB** · **starts in 1.2 ms** · **nothing to install** · **runs on any x86-64 Linux**
+**392 KB** · **starts in 0.4 ms** · **nothing to install** · **runs on any x86-64 Linux**
 
 </div>
 
@@ -28,7 +28,7 @@ lead-outreach.bot      one file, under 400 KB
 
 One file. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
 
-That's Botter: a Markdown-first agent framework. You write an agent in plain Markdown, and Botter compiles it into a single statically linked binary with the whole runtime baked in. Nothing like LangChain or n8n has to be installed where the agent runs. It carries everything it needs to think, talk to a model and run its tools.
+That's Botter: a Markdown-first agent framework. You write an agent in Markdown and plain English, and Botter compiles it into a single statically linked binary with the whole runtime baked in. Nothing like LangChain or n8n has to be installed where the agent runs. It carries everything it needs to think, talk to a model and run its tools.
 
 ## Markdown-first is not Markdown-only
 
@@ -61,13 +61,13 @@ Same laptop, comparable agents:
 
 | | Botter agent | OpenClaw agent | |
 |---|---|---|---|
-| On disk | **396 KB**, 1 file | 646 MB, 41,408 files | **~1,600× smaller** |
-| Ready in | **1.2 ms** | 7.3 s | **~6,000× faster** |
+| On disk | **392 KB**, 1 file | 646 MB, 41,408 files | **~1,600× smaller** |
+| Ready in | **0.4 ms** | 7.3 s | **~18,000× faster** |
 | Idle memory | **0.4 MB** | 730 MB | **~1,800× lighter** |
 
 <sub>OpenClaw 2026.9.9, default npm install (Node.js itself not counted), gateway start to accepting connections. Botter: a minimal built agent, start to first prompt. AMD Ryzen 5 7520U, Fedora 44.</sub>
 
-A Botter agent boots more than ten times faster than an *empty* Python process. `ldd` on it says `not a dynamic executable`. And if you still want a container, go ahead. It now holds your agent and whatever its tools need, and nothing else.
+A Botter agent boots more than thirty times faster than an *empty* Python process. `ldd` on it says `not a dynamic executable`. And if you still want a container, go ahead. It now holds your agent and whatever its tools need, and nothing else.
 
 ## One more thing: you can talk to the compiler
 
@@ -77,7 +77,7 @@ Botter talks back.
 
 Run it in an empty folder and tell it what you want: *"an agent that finds local businesses without a website and pitches them my web design service."* It asks the two or three questions that matter. It proposes a plan. Then it writes the persona, the flow and the playbooks, writes the tools and tests them, lints its own work, has your model review the logic, and builds the binary. If you want to grab the wheel at any point, every file is plain text sitting right there in your folder.
 
-How does a compiler do all that? **Botter is itself an agent.** Its persona, its flow and its skills are Markdown files in this repo, compiled by Botter and running on the same runtime as every agent it builds.
+How does a compiler do all that? **Botter is itself an agent.** Its persona, its flow and its skills are plain-text files in this repo (`agent.md`, `FLOW.fwl`, `skills/`), compiled by Botter and running on the same runtime as every agent it builds.
 
 We use Botter to build Botter.
 
@@ -129,7 +129,9 @@ Most agent runtimes reach the outside world by launching things: a tool server h
 }
 ```
 
-`token` is only a name, never the secret itself. The value comes from the agent's sealed vault, or from a line of that name in a `.env` file next to where the agent runs. All four protocols together add about 16 KB to the binary.
+`token` is only a name, never the secret itself. The value comes from the agent's sealed vault, or from a line of that name in a `.env` file next to where the agent runs.
+
+With `--acp` and `--a2a` there is nobody at a keyboard, so the agent never asks for a key there. It uses the model connection you saved by running it once in a terminal, its sealed vault, or `BOTTER_BASE_URL`, `BOTTER_API_KEY` and `BOTTER_MODEL` in that `.env` file. `--a2a` listens on this machine only unless you give it an address (`--a2a 0.0.0.0:8080`), and then it insists on an `A2A_TOKEN` that callers must send.
 
 ## FWL: plain English that runs the same way every time
 
@@ -171,11 +173,11 @@ Nothing is imported or declared. The first sentence that mentions a new `{value}
 
 ### What it buys you: certainty
 
-Botter follows the structure itself. The loop runs once per lead, the `IF` branches the way it says, and the steps happen in order. The model carries out one sentence at a time and cannot run ahead or skip one.
+Botter follows the structure itself. The loop runs once per lead, the `IF` branches the way it says, and the steps happen in order. Each sentence is handed to the model on its own, so none is skipped and none is reached before its turn.
 
 Two things are never left to the model:
 
-- **`ASK` is asked.** Botter shows the question and waits. With choices, the answer is one of them. Nothing is sent until the user says yes.
+- **`ASK` is asked.** Botter shows the question and waits. With choices, the answer is one of them, so the `IF {send} is "yes":` under it is decided exactly and the sending step is only reached on a yes.
 - **A tool's answer is the tool's answer.** When a sentence names one tool and keeps its result, the value is exactly what the tool returned, not the model's retelling of it.
 
 A condition that compares values, like `{send} is "yes"` or `{leads} is empty`, is decided exactly. One that needs judgement, like `IF the customer is asking about their own account:`, is one short question to the model.
@@ -203,11 +205,11 @@ A flow that builds can still make no sense, so before building, your model revie
 
 Values live in `{braces}`, never mixed into instructions, and the model is told outright that whatever a value holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
 
-## What's inside 396 KB
+## What's inside 392 KB
 
-Botter doesn't generate code, and no compiler or linker runs during a build. Your files are appended, read-only, to **botcore**, the runtime, and sealed with a checksum. A build takes **2.7 ms**. A truncated or tampered `.bot` refuses to start.
+Botter doesn't generate code, and no compiler or linker runs during a build. Your files are appended, read-only, to **botcore**, the runtime, and sealed with a checksum. A build takes about **2 ms**. A truncated or tampered `.bot` refuses to start.
 
-botcore is about 12,000 lines of C11, statically linked against musl, and it packs a surprising amount into a few hundred kilobytes:
+botcore is about 11,000 lines of C, statically linked against musl, and it packs a surprising amount into a few hundred kilobytes:
 
 - an FWL parser, linter and interpreter
 - its own HTTPS stack, using vendored BearSSL with Mozilla's CA roots compiled in, so no curl, no OpenSSL and no system certificates
@@ -220,11 +222,11 @@ botcore is about 12,000 lines of C11, statically linked against musl, and it pac
 
 An agent runs commands on your machine. Botter assumes that's dangerous and acts like it.
 
-- **Landlock sandbox.** Every tool and shell command can write to the working folder and `/tmp`, and that's it. Your `~/.ssh`, your tokens and the rest of your home directory are invisible to it. `rm`, overwrites, `git push` and `sudo` all ask first.
+- **Landlock sandbox.** Every tool and shell command can write to the working folder, the temporary directories and the `~/.cache` and `~/.npm` caches, and that's it. Your `~/.ssh`, your tokens and the rest of your home directory are invisible to it. `rm`, overwrites, `git push` and `sudo` all ask first.
 - **Kill switch for the network.** Set `"internet": false` and the kernel cuts the agent's tools off the network. The model connection still works.
-- **Plan mode.** Hit Tab. The kernel makes the folder read-only, and the agent can look and think but not touch.
-- **No phoning home.** No telemetry, no accounts, no update checks. One connection: the model *you* picked.
-- **Leaves no trace.** No logs, no history, no config files. The conversation lives in RAM. Your API key is never written to disk, never passed through environment variables or arguments, sits in locked memory and gets wiped on exit.
+- **Plan mode.** Hit Tab in Botter, or type `/plan` in any agent. The kernel makes the folder read-only, and the agent can look and think but not touch.
+- **No phoning home.** No telemetry, no accounts, no update checks. The only connections are the ones you set up: the model you picked, and any MCP servers or agents you listed in `config.json`.
+- **Leaves no trace.** No logs, no history, no settings files. The conversation lives in RAM. The key you type is never written to disk and never passed through environment variables or arguments: the running agent holds it in locked memory and wipes it on exit, and the kernel keyring remembers it, in RAM, until the machine restarts. A key only ever reaches the disk if you choose that yourself, encrypted in a sealed vault or as a line in a `.env` file.
 
 ## Keys: yours to type, or sealed inside
 
@@ -242,17 +244,17 @@ That is the whole login. The password is checked on the machine itself, with no 
 
 ## The numbers
 
-AMD Ryzen 5 7520U, Fedora 44, median of 15 to 30 runs.
+AMD Ryzen 5 7520U, Fedora 44, median of 15 to 30 runs. Sizes are in KB of 1,024 bytes. "Start" is from launch to the first prompt. The full session talks to a model stand-in on the same machine, so it measures Botter, not a provider.
 
 | | Time / size | Peak memory |
 |---|---|---|
-| `botter` itself (UI + runtime + compiler) | **726 KB** | |
-| A built agent | **396 KB** | |
-| Build an agent | **2.7 ms** | 0.4 MB |
-| Start an agent | **1.2 ms** | **0.4 MB** |
-| Full session: connect, one turn with a tool call, exit | 134 ms | **3.8 MB** |
-| *For scale:* `python3 -c pass` | 18.9 ms | 9.2 MB |
-| *For scale:* `node -e 0` | 27.0 ms | 43.7 MB |
+| `botter` itself (UI + runtime + packer) | **710 KB** | |
+| A built agent | **392 KB** | |
+| Build an agent | **2 ms** | 0.4 MB |
+| Start an agent | **0.4 ms** | **0.4 MB** |
+| Full session: connect, one turn with a tool call, exit | 131 ms | **3.9 MB** |
+| *For scale:* `python3 -c pass` | 15 ms | 9.2 MB |
+| *For scale:* `node -e 0` | 29 ms | 40.6 MB |
 
 Those last two rows are interpreters doing *nothing*, before a single framework import.
 
@@ -266,12 +268,12 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 209 tests: FWL, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI...
+make test                     # 215 tests: FWL, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```
 
-`tools/src/botcore` is the runtime, `tools/src/pack` is the packer, and `tui/` is Botter's full-screen UI. `agent.md`, `FLOW.fwl` and `skills/` are Botter itself.
+`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` holds Botter's build tools, and `tui/` is Botter's full-screen UI. `agent.md`, `FLOW.fwl`, `config.json` and `skills/` in the repo root are Botter itself.
 
 ## License
 

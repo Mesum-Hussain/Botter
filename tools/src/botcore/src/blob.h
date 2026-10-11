@@ -3,7 +3,7 @@
 
 /*
  * Agent pack format ("BOTPACK"), appended to the botcore executable by
- * botter_pack. All integers little-endian. The ELF loader ignores trailing
+ * packer. All integers little-endian. The ELF loader ignores trailing
  * bytes, so the result is still a normal executable.
  *
  *   [botcore ELF][zero padding to a 4096 boundary][BLOB][FOOTER]
@@ -33,10 +33,10 @@
  *    8  u64     blob_off   0 in plain botcore
  *   16  u64     file_size  total size of the .bot; 0 in plain botcore
  *   24  u64     reserved
- * botter_pack patches it in the copy it writes, so a .bot that lost its tail
+ * packer patches it in the copy it writes, so a .bot that lost its tail
  * (interrupted copy/download) refuses to start instead of running as plain botcore.
  *
- * The writer (botter_pack) is a separate program and carries its own copy of
+ * The writer (packer) is a separate program and carries its own copy of
  * this description. Keep both in sync; bump the magic digits on any change.
  */
 
