@@ -4,7 +4,7 @@
 
 ### The Markdown-first agent framework.<br>Every agent ships as one portable executable.
 
-**392 KB** · **starts in 0.4 ms** · **nothing to install** · **runs on any x86-64 Linux**
+**396 KB** · **starts in 0.4 ms** · **nothing to install** · **runs on any x86-64 Linux**
 
 </div>
 
@@ -23,7 +23,7 @@ lead-outreach/
 And here's the same agent, ready to ship:
 
 ```
-lead-outreach.bot      one file, under 400 KB
+lead-outreach.bot      one file, about 400 KB
 ```
 
 One file. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
@@ -39,13 +39,14 @@ Markdown is where you start, not where the agent's power stops. The same single 
 | Multi-step work that happens in order, every time | **FWL** flows: plain sentences inside loops, branches and retries that an interpreter follows exactly |
 | A team, not one agent | **Sub-agents**, each with its own persona, handed work by the flow or by the main agent |
 | Real capabilities | **Tools** in any language, plus file, shell and scheduling tools built in |
-| Other people's tools | **MCP** servers, called over HTTPS with nothing started locally |
+| Other people's tools | **MCP** servers, unmodified: by URL, or started by command the way Claude Code and opencode run them |
 | Other people's agents | **A2A**, both calling out and being called |
+| Your agent as a tool for other agents | **MCP** again, the other way round: Claude Code, opencode or any MCP client can call it |
 | The agent in your editor | **ACP**, for editors such as Zed |
 | Safety on a real machine | A kernel **sandbox**, a network kill switch, and approval before anything destructive |
 | Keys that travel with the agent | An optional password-**sealed vault** inside the file |
 
-All of it fits in under 400 KB, in one process, with no framework to carry along.
+All of it fits in about 400 KB, in one process, with no framework to carry along.
 
 ## The part nobody talks about
 
@@ -61,7 +62,7 @@ Same laptop, comparable agents:
 
 | | Botter agent | OpenClaw agent | |
 |---|---|---|---|
-| On disk | **392 KB**, 1 file | 646 MB, 41,408 files | **~1,600× smaller** |
+| On disk | **396 KB**, 1 file | 646 MB, 41,408 files | **~1,600× smaller** |
 | Ready in | **0.4 ms** | 7.3 s | **~18,000× faster** |
 | Idle memory | **0.4 MB** | 730 MB | **~1,800× lighter** |
 
@@ -111,27 +112,38 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 **Sub-agents** live in the same file as the agent. Each gets its own persona and a fresh conversation, does one job with the agent's tools, and hands back only its result. A flow gives one work by naming it in a sentence, like `Have @researcher look into {lead}.`, and the agent can also delegate on its own. No second process, no second binary.
 
+**What it needs.** If an agent relies on programs being installed, say `sqlite3` for a database or `python3` for a tool, they are listed under `requires` in `config.json`. The build warns when a tool needs something that isn't listed, and when the agent starts it checks the machine: the user is told what is missing, and so is the model, so it says "install sqlite3 first" instead of failing one command at a time.
+
 **Tools** are any executable at all: Python, bash, Go, Rust, C. A tool gets one JSON object on stdin and prints its answer. That's the whole protocol. A tool brings its own needs with it, so a Python tool needs Python on the box and a static binary needs nothing. Users never see tool names or JSON. They see *"Searching for leads…"*.
 
-## It speaks the standards, and starts nothing
+## It speaks the standards
 
-Most agent runtimes reach the outside world by launching things: a tool server here, a bridge there. A Botter agent is still one process.
+MCP, A2A and ACP are built into the runtime, in C. There is no bridge, no adapter and no second runtime to install: a Botter agent is still one file, and it starts nothing unless you tell it to.
 
-- **MCP.** Name a server's URL in `config.json` and its tools join the agent's own. Each call is one HTTPS request from the agent's built-in client, using the stateless 2026 revision of the protocol, and falling back to the older session handshake for servers that still want it. Nothing is installed and nothing is started.
+- **MCP, by URL.** Name a server's URL in `config.json` and its tools join the agent's own. Each call is one HTTPS request from the agent's built-in client, using the stateless 2026 revision of the protocol, and falling back to the older session handshake for servers that still want it. Nothing is installed and nothing is started.
+- **MCP, by command.** Most MCP servers are programs you start, like `npx -y @modelcontextprotocol/server-filesystem .`. Give the agent that same command and it starts the server itself, unmodified, inside the same sandbox as its tools, and stops it when it exits. The agent needs no Node or Python of its own; such a server needs whatever it was written in, so list that under `requires`.
+- **MCP, being used.** `./myagent.bot --mcp` turns the agent into an MCP server with one tool, `ask`. Any MCP client that starts a command can use it: a coding agent such as Claude Code or opencode, an editor, another framework. The client starts the agent and talks to it over its input and output, so nothing listens. Give it a port (`--mcp 8080`) and it serves MCP over HTTP instead.
 - **A2A, calling out.** List another agent's URL under `agents` and a flow hands it work by naming it `@billing` in a sentence, exactly like a sub-agent.
-- **A2A, being called.** `./myagent.bot --a2a 8080` publishes an agent card and answers other agents. This is the only mode that listens, and only when you ask for it.
+- **A2A, being called.** `./myagent.bot --a2a 8080` publishes an agent card and answers other agents. Like `--mcp 8080`, it listens only because you asked it to.
 - **ACP.** `./myagent.bot --acp` is what an editor such as Zed runs to put the agent in its sidebar, with tool calls and permission prompts shown in the editor.
 
 ```json
 {
-  "mcp":    { "docs":    { "url": "https://example.com/mcp", "token": "DOCS_TOKEN" } },
+  "mcp":    { "docs":    { "url": "https://example.com/mcp", "token": "DOCS_TOKEN" },
+              "files":   { "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] } },
   "agents": { "billing": { "url": "https://billing.example.com", "token": "BILLING_TOKEN" } }
 }
 ```
 
 `token` is only a name, never the secret itself. The value comes from the agent's sealed vault, or from a line of that name in a `.env` file next to where the agent runs.
 
-With `--acp` and `--a2a` there is nobody at a keyboard, so the agent never asks for a key there. It uses the model connection you saved by running it once in a terminal, its sealed vault, or `BOTTER_BASE_URL`, `BOTTER_API_KEY` and `BOTTER_MODEL` in that `.env` file. `--a2a` listens on this machine only unless you give it an address (`--a2a 0.0.0.0:8080`), and then it insists on an `A2A_TOKEN` that callers must send.
+For example, to give Claude Code your agent as a tool:
+
+```sh
+claude mcp add lead-outreach -- /path/to/lead-outreach.bot --mcp
+```
+
+With `--acp`, `--a2a` and `--mcp` there is nobody at a keyboard, so the agent never asks for a key there. It uses the model connection you saved by running it once in a terminal, its sealed vault, or `BOTTER_BASE_URL`, `BOTTER_API_KEY` and `BOTTER_MODEL` in that `.env` file. `--a2a` and `--mcp` with a port listen on this machine only unless you give them an address (`--a2a 0.0.0.0:8080`), and then they insist on a token that callers must send (`A2A_TOKEN` or `MCP_TOKEN`). Risky actions, which a person at the terminal would be asked about, are refused in these modes.
 
 ## FWL: plain English that runs the same way every time
 
@@ -205,7 +217,7 @@ A flow that builds can still make no sense, so before building, your model revie
 
 Values live in `{braces}`, never mixed into instructions, and the model is told outright that whatever a value holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
 
-## What's inside 392 KB
+## What's inside 396 KB
 
 Botter doesn't generate code, and no compiler or linker runs during a build. Your files are appended, read-only, to **botcore**, the runtime, and sealed with a checksum. A build takes about **2 ms**. A truncated or tampered `.bot` refuses to start.
 
@@ -214,7 +226,7 @@ botcore is about 11,000 lines of C, statically linked against musl, and it packs
 - an FWL parser, linter and interpreter
 - its own HTTPS stack, using vendored BearSSL with Mozilla's CA roots compiled in, so no curl, no OpenSSL and no system certificates
 - an OpenAI-compatible client with streaming and tool calling
-- clients for MCP and A2A, and ACP and A2A front ends
+- clients for MCP and A2A, and MCP, A2A and ACP front ends
 - file, shell and scheduling tools
 - a sandbox enforced by the kernel itself
 
@@ -248,8 +260,8 @@ AMD Ryzen 5 7520U, Fedora 44, median of 15 to 30 runs. Sizes are in KB of 1,024 
 
 | | Time / size | Peak memory |
 |---|---|---|
-| `botter` itself (UI + runtime + packer) | **710 KB** | |
-| A built agent | **392 KB** | |
+| `botter` itself (UI + runtime + packer) | **715 KB** | |
+| A built agent | **396 KB** | |
 | Build an agent | **2 ms** | 0.4 MB |
 | Start an agent | **0.4 ms** | **0.4 MB** |
 | Full session: connect, one turn with a tool call, exit | 131 ms | **3.9 MB** |
@@ -268,7 +280,7 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 215 tests: FWL, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
+make test                     # 231 tests: FWL, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```

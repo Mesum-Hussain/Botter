@@ -1139,6 +1139,8 @@ static const char *agent_title(void)
     return meta_str("display_name") ? meta_str("display_name") : meta_str("name");
 }
 
+static char g_missing[800]; /* for the system prompt: the required programs this machine lacks */
+
 /* config.json "requires": programs that must be on PATH; say which ones are missing. */
 static void check_requires(void)
 {
@@ -1164,6 +1166,10 @@ static void check_requires(void)
     }
     if (missing[0]) {
         printf(ANSI_BOLD_RED "Note:" ANSI_RESET " this agent needs programs that are not installed here: %s\n", missing);
+        /* the model must know too: otherwise it finds out one failed command at a time */
+        snprintf(g_missing, sizeof(g_missing),
+                 "\nPrograms this agent relies on that are NOT installed on this machine: %s. Do not try to run them: "
+                 "when a task needs one, tell the user it has to be installed first.", missing);
     }
 }
 
@@ -1357,7 +1363,6 @@ int main(int argc, char **argv)
     if (saved < 0 || (saved == 0 && !connect_flow(&chat))) {
         return 0;
     }
-    mcp_init();
 
     /* Online by default. Offline agents cut shell_exec and tools off from the network;
      * there, tools whose descriptor asks for "network": true get it only if the user agrees. */
@@ -1375,6 +1380,7 @@ int main(int argc, char **argv)
                                n_net > 1 ? "s" : "", net_names, n_net > 1 ? "" : "s");
         ext_allow_network(net_ok);
     }
+    mcp_init(); /* after the sandbox is known: a server given as a command starts inside it */
     tools_enable_review(agent_builder());
     review_set_chat(&chat);
     cJSON *tools = tools_schema(), *del = delegate_schema();
@@ -1445,14 +1451,14 @@ int main(int argc, char **argv)
         snprintf(ident, sizeof(ident), "\nYou are the agent \"%.64s\"%s%.40s.%s%.300s%s", agent_title(),
                  v ? ", version " : "", v ? v : "", d ? " " : "", d ? d : "", dot ? "." : "");
     }
-    size_t sl = strlen(persona) + strlen(ident) + strlen(cwd) + sizeof(FIXED) + strlen(net_text) + sizeof(VFS_HINT) +
+    size_t sl = strlen(persona) + strlen(ident) + strlen(g_missing) + strlen(cwd) + sizeof(FIXED) + strlen(net_text) + sizeof(VFS_HINT) +
                 sizeof(FLOW_HINT) + sizeof(FRONT_HINT) + sizeof(MODE_HINT) + (index ? strlen(index) : 0) + 64;
     char *sys = malloc(sl);
     if (!sys) {
         fprintf(stderr, ANSI_BOLD_RED "Error:" ANSI_RESET " out of memory\n");
         return 1;
     }
-    snprintf(sys, sl, "%s%s\n\nWorking directory: %s\n%s %s%s%s%s%s%s%s", persona, ident, cwd, FIXED, net_text,
+    snprintf(sys, sl, "%s%s%s\n\nWorking directory: %s\n%s %s%s%s%s%s%s%s", persona, ident, g_missing, cwd, FIXED, net_text,
              vfs_count() ? "\n" : "", vfs_count() ? VFS_HINT : "", index ? index : "", has_flow ? FLOW_HINT : "",
              MODE_HINT, front_hint);
     free(index);

@@ -6,10 +6,17 @@
 #include "tools.h"
 #include "vfs.h"
 
+#include "guard.h"
+
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -183,6 +190,10 @@ typedef struct {
     const char *token;
     int         mode; /* 0 unknown, 1 stateless, 2 session handshake */
     char        sid[300], ver[16];
+    pid_t       pid;      /* a server this agent started ("command"): JSON-RPC lines over its stdin/stdout */
+    int         wfd, rfd;
+    char       *rb;
+    size_t      rlen, rcap;
 } msrv_t;
 
 typedef struct {
@@ -197,6 +208,127 @@ static mtool_t *g_mt;
 static size_t   g_nsrv, g_nmt;
 static int      g_id;
 
+/*
+ * A server given as a "command": started once, inside the same sandbox as the agent's tools
+ * (working folder, no more network than the agent has), and gone when the agent is. Its
+ * program is its own: an npx server needs Node on the machine, a native binary needs nothing.
+ */
+static int mcp_spawn(msrv_t *s, const cJSON *cmd, const cJSON *env)
+{
+    char *argv[32];
+    int n = 0, in[2], out[2];
+    const cJSON *a;
+    cJSON_ArrayForEach(a, cmd)
+    {
+        if (cJSON_IsString(a) && n < 31) {
+            argv[n++] = a->valuestring;
+        }
+    }
+    argv[n] = NULL;
+    if (!n || pipe2(in, O_CLOEXEC) != 0) {
+        return -1;
+    }
+    if (pipe2(out, O_CLOEXEC) != 0) {
+        close(in[0]);
+        close(in[1]);
+        return -1;
+    }
+    fflush(NULL);
+    s->pid = fork();
+    if (s->pid == 0) {
+        setsid();
+        prctl(PR_SET_PDEATHSIG, SIGTERM); /* no agent, no server */
+        dup2(in[0], 0);
+        dup2(out[1], 1);
+        int nul = open("/dev/null", O_WRONLY);
+        dup2(nul, 2); /* servers log on stderr */
+        signal(SIGPIPE, SIG_DFL);
+        signal(SIGINT, SIG_IGN); /* Ctrl-C stops the agent's turn, not its servers */
+        cJSON_ArrayForEach(a, env) /* the secrets it needs, by name, from the vault or .env */
+        {
+            if (cJSON_IsString(a) && env_get(a->valuestring)) {
+                setenv(a->valuestring, env_get(a->valuestring), 1);
+            }
+        }
+        if (chdir(guard_ctx()) != 0 || tool_sandbox_apply(24 * 3600, !guard_offline()) != 0) {
+            _exit(126);
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(in[0]);
+    close(out[1]);
+    if (s->pid < 0) {
+        close(in[1]);
+        close(out[0]);
+        s->pid = 0;
+        return -1;
+    }
+    s->wfd = in[1];
+    s->rfd = out[0];
+    return 0;
+}
+
+/* One exchange with a started server: write the message; unless it is a notification (id < 0),
+ * read lines until the answer with that id (what the server asks of us meanwhile is declined). */
+static cJSON *stdio_rpc(msrv_t *s, const char *body, int id, int *status)
+{
+    size_t bl = strlen(body);
+    *status = 0;
+    if (write(s->wfd, body, bl) != (ssize_t)bl || write(s->wfd, "\n", 1) != 1) {
+        return NULL;
+    }
+    double waited = 0;
+    while (id >= 0 && waited < RPC_TIMEOUT_S) {
+        char *nl = s->rlen ? memchr(s->rb, '\n', s->rlen) : NULL;
+        if (nl) {
+            *nl = '\0';
+            cJSON *j = cJSON_Parse(s->rb);
+            size_t used = (size_t)(nl - s->rb) + 1;
+            memmove(s->rb, nl + 1, s->rlen - used);
+            s->rlen -= used;
+            const cJSON *jid = cJSON_GetObjectItem(j, "id");
+            if (cJSON_IsNumber(jid) && (int)jid->valuedouble == id && !cJSON_GetObjectItem(j, "method")) {
+                *status = 200;
+                return j;
+            }
+            if (jid && cJSON_GetObjectItem(j, "method")) { /* sampling, roots ...: not offered */
+                char no[200], *ids = cJSON_PrintUnformatted(jid);
+                snprintf(no, sizeof(no), "{\"jsonrpc\":\"2.0\",\"id\":%.60s,\"error\":{\"code\":-32601,\"message\":\"not supported\"}}\n",
+                         ids ? ids : "null");
+                free(ids);
+                (void)!write(s->wfd, no, strlen(no));
+            }
+            cJSON_Delete(j);
+            continue;
+        }
+        struct pollfd p = {s->rfd, POLLIN, 0};
+        int r = poll(&p, 1, 500);
+        waited += r == 0 ? 0.5 : 0;
+        if (term_interrupted()) {
+            *status = -2;
+            return NULL;
+        }
+        if (r <= 0) {
+            continue;
+        }
+        if (s->rcap - s->rlen < 65536) {
+            char *nb = realloc(s->rb, s->rcap + 131072);
+            if (!nb) {
+                return NULL;
+            }
+            s->rb = nb;
+            s->rcap += 131072;
+        }
+        ssize_t got = read(s->rfd, s->rb + s->rlen, s->rcap - s->rlen - 1);
+        if (got <= 0) { /* the server is gone */
+            return NULL;
+        }
+        s->rlen += (size_t)got;
+    }
+    return NULL;
+}
+
 static int mcp_handshake(msrv_t *s)
 {
     int st;
@@ -204,7 +336,8 @@ static int mcp_handshake(msrv_t *s)
     snprintf(body, sizeof(body),
              "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"" MCP_SESSION
              "\",\"capabilities\":{},\"clientInfo\":{\"name\":\"botter\",\"version\":\"1\"}}}", ++g_id);
-    cJSON *j = rpc(s->url, s->token, "Accept: application/json, text/event-stream\r\n", body, &st);
+    cJSON *j = s->pid ? stdio_rpc(s, body, g_id, &st)
+                      : rpc(s->url, s->token, "Accept: application/json, text/event-stream\r\n", body, &st);
     const char *v = jstr(cJSON_GetObjectItem(j, "result"), "protocolVersion");
     if (!v) {
         cJSON_Delete(j);
@@ -216,7 +349,8 @@ static int mcp_handshake(msrv_t *s)
     char h[500];
     snprintf(h, sizeof(h), "Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: %s\r\n%s%s%s", s->ver,
              s->sid[0] ? "Mcp-Session-Id: " : "", s->sid, s->sid[0] ? "\r\n" : "");
-    cJSON_Delete(rpc(s->url, s->token, h, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", &st));
+    static const char READY[] = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
+    cJSON_Delete(s->pid ? stdio_rpc(s, READY, -1, &st) : rpc(s->url, s->token, h, READY, &st));
     s->mode = 2;
     return 0;
 }
@@ -247,7 +381,7 @@ static cJSON *mcp_req(msrv_t *s, const char *method, const char *name, cJSON *pa
         char *body = cJSON_PrintUnformatted(b);
         cJSON_Delete(b);
         cJSON_Delete(j);
-        j = body ? rpc(s->url, s->token, h, body, status) : NULL;
+        j = !body ? NULL : s->pid ? stdio_rpc(s, body, g_id, status) : rpc(s->url, s->token, h, body, status);
         free(body);
         if (cJSON_GetObjectItem(j, "result")) {
             s->mode = s->mode ? s->mode : 1;
@@ -329,15 +463,28 @@ void mcp_init(void)
     cJSON_ArrayForEach(e, servers)
     {
         const char *u = jstr(e, "url");
-        if (!url_allowed(u)) {
+        const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(e, "command");
+        if (!cJSON_IsArray(cmd) && !url_allowed(u)) {
             fprintf(stderr, ANSI_DIM "(MCP %s: \"url\" must be https:// (http:// only for localhost))" ANSI_RESET "\n",
                     e->string);
             continue;
         }
         msrv_t *s = &g_srv[g_nsrv++];
         snprintf(s->name, sizeof(s->name), "%s", e->string);
-        s->url = strdup(u);
-        s->token = token_of(e);
+        if (cJSON_IsArray(cmd)) { /* a server to start: it speaks the session protocol over its stdin/stdout */
+            if (mcp_spawn(s, cmd, cJSON_GetObjectItemCaseSensitive(e, "env")) != 0 || mcp_handshake(s) != 0) {
+                fprintf(stderr, ANSI_DIM "(MCP %s is not available: \"%s\" did not start as an MCP server; is it installed?)"
+                                ANSI_RESET "\n", s->name, cJSON_IsString(cmd->child) ? cmd->child->valuestring : "?");
+                if (s->pid > 0) {
+                    kill(s->pid, SIGTERM);
+                }
+                g_nsrv--;
+                continue;
+            }
+        } else {
+            s->url = strdup(u);
+            s->token = token_of(e);
+        }
         mcp_list(s);
     }
 }

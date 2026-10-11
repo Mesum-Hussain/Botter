@@ -4,13 +4,18 @@
 #include "cJSON.h"
 
 /*
- * What an agent reaches over HTTPS, from its config.json. Nothing is started on this
- * machine and nothing listens: every call is one request made by botcore's own client.
+ * What an agent reaches from its config.json: MCP servers and other agents. By URL, every call
+ * is one request made by botcore's own client and nothing is started; an MCP server may also be
+ * given as a command to start.
  *
  *   "mcp":    {"docs": {"url": "https://host/mcp", "token": "DOCS_TOKEN"}}
  *             MCP servers (Streamable HTTP; stateless 2026-07-28, or the older session
  *             handshake when the server asks for it). Their tools join the agent's own as
  *             <server>_<tool>.
+ *             {"files": {"command": ["npx", "-y", "@scope/server", "."], "env": ["SOME_TOKEN"]}}
+ *             A server to start instead: the usual way MCP servers are run. It runs for as long
+ *             as the agent does, inside the tools' sandbox, speaking MCP over its stdin/stdout;
+ *             "env" names the secrets (vault or .env lines) it gets in its environment.
  *   "agents": {"billing": {"url": "https://host", "token": "BILLING_TOKEN", "description": "..."}}
  *             Remote agents (A2A 1.0 JSON-RPC; 0.3 when the card says so), delegated to like
  *             sub-agents.

@@ -19,7 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { F_OFF, F_UI, F_ACP, F_A2A };
+enum { F_OFF, F_UI, F_ACP, F_A2A, F_MCP };
 static int g_on; /* F_* */
 
 /* --acp / --a2a: the request being answered and the conversation it belongs to */
@@ -65,7 +65,8 @@ static void busy(int on)
     }
 }
 
-static int a2a_listen(const char *addr)
+/* Listen for HTTP callers (A2A, or MCP over HTTP). token_name: the .env / vault line callers must match. */
+static int a2a_listen(const char *addr, const char *flag, const char *token_name)
 {
     const char *colon = strrchr(addr, ':');
     char host[64] = "127.0.0.1";
@@ -73,25 +74,26 @@ static int a2a_listen(const char *addr)
         snprintf(host, sizeof(host), "%.*s", (int)(colon - addr), addr);
     }
     struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons((uint16_t)atoi(colon ? colon + 1 : addr))};
-    g_token = env_get("A2A_TOKEN");
+    g_token = env_get(token_name);
     if (inet_pton(AF_INET, host, &sa.sin_addr) != 1 || !sa.sin_port) {
-        fprintf(stderr, "--a2a wants [HOST:]PORT, e.g. --a2a 8080 or --a2a 0.0.0.0:8080\n");
+        fprintf(stderr, "%s wants [HOST:]PORT, e.g. %s 8080 or %s 0.0.0.0:8080\n", flag, flag, flag);
         return -1;
     }
     if (ntohl(sa.sin_addr.s_addr) >> 24 != 127 && !(g_token && *g_token)) {
-        fprintf(stderr, "--a2a %s is reachable from other machines: put A2A_TOKEN=<secret> in .env first "
-                        "(callers send it as their bearer token)\n", addr);
+        fprintf(stderr, "%s %s is reachable from other machines: put %s=<secret> in .env first "
+                        "(callers send it as their bearer token)\n", flag, addr, token_name);
         return -1;
     }
     int one = 1;
     g_lsock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     setsockopt(g_lsock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     if (g_lsock < 0 || bind(g_lsock, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(g_lsock, 16) != 0) {
-        fprintf(stderr, "--a2a %s: %s\n", addr, strerror(errno));
+        fprintf(stderr, "%s %s: %s\n", flag, addr, strerror(errno));
         return -1;
     }
-    fprintf(stderr, "A2A: listening on http://%s:%d (agent card: /.well-known/agent-card.json)%s\n", host,
-            ntohs(sa.sin_port), g_token && *g_token ? "" : ", no token: this machine only");
+    fprintf(stderr, "%s: listening on http://%s:%d%s%s\n", flag + 2, host, ntohs(sa.sin_port),
+            flag[2] == 'a' ? " (agent card: /.well-known/agent-card.json)" : " (MCP endpoint: /)",
+            g_token && *g_token ? "" : ", no token: this machine only");
     return 0;
 }
 
@@ -111,11 +113,25 @@ int front_init(int argc, char **argv)
         return 1;
     }
     if (argc > 1 && !strcmp(argv[1], "--a2a")) {
-        if (a2a_listen(argc > 2 ? argv[2] : "")) {
+        if (a2a_listen(argc > 2 ? argv[2] : "", "--a2a", "A2A_TOKEN")) {
             exit(2);
         }
         signal(SIGPIPE, SIG_IGN);
         g_on = F_A2A;
+        return 1;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--mcp")) { /* an MCP server: over stdio, or over HTTP when given a port */
+        if (argc > 2) {
+            if (a2a_listen(argv[2], "--mcp", "MCP_TOKEN")) {
+                exit(2);
+            }
+            signal(SIGPIPE, SIG_IGN);
+        } else {
+            int nul = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+            dup2(nul, STDOUT_FILENO);
+        }
+        g_on = F_MCP;
         return 1;
     }
     const char *v = getenv("BOTCORE_FRONTEND");
@@ -211,7 +227,7 @@ static void remote_event(const cJSON *o)
     const char *ev = jstr(o, "ev"), *text = jstr(o, "text");
     if (!strcmp(ev, "permission")) {
         snprintf(g_perm, sizeof(g_perm), "%s", text);
-    } else if (g_on == F_A2A) {
+    } else if (g_on == F_A2A || g_on == F_MCP) {
         if ((!strcmp(ev, "reply") || !strcmp(ev, "text")) && *text) { /* the answer is the text, whole */
             char *n = NULL;
             if (asprintf(&n, "%s%s%s", g_acc ? g_acc : "", g_acc ? "\n\n" : "", text) >= 0) {
@@ -262,7 +278,8 @@ static void a2a_respond(int c, int status, cJSON *body)
     char *s = body ? cJSON_PrintUnformatted(body) : NULL, head[200];
     int n = snprintf(head, sizeof(head),
                      "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-                     status, status == 200 ? "OK" : status == 401 ? "Unauthorized" : "Error", s ? strlen(s) : 0);
+                     status, status == 200 ? "OK" : status == 202 ? "Accepted" : status == 401 ? "Unauthorized" : "Error",
+                     s ? strlen(s) : 0);
     if (send(c, head, (size_t)n, MSG_NOSIGNAL) == n && s) {
         for (size_t off = 0, l = strlen(s); off < l;) {
             ssize_t w = send(c, s + off, l - off, MSG_NOSIGNAL);
@@ -296,6 +313,19 @@ static void finish_request(void)
         cJSON *r = cJSON_CreateObject();
         cJSON_AddStringToObject(r, "stopReason", g_cancel ? "cancelled" : "end_turn");
         acp_result(g_rid, r, 0, NULL);
+    } else if (g_on == F_MCP && g_rid) { /* the tool call's result: what the agent said */
+        cJSON *res = cJSON_CreateObject(), *o = cJSON_CreateObject();
+        cJSON_AddItemToArray(cJSON_AddArrayToObject(res, "content"), text_block(g_acc ? g_acc : "(the agent had nothing to say)"));
+        cJSON_AddBoolToObject(res, "isError", 0);
+        cJSON_AddItemToObject(o, "id", cJSON_Duplicate(g_rid, 1));
+        cJSON_AddItemToObject(o, "result", res);
+        if (g_conn >= 0) {
+            cJSON_AddStringToObject(o, "jsonrpc", "2.0");
+            a2a_respond(g_conn, 200, o);
+            g_conn = -1;
+        } else {
+            acp_send(o);
+        }
     } else if (g_on == F_A2A && g_conn >= 0) {
         cJSON *o = cJSON_CreateObject(), *m = cJSON_CreateObject(), *part = cJSON_CreateObject();
         char mid[40];
@@ -359,6 +389,103 @@ static char *blocks_text(const cJSON *blocks)
 }
 
 static int read_line(int timeout_ms, char **line);
+
+/*
+ * MCP server: one request. Everything but a tool call is answered here (*reply: the JSON-RPC
+ * message to send, NULL for a notification); a call of the agent's one tool, "ask", becomes
+ * the next prompt (returns its text; the result follows when the turn is over).
+ */
+static char *mcp_request(const cJSON *j, cJSON **reply, char sess[100])
+{
+    const char *m = jstr(j, "method");
+    const cJSON *id = cJSON_GetObjectItem(j, "id"), *p = cJSON_GetObjectItem(j, "params");
+    cJSON *res = NULL;
+    const char *err = NULL;
+    int code = -32601;
+    *reply = NULL;
+    if (!*m || !id) { /* a notification (initialized, cancelled) or a stray response */
+        return NULL;
+    }
+    if (!strcmp(m, "initialize") || !strcmp(m, "server/discover")) {
+        const char *v = jstr(p, "protocolVersion");
+        cJSON *info;
+        res = cJSON_CreateObject();
+        cJSON_AddStringToObject(res, "protocolVersion", *v ? v : "2025-06-18");
+        cJSON_AddObjectToObject(cJSON_AddObjectToObject(res, "capabilities"), "tools");
+        info = cJSON_AddObjectToObject(res, "serverInfo");
+        cJSON_AddStringToObject(info, "name", jstr(g_card, "name"));
+        cJSON_AddStringToObject(info, "version", jstr(g_card, "version"));
+        cJSON_AddStringToObject(res, "instructions", jstr(g_card, "description"));
+    } else if (!strcmp(m, "ping")) {
+        res = cJSON_CreateObject();
+    } else if (!strcmp(m, "tools/list")) {
+        char d[900];
+        cJSON *t = cJSON_CreateObject();
+        snprintf(d, sizeof(d), "Ask the agent \"%.80s\": %.500s Send one message and get its reply. It remembers the "
+                               "conversation between calls; pass new_conversation: true to start over.",
+                 jstr(g_card, "name"), jstr(g_card, "description"));
+        cJSON_AddStringToObject(t, "name", "ask");
+        cJSON_AddStringToObject(t, "description", d);
+        cJSON_AddItemToObject(t, "inputSchema",
+                              cJSON_Parse("{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":"
+                                          "\"What to say to the agent\"},\"new_conversation\":{\"type\":\"boolean\"}},"
+                                          "\"required\":[\"message\"]}"));
+        res = cJSON_CreateObject();
+        cJSON_AddItemToArray(cJSON_AddArrayToObject(res, "tools"), t);
+    } else if (!strcmp(m, "tools/call")) {
+        const cJSON *a = cJSON_GetObjectItem(p, "arguments");
+        const char *msg = jstr(a, "message");
+        if (strcmp(jstr(p, "name"), "ask") != 0 || !*msg) {
+            code = -32602;
+            err = "this server has one tool, ask, and it needs a \"message\"";
+        } else {
+            g_seq += cJSON_IsTrue(cJSON_GetObjectItem(a, "new_conversation")) || !g_sess[0];
+            snprintf(sess, 100, "mcp-%d", g_seq);
+            g_rid = cJSON_Duplicate(id, 1);
+            return strdup(msg);
+        }
+    } else {
+        err = "method not found";
+    }
+    *reply = cJSON_CreateObject();
+    cJSON_AddItemToObject(*reply, "id", cJSON_Duplicate(id, 1));
+    if (err) {
+        cJSON *e = cJSON_AddObjectToObject(*reply, "error");
+        cJSON_AddNumberToObject(e, "code", code);
+        cJSON_AddStringToObject(e, "message", err);
+    } else {
+        cJSON_AddItemToObject(*reply, "result", res);
+    }
+    return NULL;
+}
+
+/* MCP over stdio: the client started the agent and writes one JSON-RPC message per line. */
+static int mcp_next(int (*idle)(void), char **out)
+{
+    for (;;) {
+        char *line = NULL, sess[100], *text;
+        int r = read_line(idle ? 1000 : -1, &line);
+        if (r == 1 && idle && idle()) {
+            return TERM_TICK;
+        }
+        if (r == 1 || r == -2) {
+            continue;
+        }
+        if (r < 0) {
+            return TERM_EOF;
+        }
+        cJSON *j = cJSON_Parse(line), *reply = NULL;
+        free(line);
+        text = mcp_request(j, &reply, sess);
+        cJSON_Delete(j);
+        if (reply) {
+            acp_send(reply);
+        }
+        if (text) {
+            return take_prompt(sess, text, out);
+        }
+    }
+}
 
 static int acp_next(int (*idle)(void), char **out)
 {
@@ -515,7 +642,9 @@ static int a2a_next(int (*idle)(void), char **out)
         snprintf(g_host, sizeof(g_host), "%.*s", hh && hh < body ? (int)strcspn(hh + 6 + strspn(hh + 6, " "), "\r\n") : 0,
                  hh ? hh + 6 + strspn(hh + 6, " ") : "");
         if (!strncmp(rq, "GET ", 4)) {
-            if (!strstr(rq, "/.well-known/agent") || strstr(rq, "/.well-known/agent") > strstr(rq, "\r\n")) {
+            if (g_on == F_MCP) { /* no stream to open: every answer comes with its request */
+                a2a_respond(c, 405, NULL);
+            } else if (!strstr(rq, "/.well-known/agent") || strstr(rq, "/.well-known/agent") > strstr(rq, "\r\n")) {
                 a2a_respond(c, 404, NULL);
             } else { /* the agent card: who this is and how to call it */
                 cJSON *card = cJSON_Duplicate(g_card, 1), *i = cJSON_CreateObject(), *caps;
@@ -551,6 +680,21 @@ static int a2a_next(int (*idle)(void), char **out)
         }
         cJSON *j = cJSON_Parse(body);
         free(rq);
+        if (g_on == F_MCP) {
+            cJSON *reply = NULL;
+            char sess[100], *text = mcp_request(j, &reply, sess);
+            cJSON_Delete(j);
+            if (text) {
+                g_conn = c;
+                fprintf(stderr, "MCP: ask in %s\n", sess);
+                return take_prompt(sess, text, out);
+            }
+            if (reply) {
+                cJSON_AddStringToObject(reply, "jsonrpc", "2.0");
+            }
+            a2a_respond(c, reply ? 200 : 202, reply);
+            continue;
+        }
         const char *m = jstr(j, "method");
         const cJSON *id = cJSON_GetObjectItem(j, "id"), *msg = cJSON_GetObjectItem(cJSON_GetObjectItem(j, "params"), "message");
         int v03 = !strcmp(m, "message/send");
@@ -599,7 +743,7 @@ static int remote_readline(const char *prompt, int (*idle)(void), char **out)
         return TERM_LINE;
     }
     finish_request();
-    return g_on == F_ACP ? acp_next(idle, out) : a2a_next(idle, out);
+    return g_on == F_ACP ? acp_next(idle, out) : g_on == F_MCP && g_lsock < 0 ? mcp_next(idle, out) : a2a_next(idle, out);
 }
 
 static void emit(cJSON *o)

@@ -541,8 +541,29 @@ static void load_config(const char *dir)
                 if (!name_ok(e->string) || strchr(e->string, '.')) {
                     cfg_err("%s: the name must be lowercase letters, digits, - or _", who);
                 }
-                if (strncmp(us, "https://", 8) && strncmp(us, "http://127.0.0.1", 16) && strncmp(us, "http://localhost", 16)) {
-                    cfg_err("%s needs \"url\": \"https://...\" (http:// only for localhost)", who);
+                const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(e, "command"), *a;
+                if (cmd && !strcmp(x->string, "mcp")) { /* an MCP server this agent starts itself */
+                    int ok = cJSON_IsArray(cmd) && cJSON_GetArraySize(cmd) > 0 && !u;
+                    cJSON_ArrayForEach(a, cmd)
+                    {
+                        ok &= cJSON_IsString(a);
+                    }
+                    if (!ok) {
+                        cfg_err("%s: \"command\" is a list of texts, the program first ([\"npx\", \"-y\", \"@scope/server\"]), "
+                                "and replaces \"url\"", who);
+                    } else if (!in_cfg_list("requires", cmd->child->valuestring)) {
+                        cfg_warn("%s starts \"%s\": list it in \"requires\" so the agent can say when it is not installed",
+                                 who, cmd->child->valuestring);
+                    }
+                    cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(e, "env"))
+                    {
+                        if (!cJSON_IsString(a) || strpbrk(a->valuestring, " =")) {
+                            cfg_err("%s: \"env\" lists NAMES of secrets (lines of .env or the vault), never the values", who);
+                        }
+                    }
+                } else if (strncmp(us, "https://", 8) && strncmp(us, "http://127.0.0.1", 16) && strncmp(us, "http://localhost", 16)) {
+                    cfg_err("%s needs \"url\": \"https://...\" (http:// only for localhost)%s", who,
+                            strcmp(x->string, "mcp") ? "" : ", or \"command\": [...] for a server to start");
                 }
                 if (tk && (!cJSON_IsString(tk) || strpbrk(tk->valuestring, " =:/.") || strlen(tk->valuestring) > 64)) {
                     cfg_err("%s: \"token\" is the NAME of a line in .env (e.g. \"DOCS_TOKEN\"), never the secret itself: "

@@ -34,13 +34,17 @@
  *                      /.well-known/agent-card.json, SendMessage answered with a Message.
  *                      Listens on 127.0.0.1 unless HOST says otherwise; A2A_TOKEN in .env is the
  *                      bearer token callers must send (required for any other HOST).
+ *   --mcp [[HOST:]PORT]  Model Context Protocol server: the agent is one tool, "ask", for any MCP
+ *                      client (a coding agent, an editor). Without a port the client starts the
+ *                      agent and talks over stdin/stdout; with one it listens for Streamable HTTP
+ *                      like --a2a does (MCP_TOKEN is the bearer token).
  * Remote users cannot type /commands, are never asked for keys (the model connection is the
  * saved one, or BOTTER_BASE_URL / BOTTER_API_KEY / BOTTER_MODEL in .env), and risky actions are
- * asked through the protocol (ACP) or refused (A2A).
+ * asked through the protocol (ACP) or refused (A2A, MCP).
  */
 int  front_init(int argc, char **argv); /* 1 if a front end is on */
 int  front_active(void);
-int  front_remote(void);          /* --acp or --a2a */
+int  front_remote(void);          /* --acp, --a2a or --mcp */
 int  front_take_cmd(void);        /* 1 if the line just read is the front end's own command (/new) */
 void front_set_card(void *card);  /* cJSON: name, description, version, skills (takes it) */
 /* Emit a record: event name, then key/value string pairs, NULL-terminated. */

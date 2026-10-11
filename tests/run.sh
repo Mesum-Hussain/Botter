@@ -437,6 +437,31 @@ build "$T/net" "$T/net_bad.bot"
 check "MCP: a secret in config.json is an error" "$T/build.log" '"token" is the NAME of a line in .env'
 kill "$REMOTE" 2>/dev/null
 
+# MCP servers given as a command: started by the agent, inside the tools' sandbox
+cp "$TESTS/mcp_stdio_server.py" "$T/" # inside the sandbox the server sees what the agent's tools see: not \$HOME
+mkagent "$T/local" "{\"name\": \"local\", \"version\": \"1.0.0\", \"description\": \"Starts an MCP server.\", \"requires\": [\"python3\"],
+  \"mcp\": {\"loud\": {\"command\": [\"python3\", \"$T/mcp_stdio_server.py\"], \"env\": [\"LOUD_SUFFIX\"]},
+            \"gone\": {\"command\": [\"definitely-not-an-mcp-server\"]}}}"
+printf 'Shout with $loud_shout, passing {"text": "hi"}, and keep its answer as {a}.\nRETURN "{a}"\n' >"$T/local/FLOW.fwl"
+build "$T/local" "$T/local.bot"
+check_not "MCP command: a flow that uses a started server's tool builds" "$T/build.log" "error"
+check "MCP command: a program that is not in requires is a warning" "$T/build.log" 'mcp "gone" starts "definitely-not-an-mcp-server": list it in "requires"'
+rm -rf "$T/localws"; mkdir -p "$T/localws"
+echo 'LOUD_SUFFIX=!!' >"$T/localws/.env"
+stub_start --fwl yes
+drive "$T/local.bot" "$T/localws"
+check "MCP command: the server is started and its tools listed" "$T/out" "MCP loud: 1 tool"
+check "MCP command: its tool runs, with the secret it was given by name" "$T/out" "HI!! home-"
+check "MCP command: a server that is not installed is reported, the agent still starts" "$T/out" 'MCP gone is not available: "definitely-not-an-mcp-server" did not start'
+if grep -q "Landlock unavailable" "$T/out"; then
+    skip "MCP command: the server runs inside the sandbox (no Landlock here)"
+else
+    check "MCP command: the server runs inside the tools' sandbox" "$T/out" "HI!! home-denied"
+fi
+sed -i 's|"command": \["python3", |"url": "https://x.invalid/mcp", "command": ["python3", |' "$T/local/config.json"
+build "$T/local" "$T/local_bad.bot"
+check "MCP command: a server is a url or a command, not both" "$T/build.log" '"command" is a list of texts, the program first'
+
 # ACP and A2A (being called): the same agent behind a standard protocol, no terminal
 mkagent "$T/served" '{"name": "served", "display_name": "Served Agent", "version": "3.1.0", "description": "Answers over protocols."}'
 build "$T/served" "$T/served.bot"
@@ -525,6 +550,54 @@ kill "$A2A" 2>/dev/null
 printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/sws/.env"
 (cd "$T/sws" && timeout 10 "$T/served.bot" --a2a "0.0.0.0:$APORT" >"$T/a2a.out" 2>&1)
 check "A2A: listening for other machines without a token is refused" "$T/a2a.out" "put A2A_TOKEN=<secret> in .env first"
+
+# MCP (being used): the agent as one tool for any MCP client, over stdio or HTTP
+stub_start --text "$T/said"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\nMCP_TOKEN=mcp-secret\n' "$PORT" >"$T/sws/.env"
+timeout 60 python3 - "$T/served.bot" "$T/sws" >"$T/mcp.log" 2>"$T/mcp.err" <<'PY'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "--mcp"], cwd=sys.argv[2], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+def call(i, method, params=None):
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}}) + "\n"); p.stdin.flush()
+    print(method, p.stdout.readline().strip(), flush=True)
+call(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
+call(2, "tools/list")
+call(3, "tools/call", {"name": "ask", "arguments": {"message": "hello"}})
+call(4, "tools/call", {"name": "nope", "arguments": {}})
+call(5, "resources/list")
+PY
+check "MCP server: initialize names the agent and offers tools" "$T/mcp.log" '^initialize .*"protocolVersion": ?"2025-06-18".*"tools": ?\{\}.*"name": ?"Served Agent"'
+check "MCP server: the agent is one tool, ask" "$T/mcp.log" '^tools/list .*"name": ?"ask".*Answers over protocols'
+check "MCP server: calling it returns the agent.s reply as the tool result" "$T/mcp.log" '^tools/call .*"id": ?3.*"text": ?"reply-from-the-model.*"isError": ?false'
+check "MCP server: an unknown tool is an error" "$T/mcp.log" '^tools/call .*"id": ?4.*"code": ?-32602'
+check "MCP server: what it does not offer is method not found" "$T/mcp.log" '^resources/list .*"code": ?-32601'
+MPORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+(cd "$T/sws" && exec "$T/served.bot" --mcp "$MPORT" >"$T/mcp.out" 2>&1) &
+A2A=$!
+python3 - "$MPORT" >"$T/mcp.log" 2>&1 <<'PY'
+import json, sys, time, urllib.request, urllib.error
+url = "http://127.0.0.1:%s/" % sys.argv[1]
+def call(body, token="mcp-secret"):
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28"}
+    if token: h["Authorization"] = "Bearer " + token
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, json.dumps(body).encode(), h), timeout=30)
+        return r.status, (r.read() or b"").decode()
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+for _ in range(100):
+    try: print("list", *call({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})); break
+    except OSError: time.sleep(0.1)
+print("noauth", call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, token=None)[0])
+print("note", call({"jsonrpc": "2.0", "method": "notifications/initialized"})[0])
+print("call", *call({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ask", "arguments": {"message": "hi"}}}))
+PY
+kill "$A2A" 2>/dev/null
+check "MCP server over HTTP: tools/list without a handshake" "$T/mcp.log" '^list 200 .*"name": ?"ask"'
+check "MCP server over HTTP: a caller without the token is refused" "$T/mcp.log" "^noauth 401"
+check "MCP server over HTTP: a notification is accepted" "$T/mcp.log" "^note 202"
+check "MCP server over HTTP: a tool call returns the agent.s reply" "$T/mcp.log" '^call 200 .*"text": ?"reply-from-the-model'
 
 # fwl_review: the LLM's logic check of a project's FLOW.fwl (builder agents only)
 mkagent "$T/builder" '{"builder": true}'
