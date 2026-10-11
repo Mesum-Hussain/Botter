@@ -23,8 +23,7 @@ lead-outreach/
 And here's the same agent, ready to ship:
 
 ```
-$ ls -lh lead-outreach.bot
--rwxr-xr-x  1 you  you  356K  lead-outreach.bot
+lead-outreach.bot      one file, ~360 KB
 ```
 
 One file. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
