@@ -96,50 +96,55 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 Prompts are a terrible way to write a program. You say *"first do X, then Y, and if Z then stop"*, and the model nods and does something adjacent.
 
-So Botter has a language. **Owl** (the Orchestration Writeup Language) is English for the steps and CAPITALS for the structure. A human can review it in a pull request. A model can read it without a manual.
+So Botter has a language. **Owl** (the Orchestration Writeup Language) is English for the steps, CAPITALS for the keywords, `$names` for the data and indentation for the blocks. A human can review it in a pull request. A model can read it without a manual.
 
 ```owl
+IMPORT:
+    $pitching
+
 STEP 1: GATHER
 ASK USER "What do you sell, and to which kind of clients?"
-SAVE answer INTO VARIABLE `target`
-RETRY UP TO 2 TIMES DO
-    EXECUTE tool `scrape_leads` with payload { "query": `target`, "limit": 20 }
-END RETRY
-SAVE result INTO VARIABLE `leads`
-IF `leads` IS EMPTY THEN
+SAVE answer INTO VARIABLE $target
+RETRY UP TO 2 TIMES:
+    EXECUTE tool $scrape_leads with payload { "query": $target, "limit": 20 }
+SAVE result INTO VARIABLE $leads
+IF $leads IS EMPTY:
     RETURN "No leads found. Try a broader client type or another city."
-END IF
 
 STEP 2: OUTREACH
-FOR EACH `lead` IN `leads` DO
-    INVOKE SKILL "pitching" USING context `lead`
-    SAVE skill_output INTO VARIABLE `pitch`
-    ASK USER "Send this message?\n\n" + `pitch`
-    IF `answer` IS EQUAL TO "yes" THEN
-        EXECUTE tool `send_email` with parameters:
-           - to: `lead.email`
-           - body: `pitch`
-    ELSE IF the user asked for changes THEN
-        Rewrite `pitch` with the user's changes and send it.
-    END IF
-END FOR
+FOR EACH $lead IN $leads:
+    INVOKE SKILL $pitching USING context $lead
+    SAVE skill_output INTO VARIABLE $pitch
+    ASK USER "Send this message?\n\n" + $pitch
+    IF $answer IS EQUAL TO "yes":
+        EXECUTE tool $send_email with parameters:
+           - to: $lead.email
+           - body: $pitch
+    ELSE IF the user asked for changes:
+        Rewrite $pitch with the user's changes and send it.
 ```
 
-Look at that `ELSE IF the user asked for changes`. It's a condition written in English, sitting inside a real control structure, and that's the whole idea.
+Look at that `ELSE IF the user asked for changes:`. It's a condition written in English, sitting inside a real control structure, and that's the whole idea.
 
 ### It refuses to build nonsense
 
 Owl comes with a linter, and Botter runs it before every build. Break the flow above and you get this:
 
 ```
-FLOW.md:22: error: unknown keyword INVOCATE; did you mean INVOKE?
-FLOW.md:26: error: EXECUTE tool `send_mail`: no such tool
-FLOW.md:28: error: `pich` is used before it is set
-FLOW.md:31: error: END FOR, but the IF opened on line 25 is still open
-FLOW.md:35: error: `lead` only exists inside its FOR EACH loop
+FLOW.md:15: error: this line opens a block, but nothing is indented under it (indent the lines that belong to it)
+FLOW.md:20: error: unknown keyword INVOCATE; did you mean INVOKE?
+FLOW.md:27: error: ELSE lines up with its IF (the IF on line 23), not with the lines inside it
 ```
 
-Line numbers, a typo suggestion, scope checking, and tools and skills checked against what's actually in the folder. These are compiler errors for a language that's mostly English.
+Fix the shape, and it checks the names:
+
+```
+FLOW.md:24: error: EXECUTE tool $send_mail: no such tool (built-in, or tools/bin/send_mail with tools/doc/send_mail.json)
+FLOW.md:26: error: $pich is used before it is set (SAVE ... INTO VARIABLE $pich, SET $pich TO ..., or FOR EACH $pich IN ...)
+FLOW.md:29: error: $lead only exists inside its FOR EACH loop
+```
+
+Line numbers, a typo suggestion, indentation and scope checking, and tools and skills checked against what's actually in the folder. These are compiler errors for a language that's mostly English.
 
 ### Then it gets a second opinion
 
@@ -153,7 +158,7 @@ The result: a test flow with a question, a tool call, a loop, a branch, a retry 
 
 ### Data stays data
 
-Values live in `` `variables` ``, never mixed into instructions, and the model is told outright that whatever a variable holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
+Values live in `$variables`, never mixed into instructions, and the model is told outright that whatever a variable holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
 
 Owl handles the flow of a single agent today. Teams of agents are next.
 

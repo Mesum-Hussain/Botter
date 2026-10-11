@@ -692,15 +692,15 @@ static int is_kw(const char *s, size_t n)
 static int id_char(char ch) { return isalnum((unsigned char)ch) || ch == '_' || (unsigned char)ch >= 0x80; }
 
 /*
- * Owl (botter FLOW.md): UPPERCASE keywords (EXECUTE, IF ... THEN, END FOR,
- * IS EQUAL TO ..., STEP n:), `variables`, "strings", numbers, list markers,
+ * Owl (botter FLOW.md): UPPERCASE keywords (EXECUTE, IF ...:, FOR EACH,
+ * IS EQUAL TO ..., STEP n:), $variables, "strings", numbers, list markers,
  * headings and frontmatter. Everything else is plain English.
  */
 static int owl_kw(const char *s, size_t n)
 {
-    static const char *const KW[] = {"STEP", "LOAD", "SKILL", "FROM", "EXECUTE", "INVOKE", "USING", "SAVE", "INTO", "VARIABLE",
-                                     "TO", "FILE", "SET", "ASK", "USER", "IF", "THEN", "ELSE", "END", "FOR", "EACH",
-                                     "IN", "DO", "WHILE", "AT", "MOST", "TIMES", "RETRY", "UP", "PARALLEL", "RETURN",
+    static const char *const KW[] = {"STEP", "IMPORT", "SKILL", "EXECUTE", "INVOKE", "USING", "SAVE", "INTO", "VARIABLE",
+                                     "TO", "FILE", "SET", "ASK", "USER", "IF", "ELSE", "FOR", "EACH",
+                                     "IN", "WHILE", "AT", "MOST", "TIMES", "RETRY", "UP", "PARALLEL", "RETURN",
                                      "IS", "EQUAL", "NOT", "GREATER", "LESS", "THAN", "EMPTY", "CONTAINS", "AND", "OR",
                                      "CONNECT", "AS", NULL};
     for (int k = 0; KW[k]; k++) {
@@ -747,12 +747,12 @@ static void owl_line(tcells_t *c, const char *s, size_t n)
             e = e < n ? e + 1 : n;
             tc_add(c, s + i, e - i, str);
             i = e;
-        } else if (ch == '`') {
-            size_t e = i + 1;
-            while (e < n && s[e] != '`') {
+        } else if (ch == '$' && i + 1 < n && (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
+            size_t e = i + 1; /* $name, $name.field, $skill-name */
+            while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '_' ||
+                             ((s[e] == '.' || s[e] == '-') && e + 1 < n && isalnum((unsigned char)s[e + 1])))) {
                 e++;
             }
-            e = e < n ? e + 1 : n;
             tc_add(c, s + i, e - i, var);
             i = e;
         } else if (isdigit((unsigned char)ch) && (i == 0 || !id_char(s[i - 1]))) {

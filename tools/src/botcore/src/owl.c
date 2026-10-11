@@ -15,8 +15,8 @@
 
 #define SQ_MAXD 64
 
-static const char *const SQ_BLOCK[] = {"", "IF", "FOR", "WHILE", "RETRY", "PARALLEL"};
-enum { B_IF = 1, B_FOR, B_WHILE, B_RETRY, B_PAR };
+static const char *const SQ_BLOCK[] = {"", "IF", "FOR", "WHILE", "RETRY", "PARALLEL", "IMPORT"};
+enum { B_IF = 1, B_FOR, B_WHILE, B_RETRY, B_PAR, B_IMPORT };
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -124,6 +124,36 @@ static int sq_ident(const char *s, size_t n)
     return 1;
 }
 
+size_t sq_dollar(const char *c)
+{
+    if (c[0] != '$' || !(isalpha((unsigned char)c[1]) || c[1] == '_')) {
+        return 0;
+    }
+    size_t i = 2;
+    for (;;) {
+        while (isalnum((unsigned char)c[i]) || c[i] == '_') {
+            i++;
+        }
+        if (c[i] == '.' && (isalpha((unsigned char)c[i + 1]) || c[i + 1] == '_')) {
+            i += 2; /* a '.' that ends a sentence is not part of the name */
+        } else if (c[i] == '[' && isdigit((unsigned char)c[i + 1])) {
+            size_t j = i + 1;
+            while (isdigit((unsigned char)c[j])) {
+                j++;
+            }
+            if (c[j] != ']') {
+                return i;
+            }
+            i = j + 1;
+            if (c[i] != '.' && c[i] != '[') {
+                return i;
+            }
+        } else {
+            return i;
+        }
+    }
+}
+
 int sq_ref(const char *s, size_t n, char root[65])
 {
     size_t i = 0;
@@ -174,23 +204,38 @@ static const char *sq_quoted(const char *s, char *out, size_t cap)
     return e + 1;
 }
 
-/* `name` (one identifier) at s -> out; position after it, or NULL. */
-static const char *sq_ticked(const char *s, char out[65])
+/* $name (one identifier) at s -> out; position after it, or NULL. */
+static const char *sq_var(const char *s, char out[65])
 {
     s = sq_skip(s);
-    if (*s != '`') {
+    size_t n = 1;
+    while (*s == '$' && (isalnum((unsigned char)s[n]) || s[n] == '_')) {
+        n++;
+    }
+    if (*s != '$' || !sq_ident(s + 1, n - 1)) {
         return NULL;
     }
-    const char *e = strchr(s + 1, '`');
-    if (!e || !sq_ident(s + 1, (size_t)(e - s - 1))) {
+    snprintf(out, 65, "%.*s", (int)(n - 1), s + 1);
+    return s + n;
+}
+
+/* $skill-name at s -> out; position after it, or NULL. */
+static const char *sq_skill(const char *s, char *out, size_t cap)
+{
+    s = sq_skip(s);
+    size_t n = 1;
+    while (*s == '$' && (isalnum((unsigned char)s[n]) || s[n] == '_' || s[n] == '-')) {
+        n++;
+    }
+    if (*s != '$' || n == 1 || n > cap) {
         return NULL;
     }
-    snprintf(out, 65, "%.*s", (int)(e - s - 1), s + 1);
-    return e + 1;
+    snprintf(out, cap, "%.*s", (int)(n - 1), s + 1);
+    return s + n;
 }
 
 /*
- * Syntax of an expression or prose text: strings closed, `refs` closed and
+ * Syntax of an expression or prose text: strings closed, $refs closed and
  * well-formed, and (braces) balanced { } [ ] ( ). Returns 0 if fine.
  */
 static int sq_syntax(sq_prog *p, int line, const char *s, int braces)
@@ -207,19 +252,16 @@ static int sq_syntax(sq_prog *p, int line, const char *s, int braces)
                 return -1;
             }
             c = q;
+        } else if (*c == '$' && sq_dollar(c)) {
+            c += sq_dollar(c) - 1;
         } else if (*c == '`') {
             const char *q = strchr(c + 1, '`');
             char root[65];
-            if (!q) {
-                sq_diag(p, line, 1, "a `name` is not closed: add the missing `");
-                return -1;
-            }
-            if (!sq_ref(c + 1, (size_t)(q - c - 1), root)) {
-                sq_diag(p, line, 1, "`%.*s` is not a valid variable name (letters, digits, _ ; fields with . or [n])",
+            if (q && sq_ref(c + 1, (size_t)(q - c - 1), root)) {
+                sq_diag(p, line, 1, "write $%.*s, not `%.*s`: Owl names start with $", (int)(q - c - 1), c + 1,
                         (int)(q - c - 1), c + 1);
                 return -1;
             }
-            c = q;
         } else if (braces) {
             const char *o = "{[(", *cl = "}])", *k;
             if ((k = strchr(o, *c))) {
@@ -252,9 +294,8 @@ int sq_is_literal(const char *s)
             }
             c = *q ? q + 1 : q;
             any = 1;
-        } else if (*c == '`') {
-            const char *q = strchr(c + 1, '`');
-            c = q ? q + 1 : c + 1;
+        } else if (*c == '$' && sq_dollar(c)) {
+            c += sq_dollar(c);
             any = 1;
         } else if (strchr(" \t+,:{}[]-.0123456789", *c)) {
             any |= isdigit((unsigned char)*c) || *c == '{' || *c == '[';
@@ -287,6 +328,10 @@ typedef struct {
     int      line;
     int      has_else;
     int      count; /* statements in the current body / branch */
+    int      col;   /* column of the line that opened the block */
+    int      body;  /* column of the lines inside it (-1 until the first one) */
+    int      alt;   /* text column of the last "1. " line inside it (-1 = none) */
+    int      bline; /* line of the current branch's header */
     sq_node *node;
     sq_list *cur;
 } sq_frame;
@@ -298,6 +343,8 @@ typedef struct {
     int      depth;
     sq_node *last; /* last statement (for "- k: v" parameter lines) */
     int      params;
+    int      col;        /* text column of the current line */
+    int      body, alt;  /* as in sq_frame, for the lines outside every block */
     int      step, stmts, returns;
 } sq_ps;
 
@@ -330,9 +377,11 @@ static void sq_open(sq_ps *s, int bkind, sq_node *x)
     sq_frame *f = &s->st[s->depth++];
     memset(f, 0, sizeof(*f));
     f->kind = bkind;
-    f->line = s->line;
+    f->line = f->bline = s->line;
+    f->col = s->col;
+    f->body = f->alt = -1;
     f->node = x;
-    f->cur = bkind == B_IF ? &x->br[0].body : &x->body;
+    f->cur = bkind == B_IMPORT ? &s->p->top : bkind == B_IF ? &x->br[0].body : &x->body;
 }
 
 static const char *sq_bname(int k)
@@ -340,30 +389,99 @@ static const char *sq_bname(int k)
     return k == B_FOR ? "FOR EACH" : SQ_BLOCK[k];
 }
 
-static void sq_close(sq_ps *s, int kind)
+static void sq_empty(sq_ps *s, const sq_frame *f)
 {
-    if (s->depth == 0) {
-        sq_diag(s->p, s->line, 1, "END %s without a matching %s", SQ_BLOCK[kind], sq_bname(kind));
-        return;
-    }
-    sq_frame *f = &s->st[s->depth - 1];
-    if (f->kind != kind) {
-        int k = s->depth - 1;
-        while (k >= 0 && s->st[k].kind != kind) {
-            k--;
-        }
-        sq_diag(s->p, s->line, 1, "END %s, but the %s opened on line %d is still open (close it with END %s first)",
-                SQ_BLOCK[kind], sq_bname(f->kind), f->line, SQ_BLOCK[f->kind]);
-        if (k < 0) {
-            return; /* stray END: ignore it */
-        }
-        s->depth = k + 1; /* recover: the inner blocks end here */
-        f = &s->st[k];
-    }
     if (!f->count) {
-        sq_diag(s->p, s->line, 0, "the %s block opened on line %d is empty", SQ_BLOCK[kind], f->line);
+        sq_diag(s->p, f->bline, 1, "this line opens a block, but nothing is indented under it (indent the lines that belong to it)");
     }
+}
+
+/* A block ends where its indentation ends. */
+static void sq_pop(sq_ps *s)
+{
+    sq_empty(s, &s->st[s->depth - 1]);
     s->depth--;
+}
+
+static int sq_kw_at(const char *t, const char *w)
+{
+    size_t k = strlen(w);
+    return strncmp(t, w, k) == 0 && !isalnum((unsigned char)t[k]) && t[k] != '_';
+}
+
+/*
+ * Indentation is the block structure: a line at or left of the column of the line that
+ * opened a block ends that block; the lines inside one block share one column. raw is
+ * the column where the line starts, s->col where its text starts (after "1. " or "- ").
+ * Returns 0 if the line is to be skipped.
+ */
+static int sq_dent(sq_ps *s, const char *t, int raw)
+{
+    int is_else = sq_kw_at(t, "ELSE");
+    while (s->depth) {
+        sq_frame *f = &s->st[s->depth - 1];
+        if (raw > f->col || (is_else && f->kind == B_IF && raw == f->col)) {
+            break;
+        }
+        sq_pop(s);
+    }
+    sq_frame *f = s->depth ? &s->st[s->depth - 1] : NULL;
+    if (is_else) {
+        if (f && f->kind == B_IF && raw != f->col) {
+            sq_diag(s->p, s->line, 1, "ELSE lines up with its IF (the IF on line %d), not with the lines inside it", f->line);
+            return 0;
+        }
+        return 1;
+    }
+    if (sq_kw_at(t, "END") || sq_kw_at(t, "ENDIF") || sq_kw_at(t, "ENDFOR")) {
+        return 1; /* reported as a statement; its indentation says nothing */
+    }
+    int *body = f ? &f->body : &s->body, *alt = f ? &f->alt : &s->alt;
+    if (*body < 0) {
+        *body = raw;
+    } else if (raw != *body && raw != *alt) {
+        if (raw > *body) {
+            sq_diag(s->p, s->line, 1,
+                    "this line is indented deeper than the lines around it, but no block opens above it (only a line "
+                    "ending in ':' such as IF ...: or FOR EACH ...: opens one)");
+        } else if (f) {
+            sq_diag(s->p, s->line, 1,
+                    "this line's indentation matches no block: line it up with the lines inside the %s on line %d, "
+                    "or with that %s line to end the block",
+                    sq_bname(f->kind), f->line, sq_bname(f->kind));
+        } else {
+            sq_diag(s->p, s->line, 1, "this line's indentation does not match the lines above it");
+        }
+    }
+    if (s->col != raw) {
+        *alt = s->col;
+    }
+    return 1;
+}
+
+/* Header of a block: copy of r without its closing ':'. No ':', or a leftover THEN/DO, is an error. */
+static char *sq_head(sq_ps *s, const char *r, const char *reads)
+{
+    size_t n = strlen(r);
+    int ok = n && r[n - 1] == ':';
+    n -= ok;
+    while (n && (r[n - 1] == ' ' || r[n - 1] == '\t')) {
+        n--;
+    }
+    char *h = sq_dup(r, n);
+    static const char *const old[] = {"THEN", "DO"};
+    for (int i = 0; i < 2; i++) {
+        if (sq_ends(h, old[i])) {
+            char *c = sq_strip_end(h, old[i]);
+            sq_diag(s->p, s->line, 1, "%s  (no %s: the ':' opens the block)", reads, old[i]);
+            free(h);
+            return c;
+        }
+    }
+    if (!ok) {
+        sq_diag(s->p, s->line, 1, "%s  (the ':' opens the block; the lines indented under it belong to it)", reads);
+    }
+    return h;
 }
 
 static int sq_lev(const char *a, const char *b)
@@ -389,8 +507,8 @@ static int sq_lev(const char *a, const char *b)
     return d[n][m];
 }
 
-static const char *const SQ_KW[] = {"STEP", "LOAD", "CONNECT", "EXECUTE", "INVOKE", "SAVE", "SET",    "ASK", "IF",
-                                    "ELSE", "END",     "FOR",     "WHILE",  "RETRY", "IN",   "RETURN", NULL};
+static const char *const SQ_KW[] = {"STEP", "IMPORT", "CONNECT", "EXECUTE", "INVOKE", "SAVE", "SET",    "ASK", "IF",
+                                    "ELSE", "FOR",     "WHILE",  "RETRY", "IN",   "RETURN", NULL};
 
 /* An UPPERCASE first word that is no keyword: a typo of one (error), or a shouted word (prose). */
 static int sq_unknown(sq_ps *s, const char *w)
@@ -405,8 +523,8 @@ static int sq_unknown(sq_ps *s, const char *w)
     static const char *const alias[][2] = {{"INVOCATE", "INVOKE"}, {"INVOKES", "INVOKE"}, {"EXEC", "EXECUTE"},
                                            {"CALL", "EXECUTE"},    {"RUN", "EXECUTE"},    {"STORE", "SAVE"},
                                            {"FOREACH", "FOR EACH"}, {"ELIF", "ELSE IF"},  {"ELSEIF", "ELSE IF"},
-                                           {"ENDIF", "END IF"},    {"ENDFOR", "END FOR"}, {"THEN", "IF ... THEN"},
-                                           {"PRINT", "RETURN"},    {"REPEAT", "RETRY UP TO N TIMES DO"}};
+                                           {"THEN", "IF <condition>:"},
+                                           {"PRINT", "RETURN"},    {"REPEAT", "RETRY UP TO N TIMES:"}};
     for (size_t i = 0; i < sizeof(alias) / sizeof(alias[0]); i++) {
         if (strcmp(w, alias[i][0]) == 0) {
             sq_diag(s->p, s->line, 1, "unknown keyword %s; did you mean %s?", w, alias[i][1]);
@@ -427,10 +545,9 @@ static int sq_unknown(sq_ps *s, const char *w)
 
 static void sq_instr(sq_ps *s, const char *t)
 {
-    static const char *const prose[] = {"if", "for each", "while", "else", "end", "return", "retry", NULL};
-    static const char *const fix[] = {"IF ... THEN / END IF", "FOR EACH `x` IN ... DO / END FOR",
-                                      "WHILE ... AT MOST N TIMES DO / END WHILE", "ELSE", "END IF / END FOR ...",
-                                      "RETURN", "RETRY UP TO N TIMES DO / END RETRY"};
+    static const char *const prose[] = {"if", "for each", "while", "else", "return", "retry", NULL};
+    static const char *const fix[] = {"IF <condition>:", "FOR EACH $x IN ...:", "WHILE ... AT MOST N TIMES:", "ELSE:",
+                                      "RETURN", "RETRY UP TO N TIMES:"};
     for (int i = 0; prose[i]; i++) {
         if (sq_word(t, prose[i]) && !isupper((unsigned char)t[1])) {
             sq_diag(s->p, s->line, 0, "write '%s' as an Owl statement in capitals (%s) so the flow can be checked",
@@ -447,15 +564,13 @@ static void sq_instr(sq_ps *s, const char *t)
  * sent as it is: the real text must be produced first (INVOKE SKILL, SET ... TO). */
 static void sq_placeholder(sq_prog *p, int line, const char *v)
 {
-    int inq = 0, intick = 0;
-    for (const char *c = v; *c; c++) { /* "..." outside strings: fields left out ({ "to": `x`, ... }) */
+    int inq = 0;
+    for (const char *c = v; *c; c++) { /* "..." outside strings: fields left out ({ "to": $x, ... }) */
         if (*c == '\\' && inq && c[1]) {
             c++;
-        } else if (*c == '"' && !intick) {
+        } else if (*c == '"') {
             inq = !inq;
-        } else if (*c == '`' && !inq) {
-            intick = !intick;
-        } else if (!inq && !intick && !strncmp(c, "...", 3)) {
+        } else if (!inq && !strncmp(c, "...", 3)) {
             sq_diag(p, line, 1, "\"...\" in a tool's arguments: write out every argument the tool needs");
             break;
         }
@@ -472,7 +587,7 @@ static void sq_placeholder(sq_prog *p, int line, const char *v)
             strcasestr(lit, "placeholder") || strcasestr(lit, "lorem ipsum")) {
             sq_diag(p, line, 1,
                     "\"%s\" is placeholder text and would be sent as it is: produce the real value first "
-                    "(INVOKE SKILL ... then SAVE skill_output, or SET `x` TO <what it should say>) and pass `x`",
+                    "(INVOKE SKILL ... then SAVE skill_output, or SET $x TO <what it should say>) and pass $x",
                     lit);
         }
         if (!*e) {
@@ -487,6 +602,21 @@ static void sq_stmt(sq_ps *s, char *t)
 {
     sq_prog *p = s->p;
     char w[32] = "", name[200], var[65];
+    if (s->depth && s->st[s->depth - 1].kind == B_IMPORT) { /* skill names, nothing else */
+        const char *e = t;
+        do {
+            e = sq_skill(e, name, sizeof(name));
+            if (!e) {
+                sq_diag(p, s->line, 1, "under IMPORT: write one skill per line as $name (the folder name in skills/)");
+                return;
+            }
+            sq_node *x = sq_add(s, SQ_LOAD);
+            x->a = sq_dup(name, strlen(name));
+            e = sq_skip(e);
+            e += *e == ',';
+        } while (*sq_skip(e));
+        return;
+    }
     size_t wl = 0;
     while (t[wl] && isalpha((unsigned char)t[wl]) && wl < sizeof(w) - 1) {
         w[wl] = t[wl];
@@ -528,29 +658,18 @@ static void sq_stmt(sq_ps *s, char *t)
         return;
     }
     if (!strcmp(w, "LOAD")) {
-        size_t k = sq_word(r, "SKILL");
-        const char *e = k ? sq_quoted(r + k, name, sizeof(name)) : NULL;
-        if (!e || !name[0]) {
-            sq_diag(p, s->line, 1, "LOAD reads: LOAD SKILL \"name\"  (optionally FROM \"./skills/name/SKILL.md\")");
-            return;
+        sq_diag(p, s->line, 1, "Owl has no LOAD: list the agent's skills under IMPORT: at the top of the flow, one $name per line");
+        return;
+    }
+    if (!strcmp(w, "IMPORT")) {
+        if (strcmp(r, ":") != 0) {
+            sq_diag(p, s->line, 1, "IMPORT reads: IMPORT:  with one $skill per line indented under it");
         }
         if (s->depth) {
-            sq_diag(p, s->line, 1, "LOAD SKILL belongs at the top of the flow, not inside a block");
+            sq_diag(p, s->line, 1, "IMPORT belongs at the top of the flow, not inside a block");
+            return;
         }
-        e = sq_skip(e);
-        if ((k = sq_word(e, "FROM"))) {
-            char path[300], want[300];
-            const char *f = sq_quoted(e + k, path, sizeof(path));
-            snprintf(want, sizeof(want), "skills/%s/SKILL.md", name);
-            const char *pp = strncmp(path, "./", 2) == 0 ? path + 2 : path;
-            if (!f || strcmp(pp, want) != 0) {
-                sq_diag(p, s->line, 1, "LOAD SKILL \"%s\" FROM must be \"./%s\"", name, want);
-            }
-        } else if (*e) {
-            sq_diag(p, s->line, 1, "unexpected text after LOAD SKILL \"%s\": %s", name, e);
-        }
-        sq_node *x = sq_add(s, SQ_LOAD);
-        x->a = sq_dup(name, strlen(name));
+        sq_open(s, B_IMPORT, NULL);
         return;
     }
     if (!strcmp(w, "CONNECT")) {
@@ -559,9 +678,9 @@ static void sq_stmt(sq_ps *s, char *t)
     }
     if (!strcmp(w, "EXECUTE")) {
         size_t k = sq_word(r, "tool");
-        const char *e = k ? sq_ticked(r + k, var) : NULL;
+        const char *e = k ? sq_var(r + k, var) : NULL;
         if (!e) {
-            sq_diag(p, s->line, 1, "EXECUTE reads: EXECUTE tool `name` [with payload { ... } | with parameters:]");
+            sq_diag(p, s->line, 1, "EXECUTE reads: EXECUTE tool $name [with payload { ... } | with parameters:]");
             return;
         }
         sq_syntax(p, s->line, e, 1);
@@ -576,9 +695,9 @@ static void sq_stmt(sq_ps *s, char *t)
     }
     if (!strcmp(w, "INVOKE")) {
         size_t k = sq_word(r, "SKILL");
-        const char *e = k ? sq_quoted(r + k, name, sizeof(name)) : NULL;
-        if (!e || !name[0]) {
-            sq_diag(p, s->line, 1, "INVOKE reads: INVOKE SKILL \"name\" [USING context `x`]");
+        const char *e = k ? sq_skill(r + k, name, sizeof(name)) : NULL;
+        if (!e) {
+            sq_diag(p, s->line, 1, "INVOKE reads: INVOKE SKILL $name [USING context $x]");
             return;
         }
         sq_syntax(p, s->line, e, 1);
@@ -609,7 +728,7 @@ static void sq_stmt(sq_ps *s, char *t)
         const char *at = into ? into : tofile;
         if (!at || at == r) {
             sq_diag(p, s->line, 1,
-                    "SAVE reads: SAVE result|skill_output|answer|`x` INTO VARIABLE `name`, or SAVE ... TO FILE \"path\"");
+                    "SAVE reads: SAVE result|skill_output|answer|$x INTO VARIABLE $name, or SAVE ... TO FILE \"path\"");
             return;
         }
         size_t wn = (size_t)(at - r);
@@ -619,9 +738,9 @@ static void sq_stmt(sq_ps *s, char *t)
         char *what = sq_dup(r, wn);
         sq_syntax(p, s->line, what, 1);
         if (into) {
-            const char *e = sq_ticked(sq_skip(sq_skip(into + 4) + 8), var);
+            const char *e = sq_var(sq_skip(sq_skip(into + 4) + 8), var);
             if (!e || *sq_skip(e)) {
-                sq_diag(p, s->line, 1, "SAVE ... INTO VARIABLE needs one `name` (letters, digits, _)");
+                sq_diag(p, s->line, 1, "SAVE ... INTO VARIABLE needs one $name (letters, digits, _)");
                 free(what);
                 return;
             }
@@ -641,11 +760,11 @@ static void sq_stmt(sq_ps *s, char *t)
         return;
     }
     if (!strcmp(w, "SET")) {
-        const char *e = sq_ticked(r, var);
+        const char *e = sq_var(r, var);
         size_t k = e ? sq_word(sq_skip(e), "TO") : 0;
         const char *v = k ? sq_skip(sq_skip(e) + k) : NULL;
         if (!v || !*v) {
-            sq_diag(p, s->line, 1, "SET reads: SET `name` TO <value>");
+            sq_diag(p, s->line, 1, "SET reads: SET $name TO <value>");
             return;
         }
         sq_syntax(p, s->line, v, 1);
@@ -658,7 +777,7 @@ static void sq_stmt(sq_ps *s, char *t)
         size_t k = sq_word(r, "USER");
         const char *q = k ? sq_skip(r + k) : NULL;
         if (!q || !*q) {
-            sq_diag(p, s->line, 1, "ASK reads: ASK USER \"question\"  (the reply is `answer`)");
+            sq_diag(p, s->line, 1, "ASK reads: ASK USER \"question\"  (the reply is $answer)");
             return;
         }
         sq_syntax(p, s->line, q, 1);
@@ -667,14 +786,15 @@ static void sq_stmt(sq_ps *s, char *t)
         return;
     }
     if (!strcmp(w, "IF")) {
-        if (!sq_ends(r, "THEN") || strlen(sq_skip(r)) <= 4) {
-            sq_diag(p, s->line, 1, "IF reads: IF <condition> THEN");
+        char *c = sq_head(s, r, "IF reads: IF <condition>:");
+        if (!*c) {
+            sq_diag(p, s->line, 1, "IF needs a condition: IF <condition>:");
         }
-        sq_syntax(p, s->line, r, 0);
+        sq_syntax(p, s->line, c, 0);
         sq_node *x = sq_add(s, SQ_IF);
         x->br = sq_alloc(sizeof(*x->br));
         x->nbr = 1;
-        x->br[0].cond = sq_strip_end(r, "THEN");
+        x->br[0].cond = c;
         x->br[0].line = s->line;
         sq_open(s, B_IF, x);
         return;
@@ -688,16 +808,15 @@ static void sq_stmt(sq_ps *s, char *t)
         }
         if (f->has_else) {
             sq_diag(p, s->line, 1, "%s after ELSE: ELSE must be the last branch of an IF", elif ? "ELSE IF" : "ELSE");
-        } else if (!f->count) {
-            sq_diag(p, s->line, 0, "empty branch before %s", elif ? "ELSE IF" : "ELSE");
+        } else {
+            sq_empty(s, f);
         }
+        char *c = NULL;
         if (elif) {
-            if (!sq_ends(r, "THEN")) {
-                sq_diag(p, s->line, 1, "ELSE IF reads: ELSE IF <condition> THEN");
-            }
-            sq_syntax(p, s->line, r + 2, 0);
-        } else if (*r) {
-            sq_diag(p, s->line, 1, "ELSE stands alone on its line (for another condition write ELSE IF <condition> THEN)");
+            c = sq_head(s, sq_skip(r + 2), "ELSE IF reads: ELSE IF <condition>:");
+            sq_syntax(p, s->line, c, 0);
+        } else if (strcmp(r, ":") != 0) {
+            sq_diag(p, s->line, 1, "ELSE reads: ELSE:  (for another condition write ELSE IF <condition>:)");
         }
         sq_node *x = f->node;
         x->br = realloc(x->br, (size_t)(x->nbr + 1) * sizeof(*x->br));
@@ -706,53 +825,40 @@ static void sq_stmt(sq_ps *s, char *t)
         }
         sq_branch *b = &x->br[x->nbr++];
         memset(b, 0, sizeof(*b));
-        b->cond = elif ? sq_strip_end(sq_skip(r + 2), "THEN") : NULL;
-        b->line = s->line;
+        b->cond = c;
+        b->line = f->bline = s->line;
         f->cur = &b->body;
         f->has_else |= !elif;
         f->count = 0;
+        f->body = f->alt = -1; /* each branch sets its own column */
         return;
     }
-    if (!strcmp(w, "END")) {
-        static const struct {
-            const char *w;
-            int         k;
-        } ends[] = {{"IF", B_IF}, {"FOR", B_FOR}, {"WHILE", B_WHILE}, {"RETRY", B_RETRY}, {"PARALLEL", B_PAR}};
-        for (size_t i = 0; i < 5; i++) {
-            size_t k = sq_word(r, ends[i].w);
-            if (k && strncmp(r, ends[i].w, k) == 0) {
-                if (*sq_skip(r + k)) {
-                    sq_diag(p, s->line, 1, "END %s stands alone on its line", ends[i].w);
-                }
-                sq_close(s, ends[i].k);
-                return;
-            }
-        }
-        sq_diag(p, s->line, 1, "END must be followed by IF, FOR, WHILE, RETRY or PARALLEL");
+    if (!strcmp(w, "END") || !strcmp(w, "ENDIF") || !strcmp(w, "ENDFOR")) {
+        sq_diag(p, s->line, 1, "Owl has no %s line: a block ends where its indentation ends (delete this line)", t);
         return;
     }
     if (!strcmp(w, "FOR")) {
-        size_t k = sq_word(r, "EACH");
-        const char *e = k ? sq_ticked(r + k, var) : NULL;
+        char *h = sq_head(s, r, "FOR reads: FOR EACH $item IN $collection:");
+        size_t k = sq_word(h, "EACH");
+        const char *e = k ? sq_var(h + k, var) : NULL;
         size_t in = e ? sq_word(sq_skip(e), "IN") : 0;
+        const char *coll = in ? sq_skip(sq_skip(e) + in) : "";
         sq_node *x = sq_add(s, SQ_FOR);
-        if (!e || !in || !sq_ends(r, "DO")) {
-            sq_diag(p, s->line, 1, "FOR reads: FOR EACH `item` IN `collection` DO");
+        if (!e || !in || !*coll) {
+            sq_diag(p, s->line, 1, "FOR reads: FOR EACH $item IN $collection:");
         } else {
             x->a = sq_dup(var, strlen(var));
-            x->b = sq_strip_end(sq_skip(sq_skip(e) + in), "DO");
+            x->b = sq_dup(coll, strlen(coll));
             sq_syntax(p, s->line, x->b, 1);
         }
+        free(h);
         sq_open(s, B_FOR, x);
         return;
     }
     if (!strcmp(w, "WHILE")) {
-        if (!sq_ends(r, "DO")) {
-            sq_diag(p, s->line, 1, "WHILE reads: WHILE <condition> AT MOST N TIMES DO");
-        }
-        sq_syntax(p, s->line, r, 0);
+        char *c = sq_head(s, r, "WHILE reads: WHILE <condition> AT MOST N TIMES:");
+        sq_syntax(p, s->line, c, 0);
         sq_node *x = sq_add(s, SQ_WHILE);
-        char *c = sq_strip_end(r, "DO");
         char *am = strstr(c, "AT MOST");
         if (am) {
             char *end;
@@ -766,43 +872,46 @@ static void sq_stmt(sq_ps *s, char *t)
             }
             *am = '\0';
         } else {
-            sq_diag(p, s->line, 0, "give the WHILE loop a bound: WHILE <condition> AT MOST N TIMES DO");
+            sq_diag(p, s->line, 0, "give the WHILE loop a bound: WHILE <condition> AT MOST N TIMES:");
         }
         x->a = c;
         sq_open(s, B_WHILE, x);
         return;
     }
     if (!strcmp(w, "RETRY")) {
-        size_t k = sq_word(r, "UP");
-        const char *q = k ? sq_skip(r + k) : r;
+        char *h = sq_head(s, r, "RETRY reads: RETRY UP TO N TIMES:");
+        size_t k = sq_word(h, "UP");
+        const char *q = k ? sq_skip(h + k) : h;
         size_t t2 = k ? sq_word(q, "TO") : 0;
         if (k && t2) {
             q = sq_skip(q + t2);
         }
         char *end;
         long n = strtol(q, &end, 10);
-        if (end == q || !sq_word(sq_skip(end), "TIMES") || !sq_ends(r, "DO")) {
-            sq_diag(p, s->line, 1, "RETRY reads: RETRY UP TO N TIMES DO");
+        if (end == q || !sq_word(sq_skip(end), "TIMES") || sq_skip(end)[5]) {
+            sq_diag(p, s->line, 1, "RETRY reads: RETRY UP TO N TIMES:");
         } else if (n < 1 || n > 20) {
             sq_diag(p, s->line, 1, "RETRY UP TO %ld TIMES: N must be 1..20", n);
         }
+        free(h);
         sq_node *x = sq_add(s, SQ_RETRY);
         x->n = n >= 1 && n <= 20 ? (int)n : 1;
         sq_open(s, B_RETRY, x);
         return;
     }
     if (!strcmp(w, "IN")) {
-        size_t k = sq_word(r, "PARALLEL");
-        if (!k || strcmp(sq_skip(r + k), "DO") != 0) {
-            sq_diag(p, s->line, 1, "IN PARALLEL reads: IN PARALLEL DO");
+        char *h = sq_head(s, r, "IN PARALLEL reads: IN PARALLEL:");
+        if (strcmp(h, "PARALLEL") != 0) {
+            sq_diag(p, s->line, 1, "IN PARALLEL reads: IN PARALLEL:");
         }
+        free(h);
         sq_node *x = sq_add(s, SQ_PAR);
         sq_open(s, B_PAR, x);
         return;
     }
     if (!strcmp(w, "RETURN")) {
         if (!*r) {
-            sq_diag(p, s->line, 1, "RETURN needs a value: RETURN \"text\" or RETURN `x` (or a plain-English summary)");
+            sq_diag(p, s->line, 1, "RETURN needs a value: RETURN \"text\" or RETURN $x (or a plain-English summary)");
             return;
         }
         sq_syntax(p, s->line, r, 1);
@@ -895,6 +1004,7 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
     sq_ps s;
     memset(&s, 0, sizeof(s));
     s.p = p;
+    s.body = s.alt = -1;
     /* The whole file is one ```owl block: frontmatter, then statements, then the closing ```. */
     size_t first = strcspn(src, "\n");
     const char *info = sq_skip(src + 3);
@@ -941,6 +1051,10 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
         if (!*t) {
             continue;
         }
+        int raw = (int)(t - buf);
+        if (memchr(buf, '\t', (size_t)raw)) {
+            sq_diag(p, s.line, 1, "indent with spaces, not tabs (indentation is what puts a line inside a block)");
+        }
         if (strncmp(t, "```", 3) == 0) {
             if (t[3]) {
                 sq_diag(p, s.line, 1, "a code block cannot start inside the Owl block");
@@ -948,6 +1062,9 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
             }
             closed = 1;
             s.params = 0;
+            while (s.depth) {
+                sq_pop(&s);
+            }
             continue;
         }
         if (*t == '#' || strncmp(t, "<!--", 4) == 0) { /* Markdown is not part of Owl */
@@ -996,16 +1113,16 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
             continue;
         }
         s.params = 0;
-        if (*t) {
+        s.col = (int)(t - buf);
+        if (*t && sq_dent(&s, t, raw)) {
             sq_stmt(&s, t);
         }
     }
     if (!closed) {
         sq_diag(p, s.line, 1, "the Owl block is never closed: end the file with ```");
     }
-    while (s.depth > 0) {
-        sq_frame *f = &s.st[--s.depth];
-        sq_diag(p, f->line, 1, "this %s is never closed (add END %s)", sq_bname(f->kind), SQ_BLOCK[f->kind]);
+    while (s.depth) {
+        sq_pop(&s);
     }
     if (!s.stmts) {
         sq_diag(p, s.line, 1, "the flow has no statements");
@@ -1084,7 +1201,7 @@ static void sq_def(sq_cs *c, const char *v)
     }
 }
 
-/* Every `ref` in text (outside strings) must be set earlier. */
+/* Every $ref in text (outside strings) must be set earlier. */
 static void sq_refs(sq_cs *c, int line, const char *s)
 {
     for (const char *q = s; q && *q; q++) {
@@ -1096,21 +1213,19 @@ static void sq_refs(sq_cs *c, int line, const char *s)
             q = *e ? e : e - 1;
             continue;
         }
-        if (*q != '`') {
+        size_t dn = *q == '$' ? sq_dollar(q) : 0;
+        if (!dn) {
             continue;
         }
-        const char *e = strchr(q + 1, '`');
+        const char *e = q + dn - 1;
         char root[65];
-        if (!e) {
-            return;
-        }
-        if (sq_ref(q + 1, (size_t)(e - q - 1), root)) {
+        if (sq_ref(q + 1, dn - 1, root)) {
             if (sq_in(c->dead, c->ndead, root) && !sq_in(c->vars, c->nvars, root)) {
-                sq_diag(c->p, line, 1, "`%s` only exists inside its FOR EACH loop", root);
+                sq_diag(c->p, line, 1, "$%s only exists inside its FOR EACH loop", root);
             } else if (!sq_in(c->vars, c->nvars, root)) {
                 sq_diag(c->p, line, 1,
-                        "`%s` is used before it is set (SAVE ... INTO VARIABLE `%s`, SET `%s` TO ..., or FOR EACH "
-                        "`%s` IN ...)",
+                        "$%s is used before it is set (SAVE ... INTO VARIABLE $%s, SET $%s TO ..., or FOR EACH "
+                        "$%s IN ...)",
                         root, root, root, root);
             }
         }
@@ -1129,7 +1244,7 @@ static void sq_check_list(sq_cs *c, sq_list *l)
             break;
         case SQ_LOAD:
             if (!c->has_skill(x->a)) {
-                sq_diag(c->p, x->line, 1, "LOAD SKILL \"%s\": there is no skills/%s/SKILL.md in this agent", x->a, x->a);
+                sq_diag(c->p, x->line, 1, "IMPORT $%s: there is no skills/%s/SKILL.md in this agent", x->a, x->a);
             }
             if (sq_in(c->loaded, c->nloaded, x->a)) {
                 sq_diag(c->p, x->line, 0, "skill \"%s\" is loaded twice", x->a);
@@ -1139,7 +1254,7 @@ static void sq_check_list(sq_cs *c, sq_list *l)
             break;
         case SQ_EXEC:
             if (!c->has_tool(x->a)) {
-                sq_diag(c->p, x->line, 1, "EXECUTE tool `%s`: no such tool (built-in, or tools/bin/%s with tools/doc/%s.json)",
+                sq_diag(c->p, x->line, 1, "EXECUTE tool $%s: no such tool (built-in, or tools/bin/%s with tools/doc/%s.json)",
                         x->a, x->a, x->a);
             }
             sq_refs(c, x->line, x->b);
@@ -1150,7 +1265,7 @@ static void sq_check_list(sq_cs *c, sq_list *l)
             break;
         case SQ_INVOKE:
             if (!sq_in(c->loaded, c->nloaded, x->a)) {
-                sq_diag(c->p, x->line, 1, "INVOKE SKILL \"%s\": add LOAD SKILL \"%s\" at the top of the flow first", x->a, x->a);
+                sq_diag(c->p, x->line, 1, "INVOKE SKILL $%s: list $%s under IMPORT: at the top of the flow first", x->a, x->a);
             }
             sq_refs(c, x->line, x->b);
             for (int k = 0; k < x->np; k++) {

@@ -1,6 +1,6 @@
 /*
  * Owl interpreter (see owl_run.h). Values are JSON (cJSON): strings,
- * numbers, arrays, objects. Expressions made only of "strings", `refs`,
+ * numbers, arrays, objects. Expressions made only of "strings", $refs,
  * numbers, true/false/null, JSON payloads and + are evaluated here; anything
  * written in prose is worked out by the LLM (a quiet side question), as are
  * prose conditions. Plain-English lines and INVOKE SKILL are LLM turns with
@@ -208,7 +208,7 @@ static void set_var(rt_t *r, const char *name, cJSON *v)
     cJSON_AddItemToObject(r->vars, name, v);
 }
 
-/* `a.b[0].length` -> a copy of the value (NULL if missing). */
+/* $a.b[0].length -> a copy of the value (NULL if missing). */
 static cJSON *ref_value(rt_t *r, const char *s, size_t n)
 {
     char root[65];
@@ -269,7 +269,7 @@ static char *unquote(const char *s, size_t n)
     return o;
 }
 
-/* A JSON payload template: `refs` become their JSON, bare keys get quotes. */
+/* A JSON payload template: $refs become their JSON, bare keys get quotes. */
 static cJSON *eval_payload(rt_t *r, const char *s)
 {
     size_t cap = strlen(s) * 2 + 64, len = 0;
@@ -301,12 +301,9 @@ static cJSON *eval_payload(rt_t *r, const char *s)
             q = *q ? q + 1 : q;
             PUT(c, (size_t)(q - c));
             c = q;
-        } else if (*c == '`') {
-            const char *q = strchr(c + 1, '`');
-            if (!q) {
-                break;
-            }
-            cJSON *v = ref_value(r, c + 1, (size_t)(q - c - 1));
+        } else if (*c == '$' && sq_dollar(c)) {
+            const char *q = c + sq_dollar(c) - 1;
+            cJSON *v = ref_value(r, c + 1, (size_t)(q - c));
             char *j = v ? cJSON_PrintUnformatted(v) : strdup("null");
             cJSON_Delete(v);
             if (j) {
@@ -376,13 +373,10 @@ static cJSON *eval_literal(rt_t *r, const char *expr)
             v = cJSON_CreateString(t ? t : "");
             free(t);
             c = *q ? q + 1 : q;
-        } else if (*c == '`') {
-            const char *q = strchr(c + 1, '`');
-            if (!q) {
-                break;
-            }
-            v = ref_value(r, c + 1, (size_t)(q - c - 1));
-            c = q + 1;
+        } else if (*c == '$' && sq_dollar(c)) {
+            size_t dn = sq_dollar(c);
+            v = ref_value(r, c + 1, dn - 1);
+            c += dn;
         } else {
             const char *e = c;
             while (*e && !isspace((unsigned char)*e) && *e != '+') {
@@ -429,17 +423,20 @@ static char *named_values(rt_t *r, const char *text)
 {
     char *acc = NULL;
     size_t len = 0;
-    for (const char *c = strchr(text, '`'); c; c = strchr(c, '`')) {
-        const char *e = strchr(c + 1, '`');
-        if (!e) {
-            break;
+    for (const char *c = strchr(text, '$'); c; c = strchr(c, '$')) {
+        size_t dn = sq_dollar(c);
+        if (!dn) {
+            c++;
+            continue;
         }
-        size_t n = strcspn(c + 1, ".`");
+        const char *e = c + dn - 1;
+        size_t n = strcspn(c + 1, ".[");
+        n = n < dn - 1 ? n : dn - 1;
         char name[65];
         snprintf(name, sizeof(name), "%.*s", (int)(n < 64 ? n : 64), c + 1);
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(r->vars, name);
         char tag[80];
-        snprintf(tag, sizeof(tag), "`%s` =", name);
+        snprintf(tag, sizeof(tag), "$%s =", name);
         if (v && !(acc && strstr(acc, tag))) {
             char *t = val_text(v), *line = NULL;
             if (asprintf(&line, "%s %.3000s%s\n", tag, t ? t : "", t && strlen(t) > 3000 ? " ...(cut)" : "") >= 0) {
@@ -526,7 +523,7 @@ static double val_num(const cJSON *v)
     return cJSON_IsString(v) ? strtod(v->valuestring, NULL) : 0;
 }
 
-/* Position of an UPPERCASE operator outside strings and `refs`, or NULL. */
+/* Position of an UPPERCASE operator outside strings and $refs, or NULL. */
 static const char *find_op(const char *s, const char *op)
 {
     size_t n = strlen(op);
@@ -537,9 +534,8 @@ static const char *find_op(const char *s, const char *op)
                 q += *q == '\\' && q[1] ? 2 : 1;
             }
             c = *q ? q : q - 1;
-        } else if (*c == '`') {
-            const char *q = strchr(c + 1, '`');
-            c = q ? q : c;
+        } else if (*c == '$' && sq_dollar(c)) {
+            c += sq_dollar(c) - 1;
         } else if (strncmp(c, op, n) == 0) {
             return c;
         }
@@ -607,7 +603,7 @@ static int atom(rt_t *r, const char *s)
         cJSON_Delete(R);
         free(lhs);
     }
-    if (res == -1 && sq_is_literal(a)) { /* IF `flag` THEN: truthiness */
+    if (res == -1 && sq_is_literal(a)) { /* IF $flag: truthiness */
         cJSON *v = eval_literal(r, a);
         res = !is_empty(v);
         cJSON_Delete(v);

@@ -487,12 +487,11 @@ h2 em { font-style: normal; color: var(--deep); }
         </div>
         <div class="abs code reveal" style="top: 500px; --d: 0.5s"><b>STEP 1:</b> GATHER
 <b>ASK USER</b> "What do you sell, and to which clients?"
-<b>SAVE</b> answer <b>INTO VARIABLE</b> `target`
-<b>EXECUTE</b> tool `scrape_leads` with payload { "query": `target` }
-<b>SAVE</b> result <b>INTO VARIABLE</b> `leads`
-<b>IF</b> `leads` <b>IS EMPTY THEN</b>
-    <b>RETURN</b> "No leads found. Try another city."
-<b>END IF</b></div>
+<b>SAVE</b> answer <b>INTO VARIABLE</b> $target
+<b>EXECUTE</b> tool $scrape_leads with payload { "query": $target }
+<b>SAVE</b> result <b>INTO VARIABLE</b> $leads
+<b>IF</b> $leads <b>IS EMPTY</b>:
+    <b>RETURN</b> "No leads found. Try another city."</div>
     </section>
 
     <!-- ============ 06. COMPILED ============ -->

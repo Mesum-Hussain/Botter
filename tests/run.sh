@@ -93,33 +93,46 @@ sq_bad() {
     check "Owl: $1" "$T/lint.log" "$4"
 }
 sq_bad "capital pseudo-code is not a statement" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not an Owl statement'
-sq_bad "placeholder text in a tool argument is an error" '{ "path": `folder` }' '{ "path": "TODO" }' 'error: "TODO" is placeholder text'
-sq_bad "... for left-out arguments is an error" '{ "path": `folder` }' '{ "path": `folder`, ... }' 'error: "..." in a tool'"'"'s arguments'
+sq_bad "placeholder text in a tool argument is an error" '{ "path": $folder }' '{ "path": "TODO" }' 'error: "TODO" is placeholder text'
+sq_bad "... for left-out arguments is an error" '{ "path": $folder }' '{ "path": $folder, ... }' 'error: "..." in a tool'"'"'s arguments'
 sq_bad "BREAK is not Owl" 'Skip it.' 'BREAK' 'error: Owl has no BREAK'
-sq_bad "keyword typo is an error with its line" 'INVOKE SKILL' 'INVOCATE SKILL' 'FLOW.md:15: error: unknown keyword INVOCATE; did you mean INVOKE'
+sq_bad "keyword typo is an error with its line" 'INVOKE SKILL' 'INVOCATE SKILL' 'FLOW.md:16: error: unknown keyword INVOCATE; did you mean INVOKE'
 if [ -e "$T/flow_bad.bot" ]; then fail "Owl: a flow with errors is not built"; else pass "Owl: a flow with errors is not built"; fi
-sq_bad "unknown tool" '`fs_read`' '`fs_reed`' 'no such tool'
-sq_bad "skill used without LOAD SKILL" 'LOAD SKILL "pitching"' '' 'add LOAD SKILL "pitching"'
-sq_bad "variable used before it is set" '`folder` }' '`fodler` }' '`fodler` is used before it is set'
-sq_bad "loop variable used after its loop" 'RETURN "Read "' 'RETURN `f.name` + "Read "' 'only exists inside its FOR EACH'
-sq_bad "mismatched END" '        END RETRY' '        END IF' 'END IF, but the RETRY opened on line 19 is still open'
-sq_bad "unclosed block" 'END FOR' '' 'this FOR EACH is never closed'
-sq_bad "IF without THEN" '"notes.txt" THEN' '"notes.txt"' 'IF reads: IF <condition> THEN'
-sq_bad "MCP CONNECT is rejected" 'LOAD SKILL "pitching"' 'LOAD SKILL "pitching"
-CONNECT mcp://x AS y' 'CONNECT \(MCP servers\) is not supported'
+sq_bad "unknown tool" '$fs_read' '$fs_reed' 'no such tool'
+sq_bad "skill used without IMPORT" 'INVOKE SKILL $pitching' 'INVOKE SKILL $other' 'INVOKE SKILL \$other: list \$other under IMPORT:'
+sq_bad "IMPORT names a skill that exists" '    $pitching' '    $pitching
+    $ghost' 'IMPORT \$ghost: there is no skills/ghost/SKILL.md'
+sq_bad "LOAD is gone" 'IMPORT:' 'LOAD SKILL "pitching"
+IMPORT:' 'Owl has no LOAD: list the agent.s skills under IMPORT:'
+sq_bad "backtick names are gone" '{ "path": $folder }' '{ "path": `folder` }' 'write \$folder, not `folder`: Owl names start with \$'
+sq_bad "a quoted skill name is an error" 'INVOKE SKILL $pitching' 'INVOKE SKILL "pitching"' 'INVOKE reads: INVOKE SKILL \$name'
+sq_bad "variable used before it is set" '$folder }' '$fodler }' '\$fodler is used before it is set'
+sq_bad "loop variable used after its loop" 'RETURN "Read "' 'RETURN $f.name + "Read "' 'only exists inside its FOR EACH'
+sq_bad "END lines are gone" 'RETURN "Read "' 'END FOR
+RETURN "Read "' 'FLOW.md:23: error: Owl has no END FOR line: a block ends where its indentation ends'
+sq_bad "THEN is gone" '"notes.txt":' '"notes.txt" THEN' 'IF reads: IF <condition>:  \(no THEN'
+sq_bad "IF without its colon" '"notes.txt":' '"notes.txt"' 'IF reads: IF <condition>:'
+sq_bad "a block with nothing indented under it" '            EXECUTE tool $fs_read' 'EXECUTE tool $fs_read' 'FLOW.md:20: error: this line opens a block, but nothing is indented under it'
+sq_bad "indentation that matches no block" '        Skip it.' '        Skip it.
+      Skip it again.' 'FLOW.md:19: error: this line.s indentation matches no block'
+sq_bad "indentation with no block above it" '2. SAVE answer' '    2. SAVE answer' 'FLOW.md:10: error: this line is indented deeper than the lines around it'
+sq_bad "ELSE lines up with its IF" '    ELSE:' '        ELSE:' 'ELSE lines up with its IF \(the IF on line 15\)'
+sq_bad "tabs are not indentation" '        Skip it.' '	Skip it.' 'indent with spaces, not tabs'
+sq_bad "MCP CONNECT is rejected" 'IMPORT:' 'CONNECT mcp://x AS y
+IMPORT:' 'CONNECT \(MCP servers\) is not supported'
 sq_bad "the file must start with \`\`\`owl" '```owl
 ---' '---' 'starts with ```owl on its first line; the frontmatter goes inside the block'
-sq_bad "the block must be closed" 'RETURN "Read " + `files.length` + " files"
-```' 'RETURN "Read " + `files.length` + " files"' 'never closed: end the file with ```'
-sq_bad "nothing may follow the block" 'RETURN "Read " + `files.length` + " files"
-```' 'RETURN "Read " + `files.length` + " files"
+sq_bad "the block must be closed" 'RETURN "Read " + $files.length + " files"
+```' 'RETURN "Read " + $files.length + " files"' 'never closed: end the file with ```'
+sq_bad "nothing may follow the block" 'RETURN "Read " + $files.length + " files"
+```' 'RETURN "Read " + $files.length + " files"
 ```
 More text' 'nothing may follow the closing ```'
 sq_bad "Markdown step headings are rejected" 'STEP 1: GATHER' '## STEP 1: GATHER' 'write the step label as Owl, without #: STEP n: NAME'
-sq_bad "other Markdown is rejected" 'LOAD SKILL "pitching"' '# My flow
-LOAD SKILL "pitching"' 'Markdown \(headings, <!-- comments -->\) is not part of Owl'
+sq_bad "other Markdown is rejected" 'IMPORT:' '# My flow
+IMPORT:' 'Markdown \(headings, <!-- comments -->\) is not part of Owl'
 sq_bad "STEP labels are numbered in order" 'STEP 2: WORK' 'STEP 3: WORK' 'warning: STEP 3 follows STEP 1'
-sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.md:17: warning: write 'if' as an Owl statement"
+sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.md:18: warning: write 'if' as an Owl statement"
 
 # config.json: checked by the build, shown by list, --version, the start-up line and the system prompt
 mkagent "$T/meta" '{"name": "meta-agent", "display_name": "Meta Agent", "version": "1.2.3", "description": "Tests metadata."}'
@@ -348,8 +361,8 @@ check "Owl: SAVE TO FILE writes the value" "$T/sqws/out/items.json" '"b"'
 n=$(grep -c "" "$T/rec/owl.txt" 2>/dev/null)
 if [ "$n" = 2 ]; then pass "Owl: only prose reaches the LLM (2 calls for the whole flow)"; else fail "Owl: only prose reaches the LLM (2 calls for the whole flow)" "LLM calls: $n"; fi
 check "Owl: FOR EACH + IF run the plain-English step for the matching item" "$T/rec/owl.txt" "line 16\\] Mention the letter"
-check "Owl: a prose condition is decided by the LLM" "$T/rec/owl.txt" 'Decide whether this condition is true right now: the user `name` seems happy'
-check "Owl: a decision shows the variables it names in full" "$T/rec/decide.txt" '^`name` = Alice'
+check "Owl: a prose condition is decided by the LLM" "$T/rec/owl.txt" 'Decide whether this condition is true right now: the user \$name seems happy'
+check "Owl: a decision shows the variables it names in full" "$T/rec/decide.txt" '^\$name = Alice'
 stub_start --owl no
 sq_drive
 check "Owl: the LLM's 'no' takes the ELSE branch" "$T/out" "Hi Alice, mood sad"

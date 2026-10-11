@@ -106,7 +106,7 @@ class H(BaseHTTPRequestHandler):
         if msgs and msgs[0]["role"] == "system" and msgs[0]["content"].startswith("You review FLOW.md"):
             save("review.txt", msgs[-1]["content"])
             reply({"content": json.dumps({"makes_sense": False, "summary": "one step cannot work",
-                                          "problems": [{"line": 7, "statement": "EXECUTE tool `fs_read`",
+                                          "problems": [{"line": 7, "statement": "EXECUTE tool $fs_read",
                                                         "why": "reads a file that is never written",
                                                         "suggestion": "write the file first"}]})})
         elif a.owl and users and users[-1]["content"].startswith("[Owl") and msgs[-1]["role"] == "user":
