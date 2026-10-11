@@ -133,7 +133,7 @@ static const char REVIEWER[] =
     "checked; judge only whether the LOGIC makes sense. How FWL runs: botcore follows the structure itself (IF / "
     "ELSE IF / ELSE, FOR EACH {item} in {list}, WHILE <condition>, at most N times, RETRY N times, which repeats "
     "its lines while one of them fails; ASK \"question\" [choices] into {name} shows the question and waits for "
-    "the user; RETURN ends the flow). Every other line is a plain sentence handed to an LLM, one at a time, "
+    "the user; STEP n: NAME is a label shown as progress; RETURN ends the flow). Every other line is a plain sentence handed to an LLM, one at a time, "
     "which can use the agent's tools but cannot ask the user anything during that step. In a sentence $name is a "
     "tool, #name a skill whose playbook the LLM gets, @name an agent the work is handed to, and {name} a "
     "remembered value: the first sentence that mentions a new {name} fills it (also a sentence that says 'as "

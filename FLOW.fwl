@@ -31,7 +31,7 @@ IF {verdict} is not an approval of the plan:
     RETURN "Stopped: the plan was not approved. Tell me what you want and we can start again."
 
 STEP 3: WRITE
-Write agent.md and the skills of {plan} as #write-agent-md-and-skills says.
+Write agent.md and the skills of {plan} as #write-agent-md-and-skills says. Write only those files in this step: the tools, config.json and FLOW.fwl each have their own step below.
 List the tools in {plan} as a JSON array of objects with "name" and "purpose", or [] if it has none, and call it {tools}.
 FOR EACH {tool} in {tools}:
     Write this tool as #write-tool says: {tool}
@@ -41,14 +41,13 @@ WHILE {tested} contains "FAILED", at most 4 times:
     Test the tools again with $tool_test and keep its report as {tested}.
 Write config.json as the project-layout skill says: name (this folder's name), display_name, version (0.1.0 for a new agent; for a changed one, bump PATCH for fixes, MINOR for new abilities, MAJOR for changed behaviour), a one-sentence description, "internet": false only if {plan} says the agent must work offline, the skills and tools written above, and in "requires" every program they need on the machine.
 IF {plan} describes more than one step for the agent:
-    Write FLOW.fwl for {plan} as #write-flow says.
+    Write FLOW.fwl for {plan} exactly as #write-flow says (its syntax is the one in that skill and nothing else), replacing any FLOW.fwl that is already there.
 Review the project against {request}, {details} and {plan} as #review-agent says, and call the gaps you find {gaps}: a JSON array of texts, [] if there are none.
 FOR EACH {gap} in {gaps}:
     Fix this gap, changing only what it needs and keeping every other action, step and rule that works: {gap}
 
 STEP 4: CHECK
-Read #build-agent before building {plan}.
-Check the project with $agent_build, passing "dry_run": true, and keep its report as {check}.
+Check the project with $agent_build, passing "dry_run": true, and keep its report as {check}. Only check in this step, as #build-agent says: do not build yet.
 WHILE {check} contains "error:" or {check} contains "warning:", at most 5 times:
     Fix every error and warning reported here: {check}
     Check the project again with $agent_build, passing "dry_run": true, and keep its report as {check}.

@@ -658,8 +658,18 @@ static int llm_step(rt_t *r, const char *msg, char **reply)
 /* A value from text the model or a tool gave: JSON when it is JSON, else the text. */
 static cJSON *to_value(const char *t)
 {
-    cJSON *v = t ? parse_reply_json(t) : NULL;
-    return v ? v : cJSON_CreateString(t ? t : "");
+    const char *s = t ? t + strspn(t, " \t\r\n") : "", *end = NULL;
+    cJSON *v = NULL;
+    if (*s == '{' || *s == '[' || !strncmp(s, "```", 3)) { /* a list or something with fields */
+        v = parse_reply_json(s);
+    } else { /* a number, true/false or a "quoted text": only if that is all there is ("1. First ..." is text) */
+        v = cJSON_ParseWithOpts(s, &end, 0);
+        if (v && (cJSON_IsObject(v) || cJSON_IsArray(v) || end[strspn(end, " \t\r\n")])) {
+            cJSON_Delete(v);
+            v = NULL;
+        }
+    }
+    return v ? v : cJSON_CreateString(s);
 }
 
 /*
@@ -707,7 +717,7 @@ static int st_instr(rt_t *r, sq_node *x)
         }
         if (fills && no < 8) {
             snprintf(outs[no++], 65, "%s", root);
-            snprintf(line, sizeof(line), "\n{%s} is what this step produces.", root);
+            snprintf(line, sizeof(line), "\n{%s} is what this step produces: do the work, you are asked for its value right after.", root);
             show_cat(&extra, &el, line);
         }
         c += n - 1;

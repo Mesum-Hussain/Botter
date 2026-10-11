@@ -95,6 +95,7 @@ sq_bad() {
     check "FWL: $1" "$T/lint.log" "$4"
 }
 sq_bad "capital pseudo-code is not FWL" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not FWL: only ASK, IF, ELSE'
+sq_bad "a made-up capital keyword is not FWL" 'Skip it.' 'CALCULATE {t} = {f} * 2' 'error: "CALCULATE" is not FWL: only ASK, IF, ELSE'
 sq_bad "BREAK is not FWL" 'Skip it.' 'BREAK' 'error: FWL has no BREAK'
 sq_bad "keyword typo is an error with its line" 'RETRY 2 times:' 'RETRI 2 times:' 'FLOW.fwl:11: error: unknown keyword RETRI; did you mean RETRY'
 if [ -e "$T/flow_bad.bot" ]; then fail "FWL: a flow with errors is not built"; else pass "FWL: a flow with errors is not built"; fi

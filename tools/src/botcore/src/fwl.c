@@ -472,18 +472,17 @@ static int sq_gone(sq_ps *s, const char *w, const char *r)
             return 1;
         }
     }
-    size_t k = 0; /* two capital words that are no keyword ("SEND EMAILS"): pseudo-code, vague to the model */
+    size_t k = 0; /* a capital word that is no keyword (CALCULATE, SAY, SEND EMAILS): made-up FWL, vague to the model */
     while (isupper((unsigned char)r[k]) || r[k] == '-') {
         k++;
     }
-    if (k > 1 && !isalnum((unsigned char)r[k])) {
-        sq_diag(s->p, s->line, 1,
-                "\"%s %.*s\" is not FWL: only ASK, IF, ELSE, FOR EACH, WHILE, RETRY, STEP and RETURN are written in "
-                "capitals; write the step as a plain sentence (\"Check the inbox for replies.\")",
-                w, (int)k, r);
-        return 1;
-    }
-    return 0;
+    k = k > 1 && !isalnum((unsigned char)r[k]) ? k : 0;
+    sq_diag(s->p, s->line, 1,
+            "\"%s%s%.*s\" is not FWL: only ASK, IF, ELSE, FOR EACH, WHILE, RETRY, STEP and RETURN are written in "
+            "capitals; write the step as a plain sentence that starts with an ordinary word (\"Check the inbox for "
+            "replies.\")",
+            w, k ? " " : "", (int)k, r);
+    return 1;
 }
 
 static void sq_sentence(sq_ps *s, const char *t)
@@ -695,8 +694,8 @@ static void sq_stmt(sq_ps *s, char *t)
         sq_node *x = sq_add(s, SQ_RETURN);
         x->a = sq_dup(r, strlen(r));
         s->returns++;
-    } else if (!sq_gone(s, w, r)) {
-        sq_sentence(s, t); /* a shouted plain sentence ("PDF files go to out/") */
+    } else {
+        sq_gone(s, w, r);
     }
 }
 
