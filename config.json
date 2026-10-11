@@ -1,7 +1,7 @@
 {
   "name": "botter",
   "display_name": "Botter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The agent based framework for building agents or agent based compiler for agents: describe one in plain English and Botter designs, writes, checks and builds it into a single Linux executable.",
   "internet": true,
   "skills": [

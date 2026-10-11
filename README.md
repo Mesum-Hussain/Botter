@@ -67,9 +67,11 @@ We use Botter to build Botter.
 ## Try it
 
 ```sh
-make                 # needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
+curl -LO https://github.com/Mesum-Hussain/Botter/releases/latest/download/botter
+chmod +x botter && sudo mv botter /usr/local/bin/
+
 mkdir myagent && cd myagent
-../botter            # pick a model, paste your key, describe your agent
+botter               # pick a model, paste your key, describe your agent
 ./myagent.bot        # run it, or scp it to any x86-64 Linux box and run it there
 ```
 
@@ -210,6 +212,7 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 ## Hacking on Botter
 
 ```sh
+make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
 make test                     # 114 tests: Owl, sandbox, streaming, HTTPS, key cache, TUI...
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
