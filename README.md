@@ -99,14 +99,14 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 ## Anatomy of an agent
 
-| File | What it is | Who can write it |
-|---|---|---|
-| `agent.md` | Persona and rules: who the agent is, what it must never do | Anyone |
-| `FLOW.fwl` | What the agent does, step by step, in **FWL** | Anyone |
-| `skills/<name>/SKILL.md` | Playbooks for specific tasks | Anyone |
-| `agents/<name>/agent.md` | Sub-agents: a persona of their own for one kind of job | Anyone |
-| `tools/` | Executables plus a JSON description of each | Anyone who can code a little |
-| `config.json` | Name, version, internet on/off, what gets compiled in, MCP servers and remote agents | Botter, or you |
+| File | What it is |
+|---|---|
+| `agent.md` | Persona and rules: who the agent is, what it must never do |
+| `FLOW.fwl` | What the agent does, step by step, in **FWL** |
+| `skills/<name>/SKILL.md` | Playbooks for specific tasks |
+| `agents/<name>/agent.md` | Sub-agents: a persona of their own for one kind of job |
+| `tools/` | Executables plus a JSON description of each |
+| `config.json` | Name, version, internet on/off, what gets compiled in, MCP servers and remote agents |
 
 **Skills** follow the `SKILL.md` convention. The agent sees a one-line summary of each and opens the full playbook only when the task calls for it, so it can carry dozens without stuffing its context window.
 
