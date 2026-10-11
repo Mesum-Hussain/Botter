@@ -1,10 +1,10 @@
 /*
- * Owl front end: parser (syntax tree + syntax errors) and build-time checks.
- * Shared by botcore (owl_run.c interprets the tree) and botter_pack (which
- * #includes this file and runs sq_check). See owl.h and skills/write-flow.
+ * FWL front end: parser (syntax tree + syntax errors) and build-time checks.
+ * Shared by botcore (fwl_run.c interprets the tree) and botter_pack (which
+ * #includes this file and runs sq_check). See fwl.h and skills/write-flow.
  */
 #define _GNU_SOURCE
-#include "owl.h"
+#include "fwl.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -258,7 +258,7 @@ static int sq_syntax(sq_prog *p, int line, const char *s, int braces)
             const char *q = strchr(c + 1, '`');
             char root[65];
             if (q && sq_ref(c + 1, (size_t)(q - c - 1), root)) {
-                sq_diag(p, line, 1, "write $%.*s, not `%.*s`: Owl names start with $", (int)(q - c - 1), c + 1,
+                sq_diag(p, line, 1, "write $%.*s, not `%.*s`: FWL names start with $", (int)(q - c - 1), c + 1,
                         (int)(q - c - 1), c + 1);
                 return -1;
             }
@@ -515,7 +515,7 @@ static int sq_unknown(sq_ps *s, const char *w)
 {
     if (!strcmp(w, "BREAK") || !strcmp(w, "CONTINUE") || !strcmp(w, "GOTO") || !strcmp(w, "EXIT")) {
         sq_diag(s->p, s->line, 1,
-                "Owl has no %s: to skip the rest of an item, put it inside an IF; to stop a loop early, use "
+                "FWL has no %s: to skip the rest of an item, put it inside an IF; to stop a loop early, use "
                 "WHILE ... AT MOST N TIMES with a condition, or RETURN to end the flow",
                 w);
         return 1;
@@ -550,7 +550,7 @@ static void sq_instr(sq_ps *s, const char *t)
                                       "RETURN", "RETRY UP TO N TIMES:"};
     for (int i = 0; prose[i]; i++) {
         if (sq_word(t, prose[i]) && !isupper((unsigned char)t[1])) {
-            sq_diag(s->p, s->line, 0, "write '%s' as an Owl statement in capitals (%s) so the flow can be checked",
+            sq_diag(s->p, s->line, 0, "write '%s' as an FWL statement in capitals (%s) so the flow can be checked",
                     prose[i], fix[i]);
             break;
         }
@@ -658,7 +658,7 @@ static void sq_stmt(sq_ps *s, char *t)
         return;
     }
     if (!strcmp(w, "LOAD")) {
-        sq_diag(p, s->line, 1, "Owl has no LOAD: list the agent's skills under IMPORT: at the top of the flow, one $name per line");
+        sq_diag(p, s->line, 1, "FWL has no LOAD: list the agent's skills under IMPORT: at the top of the flow, one $name per line");
         return;
     }
     if (!strcmp(w, "IMPORT")) {
@@ -834,7 +834,7 @@ static void sq_stmt(sq_ps *s, char *t)
         return;
     }
     if (!strcmp(w, "END") || !strcmp(w, "ENDIF") || !strcmp(w, "ENDFOR")) {
-        sq_diag(p, s->line, 1, "Owl has no %s line: a block ends where its indentation ends (delete this line)", t);
+        sq_diag(p, s->line, 1, "FWL has no %s line: a block ends where its indentation ends (delete this line)", t);
         return;
     }
     if (!strcmp(w, "FOR")) {
@@ -931,7 +931,7 @@ static void sq_stmt(sq_ps *s, char *t)
     }
     if (k > 1 && !isalnum((unsigned char)r[k])) {
         sq_diag(p, s->line, 1,
-                "\"%s %.*s\" is not an Owl statement: use EXECUTE, INVOKE SKILL, ASK USER, SET, IF, FOR EACH, "
+                "\"%s %.*s\" is not an FWL statement: use EXECUTE, INVOKE SKILL, ASK USER, SET, IF, FOR EACH, "
                 "WHILE, RETRY or RETURN, or write the step as a plain-English sentence (\"Check Gmail for replies.\")",
                 w, (int)k, r);
         return;
@@ -939,13 +939,13 @@ static void sq_stmt(sq_ps *s, char *t)
     sq_instr(s, t); /* a shouted plain-English line ("PDF files go to out/") */
 }
 
-/* Frontmatter: spec-version "owl-1" required, title recommended. Offset after it, or 0. */
+/* Frontmatter: spec-version "fwl-1" required, title recommended. Offset after it, or 0. */
 static size_t sq_front(sq_ps *s, const char *src, size_t n)
 {
     sq_prog *p = s->p;
     s->line++;
     if (n < 4 || strncmp(src, "---", 3) != 0 || (src[3] != '\n' && src[3] != '\r')) {
-        sq_diag(p, s->line, 1, "the frontmatter comes right after ```owl: ---, spec-version: \"owl-1\", title: \"...\", ---");
+        sq_diag(p, s->line, 1, "the frontmatter comes right after ```fwl: ---, spec-version: \"fwl-1\", title: \"...\", ---");
         return 0;
     }
     int ver = 0;
@@ -958,7 +958,7 @@ static size_t sq_front(sq_ps *s, const char *src, size_t n)
         i += ll + (nl != NULL);
         if (ll >= 3 && strncmp(l, "---", 3) == 0) {
             if (!ver) {
-                sq_diag(p, s->line, 1, "the frontmatter needs spec-version: \"owl-1\"");
+                sq_diag(p, s->line, 1, "the frontmatter needs spec-version: \"fwl-1\"");
             }
             if (!p->title[0]) {
                 sq_diag(p, s->line, 0, "the frontmatter should have a title: \"...\"");
@@ -986,8 +986,8 @@ static size_t sq_front(sq_ps *s, const char *src, size_t n)
         }
         if (!strcmp(line, "spec-version")) {
             ver = 1;
-            if (strcmp(val, "owl-1") != 0) {
-                sq_diag(p, s->line, 1, "spec-version is \"%s\"; this botter understands \"owl-1\"", val);
+            if (strcmp(val, "fwl-1") != 0) {
+                sq_diag(p, s->line, 1, "spec-version is \"%s\"; this botter understands \"fwl-1\"", val);
             }
         } else if (!strcmp(line, "title")) {
             snprintf(p->title, sizeof(p->title), "%.199s", val);
@@ -1005,14 +1005,16 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
     memset(&s, 0, sizeof(s));
     s.p = p;
     s.body = s.alt = -1;
-    /* The whole file is one ```owl block: frontmatter, then statements, then the closing ```. */
+    /* The whole file is one ```fwl block: frontmatter, then statements, then the closing ```. */
     size_t first = strcspn(src, "\n");
     const char *info = sq_skip(src + 3);
-    if (n < 3 || strncmp(src, "```", 3) != 0 || !sq_word(info, "owl")) {
-        sq_diag(p, 1, 1, strncmp(src, "---", 3) == 0
-                             ? "FLOW.md starts with ```owl on its first line; the frontmatter goes inside the block"
-                             : "FLOW.md starts with ```owl on its first line and ends with ``` (the whole file is "
-                               "one Owl block)");
+    if (n < 3 || strncmp(src, "```", 3) != 0 || !sq_word(info, "fwl")) {
+        sq_diag(p, 1, 1, n >= 3 && strncmp(src, "```", 3) == 0 && sq_word(info, "owl")
+                             ? "Owl is now called FWL: start FLOW.md with ```fwl and use spec-version: \"fwl-1\""
+                             : strncmp(src, "---", 3) == 0
+                             ? "FLOW.md starts with ```fwl on its first line; the frontmatter goes inside the block"
+                             : "FLOW.md starts with ```fwl on its first line and ends with ``` (the whole file is "
+                               "one FWL block)");
         return p->errors;
     }
     s.line = 1;
@@ -1043,7 +1045,7 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
         }
         if (closed) {
             if (*t) {
-                sq_diag(p, s.line, 1, "nothing may follow the closing ``` of the Owl block");
+                sq_diag(p, s.line, 1, "nothing may follow the closing ``` of the FWL block");
                 break;
             }
             continue;
@@ -1057,7 +1059,7 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
         }
         if (strncmp(t, "```", 3) == 0) {
             if (t[3]) {
-                sq_diag(p, s.line, 1, "a code block cannot start inside the Owl block");
+                sq_diag(p, s.line, 1, "a code block cannot start inside the FWL block");
                 continue;
             }
             closed = 1;
@@ -1067,13 +1069,13 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
             }
             continue;
         }
-        if (*t == '#' || strncmp(t, "<!--", 4) == 0) { /* Markdown is not part of Owl */
+        if (*t == '#' || strncmp(t, "<!--", 4) == 0) { /* Markdown is not part of FWL */
             const char *h = t + strspn(t, "# ");
             if (*t == '#' && strncmp(h, "STEP ", 5) == 0) {
-                sq_diag(p, s.line, 1, "write the step label as Owl, without #: STEP n: NAME");
+                sq_diag(p, s.line, 1, "write the step label as FWL, without #: STEP n: NAME");
             } else {
-                sq_diag(p, s.line, 1, "Markdown (headings, <!-- comments -->) is not part of Owl; write plain "
-                                      "English or an Owl statement");
+                sq_diag(p, s.line, 1, "Markdown (headings, <!-- comments -->) is not part of FWL; write plain "
+                                      "English or an FWL statement");
             }
             continue;
         }
@@ -1119,7 +1121,7 @@ int sq_parse(const char *src, size_t n, sq_prog *p)
         }
     }
     if (!closed) {
-        sq_diag(p, s.line, 1, "the Owl block is never closed: end the file with ```");
+        sq_diag(p, s.line, 1, "the FWL block is never closed: end the file with ```");
     }
     while (s.depth) {
         sq_pop(&s);

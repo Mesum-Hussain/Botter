@@ -1,15 +1,15 @@
-#ifndef BC_OWL_H
-#define BC_OWL_H
+#ifndef BC_FWL_H
+#define BC_FWL_H
 
 #include <stddef.h>
 
 /*
- * Owl ("sequence"): the language of an agent's FLOW.md. The whole file is
- * one ```owl block: a frontmatter (spec-version: "owl-1"), then UPPERCASE
+ * FWL ("sequence"): the language of an agent's FLOW.md. The whole file is
+ * one ```fwl block: a frontmatter (spec-version: "fwl-1"), then UPPERCASE
  * statements; every other line is a plain-English instruction (no Markdown). A line ending
  * in ':' opens a block; the lines indented under it are the block. This file is the shared front end:
  * sq_parse() builds the syntax tree (syntax errors), sq_check() checks names
- * and variables (botter_pack, at build time), owl_run.c interprets the tree
+ * and variables (botter_pack, at build time), fwl_run.c interprets the tree
  * (botcore, at run time). No dependencies beyond libc.
  */
 

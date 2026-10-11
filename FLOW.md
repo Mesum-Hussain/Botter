@@ -1,6 +1,6 @@
-```owl
+```fwl
 ---
-spec-version: "owl-1"
+spec-version: "fwl-1"
 title: "Botter Session"
 description: "Design an agent with the user, write its files, check them and build them into one .bot file."
 ---
@@ -78,7 +78,7 @@ STEP 4: CHECK
        RETURN "the errors that remain in $check and what the user can do about them"
 6. EXECUTE tool $fs_list with payload { "path": "." }
 7. IF $result CONTAINS "FLOW.md":
-       EXECUTE tool $owl_review with payload { "dir": "." }
+       EXECUTE tool $fwl_review with payload { "dir": "." }
        SAVE result INTO VARIABLE $review
        IF $review.makes_sense IS EQUAL TO false:
            ASK USER "Some steps in FLOW.md do not make sense yet:\n\n" + $review.report + "\nShall I apply these suggestions?"

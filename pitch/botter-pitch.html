@@ -305,14 +305,14 @@ h2 em { font-style: normal; color: var(--deep); }
 .file span { font: 500 40px/1.2 var(--font); }
 
 /* ===========================================
-   === OWL ===
+   === FWL ===
    A huge wordmark, then the code. Keywords are green.
    =========================================== */
-.owl-word { position: absolute; left: 108px; top: 150px; z-index: 2; font: 800 300px/1 var(--font); letter-spacing: -16px; color: var(--soft); }
-.owl-what { position: absolute; left: 760px; right: 120px; top: 218px; z-index: 2; }
-.owl-what .full { font: 700 34px/1 var(--mono); letter-spacing: 1px; color: var(--soft); }
-.owl-what .full b { color: var(--on-dark); }
-.owl-what .say { margin-top: 28px; font: 800 72px/1.1 var(--font); letter-spacing: -2px; }
+.fwl-word { position: absolute; left: 108px; top: 150px; z-index: 2; font: 800 300px/1 var(--font); letter-spacing: -16px; color: var(--soft); }
+.fwl-what { position: absolute; left: 760px; right: 120px; top: 218px; z-index: 2; }
+.fwl-what .full { font: 700 34px/1 var(--mono); letter-spacing: 1px; color: var(--soft); }
+.fwl-what .full b { color: var(--on-dark); }
+.fwl-what .say { margin-top: 28px; font: 800 72px/1.1 var(--font); letter-spacing: -2px; }
 .code {
     padding: 36px 52px;
     background: var(--panel-dark);
@@ -476,13 +476,13 @@ h2 em { font-style: normal; color: var(--deep); }
         </div>
     </section>
 
-    <!-- ============ 05. OWL ============ -->
+    <!-- ============ 05. FWL ============ -->
     <section class="slide dark">
         <div class="mark l">BOTTER</div>
         <div class="mark r">05</div>
-        <div class="owl-word reveal">Owl.</div>
-        <div class="owl-what reveal" style="--d: 0.25s">
-            <div class="full"><b>O</b>rchestration <b>W</b>riteup <b>L</b>anguage</div>
+        <div class="fwl-word reveal">FWL.</div>
+        <div class="fwl-what reveal" style="--d: 0.25s">
+            <div class="full"><b>F</b>low <b>W</b>riteup <b>L</b>anguage</div>
             <div class="say">The language of FLOW.md.<br>English, with KEYWORDS.</div>
         </div>
         <div class="abs code reveal" style="top: 500px; --d: 0.5s"><b>STEP 1:</b> GATHER
@@ -693,7 +693,7 @@ class InlineEditor {
         this.storageKey = 'botter-pitch-edits-v2';
         this.selector = '.slide h1, .slide h2, .slide h3, .slide p, .slide .eyebrow, .slide .facts, .slide .foot, ' +
             '.slide .box code, .slide .box span, .slide .file code, .slide .file span, .slide .code, .slide .err, ' +
-            '.slide .cmd code, .slide .cmd span, .slide .owl-word, .slide .owl-what .full, .slide .owl-what .say, ' +
+            '.slide .cmd code, .slide .cmd span, .slide .fwl-word, .slide .fwl-what .full, .slide .fwl-what .say, ' +
             '.slide .seg code, .slide .seg span, .slide .cmp > div, .slide .chip, .slide .shock span, ' +
             '.slide .next small, .slide .next b';
         this.fields = Array.from(document.querySelectorAll(this.selector));

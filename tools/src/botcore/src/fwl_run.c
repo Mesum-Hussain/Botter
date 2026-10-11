@@ -1,5 +1,5 @@
 /*
- * Owl interpreter (see owl_run.h). Values are JSON (cJSON): strings,
+ * FWL interpreter (see fwl_run.h). Values are JSON (cJSON): strings,
  * numbers, arrays, objects. Expressions made only of "strings", $refs,
  * numbers, true/false/null, JSON payloads and + are evaluated here; anything
  * written in prose is worked out by the LLM (a quiet side question), as are
@@ -8,7 +8,7 @@
  * answers) is passed to it in the next step's message.
  */
 #define _GNU_SOURCE
-#include "owl_run.h"
+#include "fwl_run.h"
 #include "cJSON.h"
 #include "guard.h"
 #include "term.h"
@@ -457,7 +457,7 @@ static cJSON *eval(rt_t *r, const char *expr, int *abort)
     }
     char *nv = named_values(r, expr);
     char *q = step_msg(r, 0,
-                       "[Owl] Work out this value: %s\n%sReply with only the value as JSON (a \"string\", a number, an "
+                       "[FWL] Work out this value: %s\n%sReply with only the value as JSON (a \"string\", a number, an "
                        "array or an object), nothing else.",
                        expr, nv);
     free(nv);
@@ -657,7 +657,7 @@ static int cond(rt_t *r, const char *c, int *abort)
     }
     char *nv = named_values(r, c);
     char *q = step_msg(r, 0,
-                       "[Owl] Decide whether this condition is true right now: %s\n%sReply with exactly one word: yes "
+                       "[FWL] Decide whether this condition is true right now: %s\n%sReply with exactly one word: yes "
                        "(the condition holds) or no (it does not).",
                        c, nv);
     free(nv);
@@ -732,7 +732,7 @@ static int st_exec(rt_t *r, sq_node *x)
         if (!args && *rest) { /* prose arguments: the LLM builds them from the tool's schema */
             char *schema = tool_schema(x->a);
             char *q = step_msg(r, 0,
-                               "[Owl] Build the JSON arguments for the tool %s for this request: %s\nThe tool: %s\nReply "
+                               "[FWL] Build the JSON arguments for the tool %s for this request: %s\nThe tool: %s\nReply "
                                "with only the JSON object of arguments.",
                                x->a, x->b, schema);
             char *ans = NULL;
@@ -786,7 +786,7 @@ static int llm_step(rt_t *r, const char *msg, char **reply)
 static int st_instr(rt_t *r, sq_node *x)
 {
     char *m = step_msg(r, 1,
-                       "[Owl step, line %d] %s\nDo only this step now, using your tools if needed, then reply briefly "
+                       "[FWL step, line %d] %s\nDo only this step now, using your tools if needed, then reply briefly "
                        "with what you did or found. If it cannot be done, start your reply with FAILED: and say why.",
                        x->line, x->a);
     int rc = m ? llm_step(r, m, NULL) : Q_FAIL;
@@ -815,7 +815,7 @@ static int st_invoke(rt_t *r, sq_node *x)
     cJSON_Delete(ctx);
     char *sk = skill_text(x->a);
     char *m = step_msg(r, 1,
-                       "[Owl step, line %d] Follow the skill \"%s\" for this context, using your tools if needed. Reply "
+                       "[FWL step, line %d] Follow the skill \"%s\" for this context, using your tools if needed. Reply "
                        "with the result only (if it cannot be done, start with FAILED: and say why).\nContext: %s\n"
                        "--- skills/%s/SKILL.md ---\n%s",
                        x->line, x->a, ct, x->a, sk ? sk : "(skill not found)");
@@ -949,7 +949,7 @@ static int st_return(rt_t *r, sq_node *x)
         return Q_RET;
     }
     char *m = step_msg(r, 1,
-                       "[Owl final step, line %d] The flow is finished. Write the final message to the user now: %s",
+                       "[FWL final step, line %d] The flow is finished. Write the final message to the user now: %s",
                        x->line, x->a);
     int rc = m ? llm_step(r, m, NULL) : Q_FAIL;
     free(m);
@@ -1107,7 +1107,7 @@ static int run_list(rt_t *r, sq_list *l)
     return failed && r->retry ? Q_FAIL : Q_OK;
 }
 
-int owl_run(sq_prog *prog, sq_io *io)
+int fwl_run(sq_prog *prog, sq_io *io)
 {
     rt_t r;
     memset(&r, 0, sizeof(r));

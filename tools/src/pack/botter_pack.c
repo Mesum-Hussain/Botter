@@ -7,7 +7,7 @@
  *
  * Embeds (read-only) from <agent-dir>:
  *   agent.md, config.json, FLOW.md, skills/, tools/doc/ (recursive)   plain files
- *       (FLOW.md is optional: the session flow in Owl, checked by botcore/src/owl.c; errors stop the build)
+ *       (FLOW.md is optional: the session flow in FWL, checked by botcore/src/fwl.c; errors stop the build)
  *       (config.json: how to build and run the agent, read by load_config/check_config:
  *        name, display_name, version, description, internet, skills, tools, requires, builder)
  *   tools/bin/<name>                                 tool executables: either a
@@ -317,10 +317,10 @@ static int has_item(const char *path)
     return 0;
 }
 
-#include "../botcore/src/owl.c"
+#include "../botcore/src/fwl.c"
 
-/* Owl diagnostics in compiler form: FLOW.md:LINE: error|warning: message */
-static void owl_diag(void *ud, int line, int error, const char *msg)
+/* FWL diagnostics in compiler form: FLOW.md:LINE: error|warning: message */
+static void fwl_diag(void *ud, int line, int error, const char *msg)
 {
     (void)ud;
     fprintf(stderr, "FLOW.md:%d: %s: %s\n", line, error ? "error" : "warning", msg);
@@ -331,8 +331,8 @@ static void owl_diag(void *ud, int line, int error, const char *msg)
     }
 }
 
-/* Names Owl's EXECUTE tool may use: botcore's built-ins and this agent's tools/bin. */
-static int owl_has_tool(const char *name)
+/* Names FWL's EXECUTE tool may use: botcore's built-ins and this agent's tools/bin. */
+static int fwl_has_tool(const char *name)
 {
     static const char *const builtin[] = {"fs_list",  "fs_read",   "fs_write",  "shell_exec", "vfs_list", "vfs_read",
                                           "get_time", "cron_set",  "cron_list", "cron_delete", NULL};
@@ -341,7 +341,7 @@ static int owl_has_tool(const char *name)
             return 1;
         }
     }
-    if (strcmp(name, "owl_review") == 0) { /* only for agents that build agents: config.json "builder" */
+    if (strcmp(name, "fwl_review") == 0) { /* only for agents that build agents: config.json "builder" */
         return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(g_cfg, "builder"));
     }
     char p[300];
@@ -349,7 +349,7 @@ static int owl_has_tool(const char *name)
     return has_item(p);
 }
 
-static int owl_has_skill(const char *name)
+static int fwl_has_skill(const char *name)
 {
     char p[300];
     snprintf(p, sizeof(p), "skills/%s/SKILL.md", name);
@@ -949,16 +949,16 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     free(mf);
     char *oldflow = join(dir, "SQNC.md");
     if (access(oldflow, F_OK) == 0) {
-        err("%s: SQNC.md is now FLOW.md and its fence is ```owl (see the write-flow skill)%s", oldflow, NULL);
+        err("%s: SQNC.md is now FLOW.md and its fence is ```fwl (see the write-flow skill)%s", oldflow, NULL);
     }
     free(oldflow);
     for (size_t i = 0; i < n_items; i++) {
         if (strcmp(items[i].path, "FLOW.md") == 0 && items[i].data) {
             sq_prog prog;
             memset(&prog, 0, sizeof(prog));
-            prog.diag = owl_diag;
+            prog.diag = fwl_diag;
             if (sq_parse(items[i].data, items[i].len, &prog) == 0) {
-                sq_check(&prog, owl_has_tool, owl_has_skill);
+                sq_check(&prog, fwl_has_tool, fwl_has_skill);
             }
             sq_free(&prog);
         }

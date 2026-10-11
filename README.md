@@ -84,7 +84,7 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 | File | What it is | Who can write it |
 |---|---|---|
 | `agent.md` | Persona and rules: who the agent is, what it must never do | Anyone |
-| `FLOW.md` | The program, written in **Owl** | Anyone |
+| `FLOW.md` | The program, written in **FWL** | Anyone |
 | `skills/<name>/SKILL.md` | Playbooks for specific tasks | Anyone |
 | `tools/` | Executables plus a JSON description of each | Anyone who can code a little |
 | `config.json` | Name, version, internet on/off, what gets compiled in | Botter, or you |
@@ -93,13 +93,13 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 **Tools** are any executable at all: Python, bash, Go, Rust, C. A tool gets one JSON object on stdin and prints its answer. That's the whole protocol. A tool brings its own needs with it, so a Python tool needs Python on the box and a static binary needs nothing. Users never see tool names or JSON. They see *"Searching for leads…"*.
 
-## Owl: pseudocode that actually runs
+## FWL: pseudocode that actually runs
 
 Prompts are a terrible way to write a program. You say *"first do X, then Y, and if Z then stop"*, and the model nods and does something adjacent.
 
-So Botter has a language. **Owl** (the Orchestration Writeup Language) is English for the steps, CAPITALS for the keywords, `$names` for the data and indentation for the blocks. A human can review it in a pull request. A model can read it without a manual.
+So Botter has a language. **FWL** (the Flow Writeup Language) is English for the steps, CAPITALS for the keywords, `$names` for the data and indentation for the blocks. A human can review it in a pull request. A model can read it without a manual.
 
-```owl
+```fwl
 IMPORT:
     $pitching
 
@@ -129,7 +129,7 @@ Look at that `ELSE IF the user asked for changes:`. It's a condition written in 
 
 ### It refuses to build nonsense
 
-Owl comes with a linter, and Botter runs it before every build. Break the flow above and you get this:
+FWL comes with a linter, and Botter runs it before every build. Break the flow above and you get this:
 
 ```
 FLOW.md:15: error: this line opens a block, but nothing is indented under it (indent the lines that belong to it)
@@ -153,7 +153,7 @@ Valid syntax doesn't mean the flow makes sense, so before building, your model r
 
 ### The model only shows up when it's needed
 
-At run time, an Owl interpreter inside the binary executes the flow one statement at a time. Tool calls, questions, variables, loops, retries and comparisons all run as plain code. No tokens, no guessing. The model is called only for the parts that need judgement: English instructions, skills, and conditions like *"the user asked for changes"*.
+At run time, an FWL interpreter inside the binary executes the flow one statement at a time. Tool calls, questions, variables, loops, retries and comparisons all run as plain code. No tokens, no guessing. The model is called only for the parts that need judgement: English instructions, skills, and conditions like *"the user asked for changes"*.
 
 The result: a test flow with a question, a tool call, a loop, a branch, a retry and a file write made **two LLM calls, total**. It's cheaper and faster, and the model can't quietly skip step 3.
 
@@ -161,7 +161,7 @@ The result: a test flow with a question, a tool call, a loop, a branch, a retry 
 
 Values live in `$variables`, never mixed into instructions, and the model is told outright that whatever a variable holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
 
-Owl handles the flow of a single agent today. Teams of agents are next.
+FWL handles the flow of a single agent today. Teams of agents are next.
 
 ## What's inside 356 KB
 
@@ -169,7 +169,7 @@ Botter doesn't generate code, and no compiler or linker runs during a build. You
 
 botcore is about 9,000 lines of C11, statically linked against musl, and it packs a surprising amount into a few hundred kilobytes:
 
-- an Owl parser, linter and interpreter
+- an FWL parser, linter and interpreter
 - its own HTTPS stack, using vendored BearSSL with Mozilla's CA roots compiled in, so no curl, no OpenSSL and no system certificates
 - an OpenAI-compatible client with streaming and tool calling
 - file, shell and scheduling tools
@@ -203,7 +203,7 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ## Where it's going
 
-- **Multi-agent Owl.** Flows that coordinate a whole team of agents, not just one.
+- **Multi-agent FWL.** Flows that coordinate a whole team of agents, not just one.
 - **MCP.** Plug agents into Model Context Protocol servers. `CONNECT` is already a reserved word.
 - **ACP.** Run Botter agents inside your code editor through the Agent Client Protocol.
 - **A2A.** Let Botter agents talk to other agents, whatever they were built with.
@@ -213,7 +213,7 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 114 tests: Owl, sandbox, streaming, HTTPS, key cache, TUI...
+make test                     # 114 tests: FWL, sandbox, streaming, HTTPS, key cache, TUI...
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```

@@ -1,10 +1,10 @@
-#ifndef BC_OWL_RUN_H
-#define BC_OWL_RUN_H
+#ifndef BC_FWL_RUN_H
+#define BC_FWL_RUN_H
 
-#include "owl.h"
+#include "fwl.h"
 
 /*
- * The Owl interpreter: runs an agent's FLOW.md statement by statement.
+ * The FWL interpreter: runs an agent's FLOW.md statement by statement.
  * Structure is executed by botcore itself (variables, IF/FOR/WHILE/RETRY,
  * EXECUTE tool, ASK USER, SAVE, comparisons such as IS EQUAL TO); the LLM is
  * used only where a statement needs judgement: plain-English instructions,
@@ -29,6 +29,6 @@ typedef struct {
 #define SQ_DONE    0 /* ran to the end or RETURN */
 #define SQ_ABORTED 1 /* the user interrupted or quit */
 
-int owl_run(sq_prog *prog, sq_io *io);
+int fwl_run(sq_prog *prog, sq_io *io);
 
 #endif

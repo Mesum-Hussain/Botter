@@ -1,7 +1,7 @@
 /*
- * owl_review: the logic check of an agent project's FLOW.md, by the connected
+ * fwl_review: the logic check of an agent project's FLOW.md, by the connected
  * LLM (a fresh request, no conversation). The syntax and names are checked by
- * the build (owl.c); this asks whether the steps make sense: can each step be
+ * the build (fwl.c); this asks whether the steps make sense: can each step be
  * done with the named tool or skill and the data available then, do payloads
  * fit the tools' parameters, are loops bounded, is anything outward-facing done
  * without asking, does the flow fit what agent.md says the agent is for.
@@ -10,7 +10,7 @@
 #define _GNU_SOURCE
 #include "chat.h"
 #include "guard.h"
-#include "owl.h"
+#include "fwl.h"
 #include "tools.h"
 
 #include <dirent.h>
@@ -129,8 +129,8 @@ static void add_capabilities(sb_t *b, const char *dir)
 }
 
 static const char REVIEWER[] =
-    "You review FLOW.md, the step-by-step flow of an AI agent, written in Owl. Its syntax and names are already "
-    "checked; judge only whether the LOGIC makes sense. How Owl runs: botcore executes the structure itself "
+    "You review FLOW.md, the step-by-step flow of an AI agent, written in FWL. Its syntax and names are already "
+    "checked; judge only whether the LOGIC makes sense. How FWL runs: botcore executes the structure itself "
     "(EXECUTE tool calls the tool with the payload or parameters, its output is $result; ASK USER shows the "
     "question and waits, the reply is $answer; SAVE/SET store values; IF, FOR EACH, WHILE ... AT MOST N TIMES, "
     "RETRY UP TO N TIMES (repeats its body while a step in it fails) and IN PARALLEL control the order; comparisons "
@@ -145,7 +145,7 @@ static const char REVIEWER[] =
     "approval before it; a plain-English step that needs the user's input (it cannot ask: use ASK USER first); "
     "unreachable or pointless steps; a flow that does not do what agent.md says the agent is for; a RETURN that "
     "tells the user nothing useful. Ignore style and wording.\n"
-    "Suggestions must be valid Owl. Its only statements: STEP n: NAME, IMPORT: (one $skill per indented line), EXECUTE tool $name, INVOKE SKILL, "
+    "Suggestions must be valid FWL. Its only statements: STEP n: NAME, IMPORT: (one $skill per indented line), EXECUTE tool $name, INVOKE SKILL, "
     "SAVE result|answer|skill_output INTO VARIABLE, SAVE $x TO FILE \"path\", SET $x TO, ASK USER, "
     "IF <condition>: / ELSE IF <condition>: / ELSE:, FOR EACH $x IN ...:, WHILE ... AT MOST N TIMES:, "
     "RETRY UP TO N TIMES:, IN PARALLEL:, RETURN, and plain-English lines. A line ending in ':' opens a block: the "
@@ -154,10 +154,10 @@ static const char REVIEWER[] =
     "no CONTINUE, BREAK, GOTO or function: to skip an item, put the rest of the loop body inside an IF.\n"
     "Reply with only JSON: {\"makes_sense\": true or false, \"summary\": \"one sentence\", \"problems\": "
     "[{\"line\": N, \"statement\": \"the line\", \"why\": \"why it does not make sense\", \"suggestion\": \"the "
-    "corrected Owl line(s), or what to do instead\"}]}. makes_sense is false only if there is at least one real "
+    "corrected FWL line(s), or what to do instead\"}]}. makes_sense is false only if there is at least one real "
     "problem; then list each one.";
 
-static bool owl_review(const cJSON *in, char *result, size_t rl)
+static bool fwl_review(const cJSON *in, char *result, size_t rl)
 {
     const cJSON *dj = cJSON_GetObjectItemCaseSensitive(in, "dir");
     const char *dir = cJSON_IsString(dj) && *dj->valuestring ? dj->valuestring : ".";
@@ -268,7 +268,7 @@ static bool owl_review(const cJSON *in, char *result, size_t rl)
 }
 
 const tool_t TOOLS_REVIEW[] = {
-    {"owl_review",
+    {"fwl_review",
      "Check whether an agent project's FLOW.md makes sense (its logic, not its syntax) with a fresh LLM review: "
      "steps that cannot work, payloads that do not fit the tools, missing approvals before outward-facing steps, "
      "loops that cannot end, a flow that does not fit agent.md. Returns JSON {makes_sense, summary, problems: "
@@ -276,6 +276,6 @@ const tool_t TOOLS_REVIEW[] = {
      "false, tell the user why and what the review suggests instead.",
      "{\"type\":\"object\",\"properties\":{\"dir\":{\"type\":\"string\",\"description\":\"Agent project folder, "
      "default the working directory\"}}}",
-     owl_review},
+     fwl_review},
 };
 const size_t TOOLS_REVIEW_N = sizeof(TOOLS_REVIEW) / sizeof(TOOLS_REVIEW[0]);

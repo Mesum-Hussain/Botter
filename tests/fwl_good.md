@@ -1,6 +1,6 @@
-```owl
+```fwl
 ---
-spec-version: "owl-1"
+spec-version: "fwl-1"
 title: "Test Flow"
 ---
 IMPORT:

@@ -71,45 +71,45 @@ mkagent() {
 build() { "$PACK" build "$1" "$CORE" "$2" >"$T/build.log" 2>&1; }
 
 # ---------------------------------------------------------------------------
-section "Packaging and Owl"
+section "Packaging and FWL"
 
 "$PACK" check "$ROOT" "$CORE" >"$T/self.log" 2>&1
 check "botter's own project builds with 0 warnings" "$T/self.log" "check passed.* 0 warning"
 
-# Owl (FLOW.md): a valid flow compiles; each kind of mistake is an error with its line and stops the build
+# FWL (FLOW.md): a valid flow compiles; each kind of mistake is an error with its line and stops the build
 mkagent "$T/flow_good"
 mkdir -p "$T/flow_good/skills/pitching"
 printf -- '---\nname: pitching\ndescription: p\n---\n' >"$T/flow_good/skills/pitching/SKILL.md"
-cp "$TESTS/owl_good.md" "$T/flow_good/FLOW.md"
+cp "$TESTS/fwl_good.md" "$T/flow_good/FLOW.md"
 "$PACK" check "$T/flow_good" "$CORE" >"$T/lint.log" 2>&1
-check_not "Owl: a valid FLOW.md has no errors or warnings" "$T/lint.log" "FLOW.md"
-# sq_bad NAME OLD NEW PATTERN: owl_good.md with OLD replaced by NEW must report PATTERN
+check_not "FWL: a valid FLOW.md has no errors or warnings" "$T/lint.log" "FLOW.md"
+# sq_bad NAME OLD NEW PATTERN: fwl_good.md with OLD replaced by NEW must report PATTERN
 sq_bad() {
     rm -rf "$T/flow_bad" "$T/flow_bad.bot"
     cp -r "$T/flow_good" "$T/flow_bad"
     python3 -c 'import sys;p=sys.argv[1];s=open(p).read();assert sys.argv[2] in s;open(p,"w").write(s.replace(sys.argv[2],sys.argv[3],1))' \
         "$T/flow_bad/FLOW.md" "$2" "$3"
     "$PACK" build "$T/flow_bad" "$CORE" "$T/flow_bad.bot" >"$T/lint.log" 2>&1
-    check "Owl: $1" "$T/lint.log" "$4"
+    check "FWL: $1" "$T/lint.log" "$4"
 }
-sq_bad "capital pseudo-code is not a statement" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not an Owl statement'
+sq_bad "capital pseudo-code is not a statement" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not an FWL statement'
 sq_bad "placeholder text in a tool argument is an error" '{ "path": $folder }' '{ "path": "TODO" }' 'error: "TODO" is placeholder text'
 sq_bad "... for left-out arguments is an error" '{ "path": $folder }' '{ "path": $folder, ... }' 'error: "..." in a tool'"'"'s arguments'
-sq_bad "BREAK is not Owl" 'Skip it.' 'BREAK' 'error: Owl has no BREAK'
+sq_bad "BREAK is not FWL" 'Skip it.' 'BREAK' 'error: FWL has no BREAK'
 sq_bad "keyword typo is an error with its line" 'INVOKE SKILL' 'INVOCATE SKILL' 'FLOW.md:16: error: unknown keyword INVOCATE; did you mean INVOKE'
-if [ -e "$T/flow_bad.bot" ]; then fail "Owl: a flow with errors is not built"; else pass "Owl: a flow with errors is not built"; fi
+if [ -e "$T/flow_bad.bot" ]; then fail "FWL: a flow with errors is not built"; else pass "FWL: a flow with errors is not built"; fi
 sq_bad "unknown tool" '$fs_read' '$fs_reed' 'no such tool'
 sq_bad "skill used without IMPORT" 'INVOKE SKILL $pitching' 'INVOKE SKILL $other' 'INVOKE SKILL \$other: list \$other under IMPORT:'
 sq_bad "IMPORT names a skill that exists" '    $pitching' '    $pitching
     $ghost' 'IMPORT \$ghost: there is no skills/ghost/SKILL.md'
 sq_bad "LOAD is gone" 'IMPORT:' 'LOAD SKILL "pitching"
-IMPORT:' 'Owl has no LOAD: list the agent.s skills under IMPORT:'
-sq_bad "backtick names are gone" '{ "path": $folder }' '{ "path": `folder` }' 'write \$folder, not `folder`: Owl names start with \$'
+IMPORT:' 'FWL has no LOAD: list the agent.s skills under IMPORT:'
+sq_bad "backtick names are gone" '{ "path": $folder }' '{ "path": `folder` }' 'write \$folder, not `folder`: FWL names start with \$'
 sq_bad "a quoted skill name is an error" 'INVOKE SKILL $pitching' 'INVOKE SKILL "pitching"' 'INVOKE reads: INVOKE SKILL \$name'
 sq_bad "variable used before it is set" '$folder }' '$fodler }' '\$fodler is used before it is set'
 sq_bad "loop variable used after its loop" 'RETURN "Read "' 'RETURN $f.name + "Read "' 'only exists inside its FOR EACH'
 sq_bad "END lines are gone" 'RETURN "Read "' 'END FOR
-RETURN "Read "' 'FLOW.md:23: error: Owl has no END FOR line: a block ends where its indentation ends'
+RETURN "Read "' 'FLOW.md:23: error: FWL has no END FOR line: a block ends where its indentation ends'
 sq_bad "THEN is gone" '"notes.txt":' '"notes.txt" THEN' 'IF reads: IF <condition>:  \(no THEN'
 sq_bad "IF without its colon" '"notes.txt":' '"notes.txt"' 'IF reads: IF <condition>:'
 sq_bad "a block with nothing indented under it" '            EXECUTE tool $fs_read' 'EXECUTE tool $fs_read' 'FLOW.md:20: error: this line opens a block, but nothing is indented under it'
@@ -120,19 +120,22 @@ sq_bad "ELSE lines up with its IF" '    ELSE:' '        ELSE:' 'ELSE lines up wi
 sq_bad "tabs are not indentation" '        Skip it.' '	Skip it.' 'indent with spaces, not tabs'
 sq_bad "MCP CONNECT is rejected" 'IMPORT:' 'CONNECT mcp://x AS y
 IMPORT:' 'CONNECT \(MCP servers\) is not supported'
-sq_bad "the file must start with \`\`\`owl" '```owl
----' '---' 'starts with ```owl on its first line; the frontmatter goes inside the block'
+sq_bad "the file must start with \`\`\`fwl" '```fwl
+---' '---' 'starts with ```fwl on its first line; the frontmatter goes inside the block'
+sq_bad "the old name gets a hint" '```fwl
+---' '```owl
+---' 'Owl is now called FWL: start FLOW.md with ```fwl'
 sq_bad "the block must be closed" 'RETURN "Read " + $files.length + " files"
 ```' 'RETURN "Read " + $files.length + " files"' 'never closed: end the file with ```'
 sq_bad "nothing may follow the block" 'RETURN "Read " + $files.length + " files"
 ```' 'RETURN "Read " + $files.length + " files"
 ```
 More text' 'nothing may follow the closing ```'
-sq_bad "Markdown step headings are rejected" 'STEP 1: GATHER' '## STEP 1: GATHER' 'write the step label as Owl, without #: STEP n: NAME'
+sq_bad "Markdown step headings are rejected" 'STEP 1: GATHER' '## STEP 1: GATHER' 'write the step label as FWL, without #: STEP n: NAME'
 sq_bad "other Markdown is rejected" 'IMPORT:' '# My flow
-IMPORT:' 'Markdown \(headings, <!-- comments -->\) is not part of Owl'
+IMPORT:' 'Markdown \(headings, <!-- comments -->\) is not part of FWL'
 sq_bad "STEP labels are numbered in order" 'STEP 2: WORK' 'STEP 3: WORK' 'warning: STEP 3 follows STEP 1'
-sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.md:18: warning: write 'if' as an Owl statement"
+sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.md:18: warning: write 'if' as an FWL statement"
 
 # config.json: checked by the build, shown by list, --version, the start-up line and the system prompt
 mkagent "$T/meta" '{"name": "meta-agent", "display_name": "Meta Agent", "version": "1.2.3", "description": "Tests metadata."}'
@@ -329,7 +332,7 @@ stub_start --text /dev/null
 (cd "$T/ws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nhello after the flow\n/exit\n' "$PORT" |
     timeout 60 "$T/flow.bot" >"$T/out" 2>&1)
 check "FLOW.md present: the flow starts by itself" "$T/out" "Which folder\\?"
-check "FLOW.md present: system prompt explains the [Owl] steps" "$T/rec/system.txt" "session is driven by its FLOW.md flow"
+check "FLOW.md present: system prompt explains the [FWL] steps" "$T/rec/system.txt" "session is driven by its FLOW.md flow"
 
 stub_start --text /dev/null
 drive "$T/meta.bot" "$T/ws"
@@ -340,47 +343,47 @@ build "$T/needcmd" "$T/needcmd.bot"
 drive "$T/needcmd.bot" "$T/ws"
 check "config.json requires: missing programs are reported at start" "$T/out" "not installed here: definitely-not-installed-cmd"
 
-# Owl interpreter: botcore runs the structure; only prose goes to the LLM
+# FWL interpreter: botcore runs the structure; only prose goes to the LLM
 mkagent "$T/sqagent"
-cp "$TESTS/owl_run.md" "$T/sqagent/FLOW.md"
+cp "$TESTS/fwl_run.md" "$T/sqagent/FLOW.md"
 build "$T/sqagent" "$T/sq.bot"
 sq_drive() {
     rm -rf "$T/sqws"; mkdir -p "$T/sqws"
     (cd "$T/sqws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nAlice\n/exit\n' "$PORT" |
         timeout 60 "$T/sq.bot" >"$T/out" 2>&1)
 }
-stub_start --owl yes
+stub_start --fwl yes
 sq_drive
-check "Owl: ASK USER shows the question" "$T/out" "What is your name\\?"
-check "Owl: RETURN joins the answer, a prose decision and .length" "$T/out" "Hi Alice, mood happy, 3 items"
-check "Owl: decisions get the history as text, no tool calls (Gemini answers those with a call)" "$T/rec/decide_hist.txt" "tool messages: 0, tools offered: 0"
-check "Owl: STEP headings are shown" "$T/out" "Step 2 · WORK"
-check "Owl: EXECUTE runs the tool itself" "$T/out" "Running a command"
-check "Owl: RETRY repeats a failing step" "$T/out" "Retrying \\(2 of 2\\)"
-check "Owl: SAVE TO FILE writes the value" "$T/sqws/out/items.json" '"b"'
-n=$(grep -c "" "$T/rec/owl.txt" 2>/dev/null)
-if [ "$n" = 2 ]; then pass "Owl: only prose reaches the LLM (2 calls for the whole flow)"; else fail "Owl: only prose reaches the LLM (2 calls for the whole flow)" "LLM calls: $n"; fi
-check "Owl: FOR EACH + IF run the plain-English step for the matching item" "$T/rec/owl.txt" "line 16\\] Mention the letter"
-check "Owl: a prose condition is decided by the LLM" "$T/rec/owl.txt" 'Decide whether this condition is true right now: the user \$name seems happy'
-check "Owl: a decision shows the variables it names in full" "$T/rec/decide.txt" '^\$name = Alice'
-stub_start --owl no
+check "FWL: ASK USER shows the question" "$T/out" "What is your name\\?"
+check "FWL: RETURN joins the answer, a prose decision and .length" "$T/out" "Hi Alice, mood happy, 3 items"
+check "FWL: decisions get the history as text, no tool calls (Gemini answers those with a call)" "$T/rec/decide_hist.txt" "tool messages: 0, tools offered: 0"
+check "FWL: STEP headings are shown" "$T/out" "Step 2 · WORK"
+check "FWL: EXECUTE runs the tool itself" "$T/out" "Running a command"
+check "FWL: RETRY repeats a failing step" "$T/out" "Retrying \\(2 of 2\\)"
+check "FWL: SAVE TO FILE writes the value" "$T/sqws/out/items.json" '"b"'
+n=$(grep -c "" "$T/rec/fwl.txt" 2>/dev/null)
+if [ "$n" = 2 ]; then pass "FWL: only prose reaches the LLM (2 calls for the whole flow)"; else fail "FWL: only prose reaches the LLM (2 calls for the whole flow)" "LLM calls: $n"; fi
+check "FWL: FOR EACH + IF run the plain-English step for the matching item" "$T/rec/fwl.txt" "line 16\\] Mention the letter"
+check "FWL: a prose condition is decided by the LLM" "$T/rec/fwl.txt" 'Decide whether this condition is true right now: the user \$name seems happy'
+check "FWL: a decision shows the variables it names in full" "$T/rec/decide.txt" '^\$name = Alice'
+stub_start --fwl no
 sq_drive
-check "Owl: the LLM's 'no' takes the ELSE branch" "$T/out" "Hi Alice, mood sad"
+check "FWL: the LLM's 'no' takes the ELSE branch" "$T/out" "Hi Alice, mood sad"
 
-# owl_review: the LLM's logic check of a project's FLOW.md (builder agents only)
+# fwl_review: the LLM's logic check of a project's FLOW.md (builder agents only)
 mkagent "$T/builder" '{"builder": true}'
 build "$T/builder" "$T/builder.bot"
 mkdir -p "$T/revws"
-cp "$TESTS/owl_run.md" "$T/revws/FLOW.md"
+cp "$TESTS/fwl_run.md" "$T/revws/FLOW.md"
 echo "An agent that greets people." >"$T/revws/agent.md"
-tool_call owl_review '{}'
+tool_call fwl_review '{}'
 drive "$T/builder.bot" "$T/revws"
-check "owl_review: the verdict reaches the agent" "$T/rec/tool.txt" '"makes_sense":false'
-check "owl_review: the report says why and what to do instead" "$T/rec/tool.txt" "why: reads a file that is never written"
-check "owl_review: the reviewer gets FLOW.md with line numbers and agent.md" "$T/rec/review.txt" "An agent that greets people"
-tool_call owl_review '{}'
+check "fwl_review: the verdict reaches the agent" "$T/rec/tool.txt" '"makes_sense":false'
+check "fwl_review: the report says why and what to do instead" "$T/rec/tool.txt" "why: reads a file that is never written"
+check "fwl_review: the reviewer gets FLOW.md with line numbers and agent.md" "$T/rec/review.txt" "An agent that greets people"
+tool_call fwl_review '{}'
 drive "$T/on.bot" "$T/revws"
-check "owl_review: not available to ordinary agents" "$T/rec/tool.txt" "unknown tool 'owl_review'"
+check "fwl_review: not available to ordinary agents" "$T/rec/tool.txt" "unknown tool 'fwl_review'"
 
 shell_call "echo no-curl-needed"
 drive "$T/on.bot" "$T/ws" PATH=/nonexistent
@@ -506,7 +509,7 @@ if command -v tmux >/dev/null 2>&1; then
     check "Ctrl-C cancels an in-flight LLM request within a second" "$T/tmux.txt" "\\(interrupted\\)"
 
     # Botter's TUI: its flow asks first; the first message answers it, later ones are chat tagged [N]
-    stub_start --owl yes
+    stub_start --fwl yes
     tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "env BOTTER_THEME=dark $BOTTER"
     sleep 0.8
     for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
@@ -524,10 +527,10 @@ if command -v tmux >/dev/null 2>&1; then
     check "TUI: the model is told what the numbers mean" "$T/rec/system.txt" "numbers each user message and your reply"
     check_not "TUI: header is gone after the first message" "$T/tui.txt" "the agent that builds agents"
     if head -4 "$T/tui.txt" | grep -q "What agent should I build"; then pass "TUI: the flow's question stays at the top when the header goes"; else fail "TUI: the flow's question stays at the top when the header goes"; fi
-    check "TUI: the first message answered the flow" "$T/rec/owl.txt" "Answer the question"
+    check "TUI: the first message answered the flow" "$T/rec/fwl.txt" "Answer the question"
 
     # TUI after a tool call: streamed reply shown once, tool internals hidden
-    stub_start --owl yes --tool shell_exec --args '{"command":"echo hi"}'
+    stub_start --fwl yes --tool shell_exec --args '{"command":"echo hi"}'
     tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "env BOTTER_THEME=dark $BOTTER"
     sleep 0.8
     for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do

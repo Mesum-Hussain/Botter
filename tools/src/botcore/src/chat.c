@@ -731,7 +731,7 @@ static int busy_wait(int attempt, const char *body)
     return 0;
 }
 
-/* The history as plain text for a side question (Owl decisions, values): tool calls
+/* The history as plain text for a side question (FWL decisions, values): tool calls
  * and results become text, so the model answers in words. With real tool calls in
  * the history Gemini answers with another call, even under "tool_choice": "none". */
 static void text_add(cJSON *msgs, const char *role, const char *text)

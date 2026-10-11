@@ -11,7 +11,7 @@ The project root is the folder the user started botter in. The built file is nam
 <agent>/
   agent.md             persona and behaviour = the agent's system prompt
   config.json          how to build and run the agent: name, version, internet, skills, tools ... (always write it; see "config.json" below)
-  FLOW.md              OPTIONAL (recommended for multi-step agents): the session flow in Owl: one ```owl block (frontmatter + UPPERCASE statements, no Markdown), checked by the build, run by botcore at start-up (see write-flow)
+  FLOW.md              OPTIONAL (recommended for multi-step agents): the session flow in FWL: one ```fwl block (frontmatter + UPPERCASE statements, no Markdown), checked by the build, run by botcore at start-up (see write-flow)
   skills/<name>/SKILL.md   task playbooks: how and when to use tools
   tools/                OPTIONAL
     bin/<name>          the runnable tool: native x86-64 ELF, or a script starting with #!
@@ -29,7 +29,7 @@ tools/src, artifacts, hidden files (names starting with a dot), symlinks, everyt
 
 ## Rules
 - agent.md is the system prompt. If missing, the agent runs with a generic default prompt (build warns).
-- There is no manifest: at start-up the runtime lists the skills (path + frontmatter description) and tool docs in the system prompt; tool schemas come from tools/doc/*.json. If FLOW.md is present, botcore runs it when the agent starts (the Owl interpreter) and gives the agent one step at a time. So skill and tool descriptions must be accurate and short.
+- There is no manifest: at start-up the runtime lists the skills (path + frontmatter description) and tool docs in the system prompt; tool schemas come from tools/doc/*.json. If FLOW.md is present, botcore runs it when the agent starts (the FWL interpreter) and gives the agent one step at a time. So skill and tool descriptions must be accurate and short.
 - Interpreted tools need no tools/src: the script in tools/bin is the source.
 - Tool name = file name in tools/bin = [A-Za-z0-9_-]{1,64}. It must not clash with a built-in tool.
 - Skill folder names: lowercase letters, digits and dashes, e.g. summarize-logs.

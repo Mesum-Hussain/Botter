@@ -22,7 +22,7 @@ ap.add_argument("--slow", action="store_true")
 ap.add_argument("--nostream", action="store_true", help='answer 400 to "stream": true')
 ap.add_argument("--busy", type=int, default=0, help="answer 503 (high demand) to the first N requests")
 ap.add_argument("--think", action="store_true", help="start the text answer with a <think> block")
-ap.add_argument("--owl", choices=["yes", "no"], help="answer Owl interpreter requests (decisions = this word)")
+ap.add_argument("--fwl", choices=["yes", "no"], help="answer FWL interpreter requests (decisions = this word)")
 a = ap.parse_args()
 os.makedirs(a.record, exist_ok=True)
 
@@ -109,20 +109,20 @@ class H(BaseHTTPRequestHandler):
                                           "problems": [{"line": 7, "statement": "EXECUTE tool $fs_read",
                                                         "why": "reads a file that is never written",
                                                         "suggestion": "write the file first"}]})})
-        elif a.owl and users and users[-1]["content"].startswith("[Owl") and msgs[-1]["role"] == "user":
+        elif a.fwl and users and users[-1]["content"].startswith("[FWL") and msgs[-1]["role"] == "user":
             last = users[-1]["content"]
-            with open(os.path.join(a.record, "owl.txt"), "a") as f:
+            with open(os.path.join(a.record, "fwl.txt"), "a") as f:
                 f.write(last.split("\n")[0] + "\n")
-            if last.startswith("[Owl] Decide"):
+            if last.startswith("[FWL] Decide"):
                 save("decide.txt", last)
                 save("decide_hist.txt", "tool messages: %d, tools offered: %d" % (
                     sum(1 for m in msgs if m["role"] == "tool" or m.get("tool_calls")), len(req.get("tools") or [])))
-                reply({"content": a.owl})
-            elif last.startswith("[Owl] Work out"):
+                reply({"content": a.fwl})
+            elif last.startswith("[FWL] Work out"):
                 reply({"content": '"worked-out value"'})
-            elif last.startswith("[Owl] Build the JSON"):
+            elif last.startswith("[FWL] Build the JSON"):
                 reply({"content": "{}"})
-            elif last.startswith("[Owl final step"):
+            elif last.startswith("[FWL final step"):
                 reply({"content": "All done, final message."})
             else:
                 reply({"content": "did: " + last.split("\n")[0][:80]})
