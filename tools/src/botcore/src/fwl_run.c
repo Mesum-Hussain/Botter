@@ -813,6 +813,19 @@ static int st_invoke(rt_t *r, sq_node *x)
     }
     char *ct = val_text(ctx);
     cJSON_Delete(ctx);
+    char *out = NULL;
+    const char *var = "skill_output";
+    int rc;
+    if (x->kind == SQ_DELEGATE) { /* the sub-agent sees only this context, not the conversation */
+        var = "agent_output";
+        int a = r->io->agent(r->io->ud, x->a, ct, &out);
+        rc = a > 0 ? Q_ABORT : a < 0 || !out || !strncmp(out, "ERROR:", 6) ? Q_FAIL : Q_OK;
+        if (rc != Q_ABORT) {
+            note(r, "DELEGATE TO %s -> %.300s", x->a, out ? out : "");
+        }
+        free(ct);
+        goto done;
+    }
     char *sk = skill_text(x->a);
     char *m = step_msg(r, 1,
                        "[FWL step, line %d] Follow the skill \"%s\" for this context, using your tools if needed. Reply "
@@ -821,9 +834,9 @@ static int st_invoke(rt_t *r, sq_node *x)
                        x->line, x->a, ct, x->a, sk ? sk : "(skill not found)");
     free(ct);
     free(sk);
-    char *out = NULL;
-    int rc = m ? llm_step(r, m, &out) : Q_FAIL;
+    rc = m ? llm_step(r, m, &out) : Q_FAIL;
     free(m);
+done:
     if (rc != Q_ABORT) {
         cJSON *v = out ? cJSON_Parse(out) : NULL;
         const char *o = out ? out + strspn(out, " \t\r\n") : "";
@@ -835,7 +848,7 @@ static int st_invoke(rt_t *r, sq_node *x)
             }
             free(in);
         }
-        set_var(r, "skill_output", v ? v : cJSON_CreateString(out ? out : ""));
+        set_var(r, var, v ? v : cJSON_CreateString(out ? out : ""));
     }
     free(out);
     return rc;
@@ -875,8 +888,8 @@ static int st_ask(rt_t *r, sq_node *x)
 
 static cJSON *save_source(rt_t *r, const char *src, int *abort)
 {
-    static const char *const implicit[] = {"result", "skill_output", "answer"};
-    for (int i = 0; i < 3; i++) {
+    static const char *const implicit[] = {"result", "skill_output", "answer", "agent_output"};
+    for (int i = 0; i < 4; i++) {
         if (!strcmp(src, implicit[i])) {
             cJSON *v = cJSON_GetObjectItemCaseSensitive(r->vars, implicit[i]);
             return v ? cJSON_Duplicate(v, 1) : cJSON_CreateNull();
@@ -972,6 +985,7 @@ static int run_node(rt_t *r, sq_node *x)
     case SQ_EXEC:
         return st_exec(r, x);
     case SQ_INVOKE:
+    case SQ_DELEGATE:
         return st_invoke(r, x);
     case SQ_ASK:
         return st_ask(r, x);

@@ -14,6 +14,8 @@ Steps
 
 Arguments: "dir" is the project folder relative to the working directory (default ".", the working directory itself). All paths must stay inside the working directory.
 
+Sealing keys (optional, before the build): vault_seal {} asks the user, directly and not through you, for the agent's keys (the LLM key; the token of each MCP server and remote agent in config.json; the token callers must send if the agent is served over A2A) and for a password, typed twice. It writes secrets.vault into the project and the build embeds it. A sealed agent asks only for that password at start and connects with the sealed keys; an agent without a vault asks whoever runs it for their own LLM key. Never ask for a key or a password in the conversation, never write one into a file, and never read or edit secrets.vault: only vault_seal handles them. Offer sealing for an agent the user runs themselves; advise against it for an agent they will hand to others (whoever knows the password has the keys). To change a key or the password, run vault_seal again and rebuild.
+
 What the build does: copies the botcore runtime (the same engine botter runs on) and appends the project files to it. No compiler or linker runs. The result is one static x86-64 executable. Rebuilding replaces the old .bot.
 
 ## Warnings you may see

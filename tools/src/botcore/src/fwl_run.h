@@ -8,7 +8,7 @@
  * Structure is executed by botcore itself (variables, IF/FOR/WHILE/RETRY,
  * EXECUTE tool, ASK USER, SAVE, comparisons such as IS EQUAL TO); the LLM is
  * used only where a statement needs judgement: plain-English instructions,
- * INVOKE SKILL, and conditions or values written in prose.
+ * INVOKE SKILL, DELEGATE TO (a sub-agent), and conditions or values written in prose.
  */
 typedef struct {
     /* An LLM turn with tools, shown to the user like a normal reply. 0 ok, 1 interrupted, -1 failed. */
@@ -23,6 +23,8 @@ typedef struct {
     void (*status)(void *ud, const char *text);
     /* Run a tool (with the usual guards and status line); malloc'd result, "ERROR: ..." on failure. */
     char *(*tool)(void *ud, const char *name, const char *args_json);
+    /* Hand a task to a sub-agent (its own conversation and persona). 0 ok, 1 interrupted, -1 failed. */
+    int (*agent)(void *ud, const char *name, const char *task, char **reply);
     void *ud;
 } sq_io;
 

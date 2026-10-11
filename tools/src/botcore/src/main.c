@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "chat.h"
 #include "front.h"
+#include "remote.h"
+#include "vault.h"
 #include "guard.h"
 #include "keystore.h"
 #include "fwl_run.h"
@@ -152,6 +154,22 @@ static char *pack_index(void)
             ADD("%s- %s: %s\n", skills++ ? "" : "\nYour skills (read one with vfs_read before the task it covers):\n",
                 t[i].path, d[0] ? d : "(no description)");
         }
+    }
+    for (size_t i = 0, agents = 0; i < n; i++) {
+        char nm[65];
+        if (t[i].kind == VFS_DATA && sscanf(t[i].path, "agents/%64[^/]/agent.m%c", nm, &(char){0}) == 2) {
+            char d[320];
+            skill_desc(&t[i], d, sizeof(d));
+            ADD("%s- %s: %s\n",
+                agents++ ? "" : "\nYour sub-agents (hand one a task with the delegate tool; it works alone, sees only "
+                                "the task you write, and returns its result):\n",
+                nm, d[0] ? d : "(no description)");
+        }
+    }
+    for (int i = 0; i < a2a_count(); i++) {
+        ADD("%s- %s: %s\n", i ? "" : "\nRemote agents (other people's agents, reached over the network; hand one a task "
+                                   "with the delegate tool, and send it nothing the user would not share):\n",
+            a2a_name(i), a2a_desc(i));
     }
     for (size_t i = 0; i < n; i++) {
         size_t pl = strlen(t[i].path);
@@ -444,7 +462,8 @@ static const char *tool_status(const char *name)
         {"vfs_read", "Reading instructions"}, {"vfs_list", "Reading instructions"},
         {"get_time", "Checking the time"},    {"cron_set", "Scheduling a task"},
         {"cron_list", "Checking schedules"},  {"cron_delete", "Removing a schedule"},
-        {"fwl_review", "Reviewing the flow"},
+        {"fwl_review", "Reviewing the flow"}, {"delegate", "Handing work to another agent"},
+        {"vault_seal", "Sealing the agent's keys"},
     };
     for (size_t i = 0; i < sizeof(M) / sizeof(M[0]); i++) {
         if (strcmp(M[i][0], name) == 0) {
@@ -452,6 +471,11 @@ static const char *tool_status(const char *name)
         }
     }
     const ext_tool_t *x = ext_find(name);
+    static char via[90];
+    if (mcp_server(name)) {
+        snprintf(via, sizeof(via), "Using %.64s", mcp_server(name));
+        return via;
+    }
     return x && ext_status(x) ? ext_status(x) : "Working";
 }
 
@@ -467,10 +491,364 @@ static void close_stream_line(void)
     }
 }
 
+/*
+ * Sub-agents: agents/<name>/agent.md (frontmatter description + persona). One runs as its own
+ * conversation in this process, with the agent's tools, the same model and no user to ask; only
+ * its final reply comes back. 0 ok, 1 interrupted, -1 failed (*reply is then an "ERROR: ..." text).
+ */
+static chat_t     *g_chat;      /* the main conversation: endpoint, key and model for sub-agents */
+static const char *g_env = "";  /* working directory, tool and network rules (shared system text) */
+static int         g_in_agent;  /* a sub-agent is running: it cannot delegate further */
+static char *on_tool(void *ud, const char *name, const char *args);
+
+static int run_agent(const char *name, const char *task, char **reply)
+{
+    char path[300];
+    snprintf(path, sizeof(path), "agents/%s/agent.md", name);
+    const vfs_entry_t *e = vfs_find(path);
+    chat_t sub;
+    *reply = NULL;
+    if ((!e || e->kind != VFS_DATA) && !g_in_agent) { /* not one of ours: an agent somewhere else (A2A) */
+        int r = a2a_call(name, task, reply);
+        if (r != -2) {
+            return r;
+        }
+    }
+    if (!e || e->kind != VFS_DATA || g_in_agent || chat_init(&sub, g_chat->base, g_chat->key, g_chat->model) != 0) {
+        *reply = strdup(g_in_agent ? "ERROR: a sub-agent cannot delegate" : "ERROR: no such sub-agent");
+        return -1;
+    }
+    const char *b = e->data, *end = e->data + e->len;
+    const char *fm = e->len > 4 && !strncmp(b, "---\n", 4) ? memmem(b + 4, e->len - 4, "\n---", 4) : NULL;
+    if (fm) { /* the persona is what follows the frontmatter */
+        b = memchr(fm + 4, '\n', (size_t)(end - fm - 4));
+        b = b ? b + 1 : end;
+    }
+    char *sys = NULL, *err = NULL;
+    if (asprintf(&sys,
+                 "%.*s\n\nYou are the sub-agent \"%s\". Another agent hands you one task: do it with your tools and "
+                 "reply with the result only. You cannot ask the user anything; if the task cannot be done, start "
+                 "your reply with FAILED: and say why.\n%s",
+                 (int)(end - b), b, name, g_env) < 0) {
+        sys = NULL;
+    }
+    chat_set_system(&sub, sys ? sys : "");
+    free(sys);
+    chat_set_tools(&sub, tools_schema(), on_tool, NULL);
+    g_in_agent = 1;
+    int r = chat_send(&sub, task, reply, &err);
+    g_in_agent = 0;
+    chat_free(&sub);
+    if (r != CHAT_OK && r != CHAT_ERR_ABORT) {
+        free(*reply);
+        if (asprintf(reply, "ERROR: sub-agent %s failed: %s", name, err ? err : "request failed") < 0) {
+            *reply = NULL;
+        }
+    }
+    free(err);
+    return r == CHAT_OK ? 0 : r == CHAT_ERR_ABORT ? 1 : -1;
+}
+
+/* The delegate tool, offered to the main conversation when the pack has sub-agents (else NULL). */
+static cJSON *delegate_schema(void)
+{
+    size_t n = 0;
+    const vfs_entry_t *t = vfs_table(&n);
+    cJSON *names = cJSON_CreateArray();
+    for (size_t i = 0; i < n; i++) {
+        char nm[65];
+        if (t[i].kind == VFS_DATA && sscanf(t[i].path, "agents/%64[^/]/agent.m%c", nm, &(char){0}) == 2) {
+            cJSON_AddItemToArray(names, cJSON_CreateString(nm));
+        }
+    }
+    for (int i = 0; i < a2a_count(); i++) {
+        cJSON_AddItemToArray(names, cJSON_CreateString(a2a_name(i)));
+    }
+    cJSON *d = cJSON_GetArraySize(names)
+                   ? cJSON_Parse("{\"type\":\"function\",\"function\":{\"name\":\"delegate\",\"description\":\"Hand one "
+                                 "task to one of your sub-agents or remote agents and get its result. It does not see this conversation: "
+                                 "put everything it needs in the task.\",\"parameters\":{\"type\":\"object\",\"properties\":"
+                                 "{\"agent\":{\"type\":\"string\"},\"task\":{\"type\":\"string\"}},\"required\":[\"agent\","
+                                 "\"task\"]}}}")
+                   : NULL;
+    if (!d) {
+        cJSON_Delete(names);
+        return NULL;
+    }
+    cJSON *p = cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(d, "function"), "parameters"), "properties");
+    cJSON_AddItemToObject(cJSON_GetObjectItem(p, "agent"), "enum", names);
+    return d;
+}
+
+static char *delegate_call(const char *args)
+{
+    cJSON *a = cJSON_Parse(args);
+    const cJSON *ag = cJSON_GetObjectItemCaseSensitive(a, "agent"), *task = cJSON_GetObjectItemCaseSensitive(a, "task");
+    char *out = NULL;
+    if (!cJSON_IsString(ag) || !cJSON_IsString(task)) {
+        out = strdup("ERROR: delegate needs \"agent\" and \"task\"");
+    } else {
+        run_agent(ag->valuestring, task->valuestring, &out);
+    }
+    cJSON_Delete(a);
+    return out ? out : strdup("ERROR: the sub-agent was interrupted");
+}
+
+/*
+ * vault_seal (builder agents): ask the person, here and not through the model, for the keys the
+ * agent in `dir` needs and for a password, and write them encrypted to <dir>/secrets.vault.
+ * The model only learns which keys were sealed.
+ */
+static const char SEAL_SCHEMA[] =
+    "{\"type\":\"function\",\"function\":{\"name\":\"vault_seal\",\"description\":\"Seal an agent's keys into it, "
+    "behind a password. Botter itself asks the user for each key (the LLM key, and the token of every MCP server "
+    "and remote agent in the project's config.json) and for the password, so you never see them and must never "
+    "ask for them in the conversation. Writes secrets.vault into the project; the next agent_build embeds it. "
+    "Returns which keys were sealed.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"dir\":{\"type\":"
+    "\"string\",\"description\":\"Agent project folder, default the working directory\"}}}}}";
+
+/* One typed answer (secret = not shown). NULL = the user gave up; "" is a valid answer. */
+static char *seal_ask(const char *prompt, int secret)
+{
+    char *in = NULL;
+    if (term_readline(prompt, secret, &in) != TERM_LINE) {
+        free(in);
+        return NULL;
+    }
+    char *t = strdup(trim(in));
+    explicit_bzero(in, strlen(in));
+    free(in);
+    return t;
+}
+
+/* The tokens of config.json "mcp" / "agents": what each is for, then the question. 0 = the user gave up. */
+static int seal_tokens(const cJSON *cfg, const char *section, const char *what, const char *why, cJSON *secrets, char *done,
+                       size_t dcap)
+{
+    const cJSON *e, *sec = cJSON_GetObjectItemCaseSensitive(cfg, section);
+    cJSON_ArrayForEach(e, sec)
+    {
+        const char *tn = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(e, "token"));
+        const char *url = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(e, "url"));
+        if (!tn || cJSON_GetObjectItemCaseSensitive(secrets, tn)) {
+            continue;
+        }
+        char q[400];
+        printf("\n" ANSI_BOLD_BLUE "%s \"%s\"" ANSI_RESET " (%.200s)\n%s\n", what, e->string, url ? url : "no url", why);
+        snprintf(q, sizeof(q), ANSI_BLUE "  Token for %.60s (saved as %.64s; Enter = it needs none): " ANSI_RESET, e->string, tn);
+        char *v = seal_ask(q, 1);
+        if (!v) {
+            return 0;
+        }
+        if (*v) {
+            cJSON_AddStringToObject(secrets, tn, v);
+            snprintf(done + strlen(done), dcap - strlen(done), ", the %s token for %s", what[0] == 'M' ? "MCP" : "A2A", e->string);
+        }
+        explicit_bzero(v, strlen(v));
+        free(v);
+    }
+    return 1;
+}
+
+static char *seal_call(const char *args)
+{
+    cJSON *a = cJSON_Parse(args && *args ? args : "{}"), *secrets = cJSON_CreateObject(), *cfg = NULL;
+    const char *dir = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(a, "dir"));
+    char res[PATH_MAX], path[PATH_MAX + 32], done[900] = "", *out = NULL, *v = NULL, *pw = NULL, *pw2 = NULL;
+    int inside = 0, ok = 0;
+    if (guard_resolve(dir && *dir ? dir : ".", res, &inside) != 0 || !inside) {
+        out = strdup("ERROR: dir must be a folder inside the working directory");
+        goto end;
+    }
+    snprintf(path, sizeof(path), "%s/config.json", res);
+    FILE *f = fopen(path, "r");
+    char *text = f ? calloc(1, 65537) : NULL;
+    if (text && fread(text, 1, 65536, f) > 0) {
+        cfg = cJSON_Parse(text);
+    }
+    free(text);
+    if (f) {
+        fclose(f);
+    }
+    close_stream_line();
+    puts("\n" ANSI_BOLD_BLUE "Sealing this agent's keys" ANSI_RESET "\n"
+         "The keys you type next are encrypted with a password you choose and built into the agent file.\n"
+         "You type them here, on this machine: they are not shown, and Botter's model never sees them.");
+
+    printf("\n" ANSI_BOLD_BLUE "1. The language model (LLM)" ANSI_RESET "\nThe model the agent thinks with. Its API key is what you pay the provider with.\n");
+    char q[500];
+    snprintf(q, sizeof(q), ANSI_BLUE "  Use what Botter is using now (%.60s, model %.80s)? [Y/n]: " ANSI_RESET,
+             provider_name(g_chat->base), g_chat->model);
+    if (!(v = seal_ask(q, 0))) {
+        goto end;
+    }
+    if (*v != 'n' && *v != 'N') {
+        cJSON_AddStringToObject(secrets, "BOTTER_BASE_URL", g_chat->base);
+        cJSON_AddStringToObject(secrets, "BOTTER_API_KEY", g_chat->key);
+        cJSON_AddStringToObject(secrets, "BOTTER_MODEL", g_chat->model);
+    } else {
+        for (;;) { /* another provider: ask, then check that the key works before it is sealed */
+            char base[512] = "", *key = NULL, *model = NULL;
+            chat_t probe;
+            int auth = 0;
+            for (int i = 0; i < N_PROV; i++) {
+                printf("  %d) %s\n", i + 1, PROVIDERS[i].name);
+            }
+            free(v);
+            if (!(v = seal_ask(ASK("  Provider [1]: "), 0))) {
+                goto end;
+            }
+            int pi = atoi(v) >= 1 && atoi(v) <= N_PROV ? atoi(v) - 1 : 0;
+            snprintf(base, sizeof(base), "%s", PROVIDERS[pi].base);
+            if (!base[0]) {
+                free(v);
+                if (!(v = seal_ask(ASK("  Base URL of the LLM endpoint (e.g. https://host/v1): "), 0))) {
+                    goto end;
+                }
+                snprintf(base, sizeof(base), "%s", v);
+            }
+            snprintf(q, sizeof(q), ANSI_BLUE "  LLM API key for %.60s%s: " ANSI_RESET, PROVIDERS[pi].name,
+                     PROVIDERS[pi].key_req ? "" : " (Enter = none)");
+            key = seal_ask(q, 1);
+            snprintf(q, sizeof(q), ANSI_BLUE "  Model name%s%.80s%s: " ANSI_RESET, PROVIDERS[pi].model[0] ? " [" : "",
+                     PROVIDERS[pi].model, PROVIDERS[pi].model[0] ? "]" : "");
+            model = key ? seal_ask(q, 0) : NULL;
+            const char *m = model && *model ? model : PROVIDERS[pi].model;
+            int good = key && model && url_ok(base) && *m && !has_ctl_or_space(key) && !has_ctl_or_space(m) &&
+                       try_connect(&probe, PROVIDERS[pi].name, base, key, m, &auth) > 0;
+            if (good) {
+                chat_free(&probe);
+                cJSON_AddStringToObject(secrets, "BOTTER_BASE_URL", base);
+                cJSON_AddStringToObject(secrets, "BOTTER_API_KEY", key);
+                cJSON_AddStringToObject(secrets, "BOTTER_MODEL", m);
+            }
+            if (key) {
+                explicit_bzero(key, strlen(key));
+            }
+            int gone = !key || !model;
+            free(key);
+            free(model);
+            if (gone) {
+                goto end;
+            }
+            if (good) {
+                break;
+            }
+            puts("  That did not work (URL, key or model name). Once more:");
+        }
+    }
+    snprintf(done, sizeof(done), "the LLM key (%.60s, model %.80s)",
+             provider_name(cJSON_GetStringValue(cJSON_GetObjectItem(secrets, "BOTTER_BASE_URL"))),
+             cJSON_GetStringValue(cJSON_GetObjectItem(secrets, "BOTTER_MODEL")));
+
+    if (!seal_tokens(cfg, "mcp", "MCP server", "The agent uses this server's tools. The token is what lets it in.", secrets,
+                     done, sizeof(done)) ||
+        !seal_tokens(cfg, "agents", "Remote agent (A2A)",
+                     "The agent can hand work to this other agent. The token is what lets it in.", secrets, done,
+                     sizeof(done))) {
+        goto end;
+    }
+    puts("\n" ANSI_BOLD_BLUE "Being called by other agents (A2A)" ANSI_RESET
+         "\nOnly if you will run this agent with --a2a so that other agents can call it: the token they must send.\n"
+         "(Running it inside an editor, ACP, needs no key.)");
+    free(v);
+    if (!(v = seal_ask(ASK("  Token callers must send (Enter = I will not serve this agent): "), 1))) {
+        goto end;
+    }
+    if (*v) {
+        cJSON_AddStringToObject(secrets, "A2A_TOKEN", v);
+        snprintf(done + strlen(done), sizeof(done) - strlen(done), ", the token callers must send (A2A)");
+    }
+
+    printf("\n" ANSI_BOLD_BLUE "The password" ANSI_RESET "\nThis is the only thing anyone types to use the agent from now on. "
+           "Anyone who knows it can use the agent and its keys.\n");
+    for (;;) {
+        snprintf(q, sizeof(q), ANSI_BLUE "  Choose a password (at least %d characters): " ANSI_RESET, VAULT_MIN_PASS);
+        free(pw);
+        free(pw2);
+        pw2 = NULL;
+        if (!(pw = seal_ask(q, 1))) {
+            goto end;
+        }
+        if (strlen(pw) < VAULT_MIN_PASS) {
+            printf("  Too short: the password is all that protects the keys. At least %d characters.\n", VAULT_MIN_PASS);
+            continue;
+        }
+        if (!(pw2 = seal_ask(ASK("  Type it again to confirm: "), 1))) {
+            goto end;
+        }
+        if (!strcmp(pw, pw2)) {
+            break;
+        }
+        puts("  The two do not match. Once more:");
+    }
+    snprintf(path, sizeof(path), "%s/" VAULT_FILE, res);
+    if (vault_seal(path, secrets, pw) != 0) {
+        out = strdup("ERROR: could not write secrets.vault");
+        goto end;
+    }
+    ok = 1;
+    puts("\n" ANSI_BOLD_BLUE "Sealed." ANSI_RESET "\n"
+         "Once the agent is built, using it is: run the file, type this password. That is the whole login.\n"
+         "  - The password is checked on the machine itself: no account, no server, it works offline.\n"
+         "  - Nothing is stored outside the agent file, so the file is all you copy to another machine.\n"
+         "  - There is no reset. If the password is lost, seal the agent again with its keys and a new password.\n");
+    if (asprintf(&out, "Sealed into " VAULT_FILE ": %s. The user chose the password. Now build the agent: agent_build "
+                       "embeds the vault, and the built agent asks only for that password at start.", done) < 0) {
+        out = NULL;
+    }
+end:
+    if (!ok && !out) {
+        puts("  (sealing cancelled; nothing was written)");
+        out = strdup("ERROR: the user cancelled sealing; nothing was written. Build the agent without a vault unless they ask again.");
+    }
+    for (int i = 0; i < 3; i++) {
+        char *p = i == 0 ? v : i == 1 ? pw : pw2;
+        if (p) {
+            explicit_bzero(p, strlen(p));
+        }
+    }
+    free(v);
+    free(pw);
+    free(pw2);
+    char *plain = cJSON_PrintUnformatted(secrets); /* wipe the copies cJSON holds */
+    for (cJSON *s = secrets->child; s; s = s->next) {
+        if (cJSON_IsString(s)) {
+            explicit_bzero(s->valuestring, strlen(s->valuestring));
+        }
+    }
+    if (plain) {
+        explicit_bzero(plain, strlen(plain));
+    }
+    free(plain);
+    cJSON_Delete(secrets);
+    cJSON_Delete(cfg);
+    cJSON_Delete(a);
+    return out;
+}
+
 /* Runs between a tool call being requested and executed: show what happens, then run it. */
 static char *on_tool(void *ud, const char *name, const char *args)
 {
     (void)ud;
+    if (!strcmp(name, "vault_seal") && agent_builder() && !front_remote()) {
+        front_event("tool", "name", name, "args", args, "status", tool_status(name), (char *)NULL);
+        char *res = seal_call(args);
+        front_event("tool_result", "text", res ? res : "ERROR", (char *)NULL);
+        return res;
+    }
+    if (!strcmp(name, "delegate")) {
+        if (front_active()) {
+            front_event("tool", "name", name, "args", args, "status", tool_status(name), (char *)NULL);
+        } else {
+            close_stream_line();
+            printf(ANSI_DIM "  · %s" ANSI_RESET "\n", tool_status(name));
+            fflush(stdout);
+        }
+        char *res = delegate_call(args);
+        front_event("tool_result", "text", res, (char *)NULL);
+        return res;
+    }
     const char *st = tool_status(name);
     if (front_active()) {
         front_event("tool", "name", name, "args", args, "status", st, (char *)NULL);
@@ -688,6 +1066,20 @@ static char *io_tool(void *ud, const char *name, const char *args)
     return on_tool(NULL, name, args);
 }
 
+static int io_agent(void *ud, const char *name, const char *task, char **reply)
+{
+    (void)ud;
+    char st[120];
+    snprintf(st, sizeof(st), "  · %.64s is working", name);
+    front_event("busy", "label", st + 4, (char *)NULL);
+    if (!front_active()) {
+        io_status(NULL, st);
+    }
+    int r = run_agent(name, task, reply);
+    front_event("idle", (char *)NULL);
+    return r;
+}
+
 static void fwl_diag_print(void *ud, int line, int error, const char *msg)
 {
     (void)ud;
@@ -712,7 +1104,7 @@ static void run_flow(chat_t *chat)
         sq_free(&prog);
         return;
     }
-    sq_io io = {io_turn, io_ask_llm, io_ask_user, io_say, io_status, io_tool, chat};
+    sq_io io = {io_turn, io_ask_llm, io_ask_user, io_say, io_status, io_tool, io_agent, chat};
     front_event("flow", (char *)NULL);
     term_clear_interrupt();
     int rc = fwl_run(&prog, &io);
@@ -765,6 +1157,11 @@ static int handle_command(chat_t *chat, const char *line)
     if (strcmp(line, "/run") == 0) {
         return 3;
     }
+    if (strcmp(line, "/new") == 0) {
+        chat_clear(chat);
+        puts(ANSI_DIM "(new conversation)" ANSI_RESET);
+        return 1;
+    }
     if (strcmp(line, "/plan") == 0 || strcmp(line, "/build") == 0 || strcmp(line, "/mode") == 0) {
         if (line[1] != 'm') {
             guard_set_plan(line[1] == 'p');
@@ -804,6 +1201,7 @@ static int handle_command(chat_t *chat, const char *line)
              "/forget    remove saved API keys (they are kept in RAM until reboot)\n"
              "/details   show tool calls as they are (for developers)\n"
              "/run       run this agent's FLOW.md flow again\n"
+             "/new       start a new conversation\n"
              "/exit      quit" ANSI_RESET);
         return 1;
     }
@@ -833,7 +1231,7 @@ static int read_user_line(chat_t *chat, char **line)
             free(in);
             continue;
         }
-        int c = handle_command(chat, t);
+        int c = front_remote() && !front_take_cmd() ? 0 : handle_command(chat, t); /* remote users have no commands */
         if (c == 2) {
             free(in);
             g_quit = 1;
@@ -880,7 +1278,7 @@ int main(int argc, char **argv)
         fprintf(stderr, ANSI_BOLD_RED "Error:" ANSI_RESET " %s\n", vfs_error());
         return 1;
     }
-    front_init();
+    front_init(argc, argv);
     ext_init();
 
     if (!front_active() && meta_str("name")) { /* plain REPL: say which agent this is */
@@ -892,10 +1290,55 @@ int main(int argc, char **argv)
         puts("\n");
     }
     check_requires();
-    int saved = connect_saved(&chat);
+    if (vault_present()) { /* a sealed agent: the password is the login */
+        int open = front_remote() ? vault_open(NULL) : -1;
+        if (front_remote() && open != 0) {
+            fprintf(stderr, "This agent is sealed and nobody can type its password here: run it once in a terminal first "
+                            "(the password is then remembered until the machine restarts).\n");
+            return 1;
+        }
+        for (int tries = 0; open != 0 && tries < 3; tries++) {
+            char *pw = NULL;
+            if (!tries) {
+                puts(ANSI_DIM "This agent is sealed: its keys are inside it, locked with a password.\n"
+                              "(The password is checked on this machine. It is not sent anywhere.)" ANSI_RESET);
+            }
+            if (term_readline(ASK("Password: "), 1, &pw) != TERM_LINE) {
+                free(pw);
+                return 0;
+            }
+            open = vault_open(pw);
+            explicit_bzero(pw, strlen(pw));
+            free(pw);
+            if (open != 0) {
+                puts(tries < 2 ? "Wrong password." : "Wrong password. Giving up.");
+            }
+        }
+        if (open != 0) {
+            return 1;
+        }
+        puts("");
+    }
+    int saved = 0;
+    if (vault_get("BOTTER_BASE_URL")) { /* the creator chose the model and paid for the key */
+        const char *base = vault_get("BOTTER_BASE_URL"), *key = vault_get("BOTTER_API_KEY"), *model = vault_get("BOTTER_MODEL");
+        int auth;
+        saved = url_ok(base) && model ? try_connect(&chat, provider_name(base), base, key ? key : "", model, &auth) : 0;
+        if (saved <= 0) {
+            fprintf(stderr, "The sealed model connection did not work (see above). The agent's creator can seal it again.\n");
+            return 1;
+        }
+    }
+    saved = saved ? saved : connect_saved(&chat);
+    if (saved == 0 && front_remote() && env_get("BOTTER_BASE_URL")) { /* nobody to ask: the connection comes from .env */
+        const char *base = env_get("BOTTER_BASE_URL"), *key = env_get("BOTTER_API_KEY"), *model = env_get("BOTTER_MODEL");
+        int auth;
+        saved = url_ok(base) && model ? try_connect(&chat, provider_name(base), base, key ? key : "", model, &auth) : 0;
+    }
     if (saved < 0 || (saved == 0 && !connect_flow(&chat))) {
         return 0;
     }
+    mcp_init();
 
     /* Online by default. Offline agents cut shell_exec and tools off from the network;
      * there, tools whose descriptor asks for "network": true get it only if the user agrees. */
@@ -915,7 +1358,15 @@ int main(int argc, char **argv)
     }
     tools_enable_review(agent_builder());
     review_set_chat(&chat);
-    chat_set_tools(&chat, tools_schema(), on_tool, NULL);
+    cJSON *tools = tools_schema(), *del = delegate_schema();
+    if (del) {
+        cJSON_AddItemToArray(tools, del);
+    }
+    if (agent_builder()) { /* agents that build agents can seal their keys */
+        cJSON_AddItemToArray(tools, cJSON_Parse(SEAL_SCHEMA));
+    }
+    g_chat = &chat;
+    chat_set_tools(&chat, tools, on_tool, NULL);
     chat_set_events(&chat, on_chat_event, NULL, front_active()); /* streaming; reasoning only in the UI */
 
     static const char FIXED[] =
@@ -985,6 +1436,9 @@ int main(int argc, char **argv)
              vfs_count() ? "\n" : "", vfs_count() ? VFS_HINT : "", index ? index : "", has_flow ? FLOW_HINT : "",
              MODE_HINT, front_hint);
     free(index);
+    static char env[2048]; /* what a sub-agent is told about its surroundings */
+    snprintf(env, sizeof(env), "Working directory: %s\n%s %s", cwd, FIXED, net_text);
+    g_env = env;
     chat_set_system(&chat, sys);
     free(sys);
 
@@ -999,6 +1453,43 @@ int main(int argc, char **argv)
     }
     puts("");
 
+    if (front_remote()) { /* who answers: the agent card (A2A) and the agent's name (ACP) */
+        cJSON *card = cJSON_CreateObject(), *sk = cJSON_AddArrayToObject(card, "skills");
+        size_t n = 0;
+        const vfs_entry_t *t = vfs_table(&n);
+        cJSON_AddStringToObject(card, "name", meta_str("name") ? agent_title() : "agent");
+        cJSON_AddStringToObject(card, "description", meta_str("description") ? meta_str("description") : "A Botter agent.");
+        cJSON_AddStringToObject(card, "version", meta_str("version") ? meta_str("version") : "0");
+        for (size_t i = 0; i < n; i++) {
+            char nm[65], d[320];
+            if (t[i].kind == VFS_DATA && sscanf(t[i].path, "skills/%64[^/]/SKILL.m%c", nm, &(char){0}) == 2) {
+                cJSON *s = cJSON_CreateObject();
+                skill_desc(&t[i], d, sizeof(d));
+                cJSON_AddStringToObject(s, "id", nm);
+                cJSON_AddStringToObject(s, "name", nm);
+                cJSON_AddStringToObject(s, "description", d[0] ? d : nm);
+                cJSON_AddItemToObject(s, "tags", cJSON_CreateArray());
+                cJSON_AddItemToArray(sk, s);
+            }
+        }
+        if (!cJSON_GetArraySize(sk)) { /* a card needs at least what the agent is for */
+            cJSON *s = cJSON_CreateObject();
+            cJSON_AddStringToObject(s, "id", "chat");
+            cJSON_AddStringToObject(s, "name", "chat");
+            cJSON_AddItemToObject(s, "description", cJSON_Duplicate(cJSON_GetObjectItem(card, "description"), 1));
+            cJSON_AddItemToObject(s, "tags", cJSON_CreateArray());
+            cJSON_AddItemToArray(sk, s);
+        }
+        front_set_card(card);
+    }
+    if (has_flow && front_remote()) { /* the flow starts with the first message, not before anyone is there */
+        char *first = NULL;
+        if (read_user_line(&chat, &first) != 0) {
+            chat_free(&chat);
+            return 0;
+        }
+        free(first);
+    }
     if (has_flow) { /* an agent with a FLOW.md starts by running it */
         run_flow(&chat);
     }
@@ -1034,7 +1525,7 @@ int main(int argc, char **argv)
             free(in);
             continue;
         }
-        int cmd = handle_command(&chat, line);
+        int cmd = front_remote() && !front_take_cmd() ? 0 : handle_command(&chat, line);
         if (cmd == 2) {
             free(in);
             break;

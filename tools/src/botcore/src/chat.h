@@ -60,6 +60,9 @@ void chat_set_tools(chat_t *c, cJSON *tools, char *(*cb)(void *, const char *, c
  */
 void chat_set_events(chat_t *c, void (*cb)(void *, int, const char *), void *ud, int thoughts);
 
+/* Forget the conversation (the system prompt stays). */
+void chat_clear(chat_t *c);
+
 /* Set (or, with NULL/"", clear) the system prompt. Never trimmed from history. */
 int  chat_set_system(chat_t *c, const char *text);
 

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "tools.h"
+#include "remote.h"
 #include "vfs.h"
 
 #include <stdio.h>
@@ -70,6 +71,7 @@ cJSON *tools_schema(void)
         }
     }
     ext_schema_append(arr);
+    mcp_schema_append(arr);
     return arr;
 }
 
@@ -121,6 +123,11 @@ char *tools_call(const char *name, const char *args_json)
     }
     const tool_t *t = find_tool(name);
     const ext_tool_t *x = t ? NULL : ext_find(name);
+    char *remote = t || x ? NULL : mcp_call(name, args_json); /* an MCP server's tool */
+    if (remote) {
+        free(res);
+        return remote;
+    }
     if (!t && !x) {
         snprintf(res, TOOL_RESULT_MAX, "ERROR: unknown tool '%.100s'", name);
         goto out;

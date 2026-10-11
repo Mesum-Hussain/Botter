@@ -64,6 +64,13 @@ class H(BaseHTTPRequestHandler):
         users = [m for m in msgs if m["role"] == "user"]
         if users:
             save("user.txt", users[-1]["content"])
+        names = " ".join(t["function"]["name"] for t in req.get("tools") or [])
+        if msgs and msgs[0]["role"] == "system" and "You are the sub-agent" in msgs[0]["content"]:
+            save("subsystem.txt", msgs[0]["content"])
+            save("subuser.txt", users[0]["content"] if users else "")
+            save("subtools.txt", names)
+        else:
+            save("tools.txt", names)
 
         stream = bool(req.get("stream"))
         save("stream.txt", "stream" if stream else "plain")
@@ -134,6 +141,8 @@ class H(BaseHTTPRequestHandler):
         else:
             if msgs[-1]["role"] == "tool":
                 save("tool.txt", msgs[-1]["content"])
+                with open(os.path.join(a.record, "tool_all.txt"), "a") as f:
+                    f.write(msgs[-1]["content"] + "\n")
             reply({"content": "<think>pondering the task</think>Hello there, streamed reply." if a.think else "done"})
 
 

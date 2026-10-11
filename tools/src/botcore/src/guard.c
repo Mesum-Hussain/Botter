@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "guard.h"
+#include "front.h"
 #include "term.h"
 
 #include <ctype.h>
@@ -128,6 +129,9 @@ static int ask(int cat, const char *msg)
 
     if (cat > 0 && g_always[cat]) {
         return 1;
+    }
+    if (front_remote()) {
+        front_event("permission", "text", msg, (char *)NULL);
     }
     printf(ANSI_BOLD_BLUE "Permission needed:" ANSI_RESET " ");
     put_clean(msg, 600);

@@ -145,7 +145,7 @@ static const char REVIEWER[] =
     "approval before it; a plain-English step that needs the user's input (it cannot ask: use ASK USER first); "
     "unreachable or pointless steps; a flow that does not do what agent.md says the agent is for; a RETURN that "
     "tells the user nothing useful. Ignore style and wording.\n"
-    "Suggestions must be valid FWL. Its only statements: STEP n: NAME, IMPORT: (one $skill per indented line), EXECUTE tool $name, INVOKE SKILL, "
+    "Suggestions must be valid FWL. Its only statements: STEP n: NAME, IMPORT: (one $skill per indented line), EXECUTE tool $name, INVOKE SKILL, DELEGATE TO @agent (a sub-agent from agents/ or a remote agent from config.json; its reply is agent_output), "
     "SAVE result|answer|skill_output INTO VARIABLE, SAVE $x TO FILE \"path\", SET $x TO, ASK USER, "
     "IF <condition>: / ELSE IF <condition>: / ELSE:, FOR EACH $x IN ...:, WHILE ... AT MOST N TIMES:, "
     "RETRY UP TO N TIMES:, IN PARALLEL:, RETURN, and plain-English lines. A line ending in ':' opens a block: the "

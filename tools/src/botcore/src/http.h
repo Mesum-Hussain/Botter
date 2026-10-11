@@ -38,6 +38,14 @@ int  http_request_stream(const char *url, const char *bearer, const char *body, 
                          http_body_fn on_body, void *ud, http_resp_t *out);
 void http_resp_free(http_resp_t *r);
 
+/*
+ * For protocols on top (MCP, A2A): extra header lines ("Name: value\r\n...") for the next
+ * request only (an "Accept:" line replaces the default), and a header of the last response
+ * (a static copy; "" if absent).
+ */
+void        http_next_headers(const char *lines);
+const char *http_last_header(const char *name);
+
 /* Async-signal-safe: kill the in-flight request, if any. */
 void http_abort(void);
 

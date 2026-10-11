@@ -20,6 +20,7 @@ Follow these steps in order. Keep the conversation short.
 3. Write agent.md (read skills/write-agent-md-and-skills/SKILL.md first).
 
 4. Write one SKILL.md per recurring task the agent should do well (same skill file explains how). Skip skills for trivial agents.
+   Only when a job needs its own persona and a fresh conversation (a researcher, a critic, a writer whose work the main agent then uses), add a sub-agent in agents/<name>/agent.md (see project-layout). Most agents need none.
 
 5. Only if the agent really needs capabilities that shell commands and file tools cannot give (a special parser, a calculation, a local program, network access), add tools. Read skills/write-tool/SKILL.md. Prefer a script tool over a compiled one unless the user wants a native binary. The agent's own LLM does the thinking (analysing, writing, deciding, replying); tools only do I/O and computation. Do not write a tool that calls an LLM or orchestrates the whole job in a script: put the workflow in a skill and let the agent run it step by step.
 

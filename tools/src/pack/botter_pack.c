@@ -6,7 +6,7 @@
  *   botter_pack list  <file.bot>
  *
  * Embeds (read-only) from <agent-dir>:
- *   agent.md, config.json, FLOW.md, skills/, tools/doc/ (recursive)   plain files
+ *   agent.md, config.json, FLOW.md, skills/, agents/, tools/doc/ (recursive)   plain files
  *       (FLOW.md is optional: the session flow in FWL, checked by botcore/src/fwl.c; errors stop the build)
  *       (config.json: how to build and run the agent, read by load_config/check_config:
  *        name, display_name, version, description, internet, skills, tools, requires, builder)
@@ -341,8 +341,16 @@ static int fwl_has_tool(const char *name)
             return 1;
         }
     }
-    if (strcmp(name, "fwl_review") == 0) { /* only for agents that build agents: config.json "builder" */
+    if (strcmp(name, "fwl_review") == 0 || strcmp(name, "vault_seal") == 0) { /* only for agents that build agents: config.json "builder" */
         return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(g_cfg, "builder"));
+    }
+    const cJSON *srv; /* a tool of an MCP server: <server>_<tool>; which tools it has is known only at run time */
+    cJSON_ArrayForEach(srv, cJSON_GetObjectItemCaseSensitive(g_cfg, "mcp"))
+    {
+        size_t n = strlen(srv->string);
+        if (!strncmp(name, srv->string, n) && name[n] == '_' && name[n + 1]) {
+            return 1;
+        }
     }
     char p[300];
     snprintf(p, sizeof(p), "tools/bin/%s", name);
@@ -354,6 +362,13 @@ static int fwl_has_skill(const char *name)
     char p[300];
     snprintf(p, sizeof(p), "skills/%s/SKILL.md", name);
     return has_item(p);
+}
+
+static int fwl_has_agent(const char *name)
+{
+    char p[300];
+    snprintf(p, sizeof(p), "agents/%s/agent.md", name);
+    return has_item(p) || cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(g_cfg, "agents"), name);
 }
 
 static char g_core_version[32]; /* the runtime's BOTCORE_VERSION tag, "" if unknown */
@@ -512,9 +527,32 @@ static void load_config(const char *dir)
         for (int k = 0; lists[k]; k++) {
             known |= !strcmp(x->string, lists[k]);
         }
+        if (!strcmp(x->string, "mcp") || !strcmp(x->string, "agents")) { /* remote: {"name": {"url": ..., "token": ...}} */
+            known = 1;
+            const cJSON *e = cJSON_IsObject(x) ? x->child : NULL;
+            if (!cJSON_IsObject(x)) {
+                cfg_err("\"%s\" must be an object: {\"name\": {\"url\": \"https://...\"}}", x->string);
+            }
+            for (; e; e = e->next) {
+                const cJSON *u = cJSON_GetObjectItemCaseSensitive(e, "url"), *tk = cJSON_GetObjectItemCaseSensitive(e, "token");
+                const char *us = cJSON_IsString(u) ? u->valuestring : "";
+                char who[160];
+                snprintf(who, sizeof(who), "%s \"%.60s\"", x->string, e->string);
+                if (!name_ok(e->string) || strchr(e->string, '.')) {
+                    cfg_err("%s: the name must be lowercase letters, digits, - or _", who);
+                }
+                if (strncmp(us, "https://", 8) && strncmp(us, "http://127.0.0.1", 16) && strncmp(us, "http://localhost", 16)) {
+                    cfg_err("%s needs \"url\": \"https://...\" (http:// only for localhost)", who);
+                }
+                if (tk && (!cJSON_IsString(tk) || strpbrk(tk->valuestring, " =:/.") || strlen(tk->valuestring) > 64)) {
+                    cfg_err("%s: \"token\" is the NAME of a line in .env (e.g. \"DOCS_TOKEN\"), never the secret itself: "
+                            "config.json is embedded in the .bot for anyone to read", who);
+                }
+            }
+        }
         if (!known) {
             cfg_warn("unknown key \"%.60s\" (known: name, display_name, version, description, internet, skills, tools, "
-                     "requires, builder)", x->string);
+                     "requires, builder, mcp, agents)", x->string);
         }
     }
     const cJSON *nm = cJSON_GetObjectItemCaseSensitive(g_cfg, "name");
@@ -869,6 +907,13 @@ static void check_contracts(void)
             check_descriptor(it);
         } else if (strncmp(it->path, "skills/", 7) == 0 && l > 9 && strcmp(it->path + l - 9, "/SKILL.md") == 0) {
             check_skill(it);
+        } else if (strncmp(it->path, "agents/", 7) == 0 && l > 9 && strcmp(it->path + l - 9, "/agent.md") == 0) {
+            const char *c = it->len > 4 && !strncmp(it->data, "---\n", 4) ? memmem(it->data + 4, it->len - 4, "\n---", 4) : NULL;
+            if (!c || !memmem(it->data, (size_t)(c - it->data), "\ndescription:", 13)) {
+                diagf(1, "%s: start it with a frontmatter that says what this sub-agent is for:\n---\ndescription: "
+                         "<one sentence>\n---\nthen its persona (who it is, how it works, what it returns)",
+                      it->path);
+            }
         } else if (it->kind == K_SCRIPT) {
             check_script(it);
         }
@@ -925,7 +970,9 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     add_root_file(dir, "agent.md");
     add_root_file(dir, "config.json");
     add_root_file(dir, "FLOW.md");
+    add_root_file(dir, "secrets.vault"); /* opt-in: the agent's keys, encrypted with a password (vault_seal) */
     add_tree(dir, "skills", K_DATA, 0);
+    add_tree(dir, "agents", K_DATA, 0);
     add_tree(dir, "tools/doc", K_DATA, 0);
     add_tree(dir, "tools/bin", K_DATA, 1);
     select_from_config();
@@ -958,7 +1005,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
             memset(&prog, 0, sizeof(prog));
             prog.diag = fwl_diag;
             if (sq_parse(items[i].data, items[i].len, &prog) == 0) {
-                sq_check(&prog, fwl_has_tool, fwl_has_skill);
+                sq_check(&prog, fwl_has_tool, fwl_has_skill, fwl_has_agent);
             }
             sq_free(&prog);
         }

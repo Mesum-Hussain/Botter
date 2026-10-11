@@ -698,7 +698,7 @@ static int id_char(char ch) { return isalnum((unsigned char)ch) || ch == '_' || 
  */
 static int fwl_kw(const char *s, size_t n)
 {
-    static const char *const KW[] = {"STEP", "IMPORT", "SKILL", "EXECUTE", "INVOKE", "USING", "SAVE", "INTO", "VARIABLE",
+    static const char *const KW[] = {"STEP", "IMPORT", "SKILL", "EXECUTE", "INVOKE", "DELEGATE", "USING", "SAVE", "INTO", "VARIABLE",
                                      "TO", "FILE", "SET", "ASK", "USER", "IF", "ELSE", "FOR", "EACH",
                                      "IN", "WHILE", "AT", "MOST", "TIMES", "RETRY", "UP", "PARALLEL", "RETURN",
                                      "IS", "EQUAL", "NOT", "GREATER", "LESS", "THAN", "EMPTY", "CONTAINS", "AND", "OR",
@@ -747,8 +747,9 @@ static void fwl_line(tcells_t *c, const char *s, size_t n)
             e = e < n ? e + 1 : n;
             tc_add(c, s + i, e - i, str);
             i = e;
-        } else if (ch == '$' && i + 1 < n && (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
-            size_t e = i + 1; /* $name, $name.field, $skill-name */
+        } else if ((ch == '$' || (ch == '@' && (i == 0 || s[i - 1] == ' '))) && i + 1 < n &&
+                   (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
+            size_t e = i + 1; /* $name, $name.field, $skill-name, @agent-name */
             while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '_' ||
                              ((s[e] == '.' || s[e] == '-') && e + 1 < n && isalnum((unsigned char)s[e + 1])))) {
                 e++;

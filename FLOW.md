@@ -86,7 +86,12 @@ STEP 4: CHECK
                Apply the suggestions in $review to FLOW.md.
                EXECUTE tool $agent_build with payload { "dry_run": true }
 
-STEP 5: BUILD
+STEP 5: SEAL
+1. ASK USER "Last question before I build it. Should the agent carry its own keys?\n\nYes: I seal the keys it needs (the LLM key, and any MCP or A2A tokens) into the file behind a password you choose. After that, running the agent takes only that password. Good for an agent you run yourself.\n\nNo: the agent asks whoever runs it for their own LLM key, as usual. Good for an agent you will share.\n\n(yes / no)"
+2. IF $answer says yes, the agent should carry its own keys:
+       EXECUTE tool $vault_seal with payload { "dir": "." }
+
+STEP 6: BUILD
 1. EXECUTE tool $agent_build with payload { "dry_run": false }
 2. SAVE result INTO VARIABLE $build
 3. EXECUTE tool $agent_inspect for the .bot file named in $build

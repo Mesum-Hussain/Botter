@@ -219,15 +219,15 @@ static const char *sq_var(const char *s, char out[65])
     return s + n;
 }
 
-/* $skill-name at s -> out; position after it, or NULL. */
-static const char *sq_skill(const char *s, char *out, size_t cap)
+/* $skill-name or @agent-name (sigil) at s -> out; position after it, or NULL. */
+static const char *sq_named(const char *s, char sigil, char *out, size_t cap)
 {
     s = sq_skip(s);
     size_t n = 1;
-    while (*s == '$' && (isalnum((unsigned char)s[n]) || s[n] == '_' || s[n] == '-')) {
+    while (*s == sigil && (isalnum((unsigned char)s[n]) || s[n] == '_' || s[n] == '-')) {
         n++;
     }
-    if (*s != '$' || n == 1 || n > cap) {
+    if (*s != sigil || n == 1 || n > cap) {
         return NULL;
     }
     snprintf(out, cap, "%.*s", (int)(n - 1), s + 1);
@@ -507,7 +507,7 @@ static int sq_lev(const char *a, const char *b)
     return d[n][m];
 }
 
-static const char *const SQ_KW[] = {"STEP", "IMPORT", "CONNECT", "EXECUTE", "INVOKE", "SAVE", "SET",    "ASK", "IF",
+static const char *const SQ_KW[] = {"STEP", "IMPORT", "CONNECT", "EXECUTE", "INVOKE", "DELEGATE", "SAVE", "SET",    "ASK", "IF",
                                     "ELSE", "FOR",     "WHILE",  "RETRY", "IN",   "RETURN", NULL};
 
 /* An UPPERCASE first word that is no keyword: a typo of one (error), or a shouted word (prose). */
@@ -605,7 +605,7 @@ static void sq_stmt(sq_ps *s, char *t)
     if (s->depth && s->st[s->depth - 1].kind == B_IMPORT) { /* skill names, nothing else */
         const char *e = t;
         do {
-            e = sq_skill(e, name, sizeof(name));
+            e = sq_named(e, '$', name, sizeof(name));
             if (!e) {
                 sq_diag(p, s->line, 1, "under IMPORT: write one skill per line as $name (the folder name in skills/)");
                 return;
@@ -673,7 +673,7 @@ static void sq_stmt(sq_ps *s, char *t)
         return;
     }
     if (!strcmp(w, "CONNECT")) {
-        sq_diag(p, s->line, 1, "CONNECT (MCP servers) is not supported by botcore yet; use the agent's own tools (tools/bin)");
+        sq_diag(p, s->line, 1, "FWL has no CONNECT: list MCP servers in config.json \"mcp\"; their tools are then called as $server_tool");
         return;
     }
     if (!strcmp(w, "EXECUTE")) {
@@ -693,15 +693,17 @@ static void sq_stmt(sq_ps *s, char *t)
         s->params = colon;
         return;
     }
-    if (!strcmp(w, "INVOKE")) {
-        size_t k = sq_word(r, "SKILL");
-        const char *e = k ? sq_skill(r + k, name, sizeof(name)) : NULL;
+    if (!strcmp(w, "INVOKE") || !strcmp(w, "DELEGATE")) {
+        int del = w[0] == 'D'; /* DELEGATE TO @agent: the same shape, an agent instead of a skill */
+        size_t k = sq_word(r, del ? "TO" : "SKILL");
+        const char *e = k ? sq_named(r + k, del ? '@' : '$', name, sizeof(name)) : NULL;
         if (!e) {
-            sq_diag(p, s->line, 1, "INVOKE reads: INVOKE SKILL $name [USING context $x]");
+            sq_diag(p, s->line, 1, del ? "DELEGATE reads: DELEGATE TO @agent [USING context $x]  (agents are written @name)"
+                                       : "INVOKE reads: INVOKE SKILL $name [USING context $x]");
             return;
         }
         sq_syntax(p, s->line, e, 1);
-        sq_node *x = sq_add(s, SQ_INVOKE);
+        sq_node *x = sq_add(s, del ? SQ_DELEGATE : SQ_INVOKE);
         x->a = sq_dup(name, strlen(name));
         e = sq_skip(e);
         size_t u = sq_word(e, "USING");
@@ -728,7 +730,8 @@ static void sq_stmt(sq_ps *s, char *t)
         const char *at = into ? into : tofile;
         if (!at || at == r) {
             sq_diag(p, s->line, 1,
-                    "SAVE reads: SAVE result|skill_output|answer|$x INTO VARIABLE $name, or SAVE ... TO FILE \"path\"");
+                    "SAVE reads: SAVE result|skill_output|agent_output|answer|$x INTO VARIABLE $name, or SAVE ... TO FILE "
+                    "\"path\"");
             return;
         }
         size_t wn = (size_t)(at - r);
@@ -1178,6 +1181,7 @@ typedef struct {
     sq_prog *p;
     int (*has_tool)(const char *);
     int (*has_skill)(const char *);
+    int (*has_agent)(const char *);
     char vars[SQ_MAXV][65];
     int  nvars;
     char dead[SQ_MAXV][65]; /* loop variables whose FOR EACH ended */
@@ -1237,7 +1241,8 @@ static void sq_refs(sq_cs *c, int line, const char *s)
 
 static void sq_check_list(sq_cs *c, sq_list *l)
 {
-    static const char *const implicit[] = {"result", "skill_output", "answer"};
+    static const char *const implicit[] = {"result", "skill_output", "answer", "agent_output"};
+    static const char *const from[] = {"EXECUTE tool", "INVOKE SKILL", "ASK USER", "DELEGATE TO"};
     for (int i = 0; i < l->n; i++) {
         sq_node *x = l->v[i];
         switch (x->kind) {
@@ -1275,18 +1280,29 @@ static void sq_check_list(sq_cs *c, sq_list *l)
             }
             sq_def(c, "skill_output");
             break;
+        case SQ_DELEGATE:
+            if (!c->has_agent(x->a)) {
+                sq_diag(c->p, x->line, 1, "DELEGATE TO @%s: no such agent (a sub-agent agents/%s/agent.md, or one listed in config.json \"agents\")",
+                        x->a, x->a);
+            }
+            sq_refs(c, x->line, x->b);
+            for (int k = 0; k < x->np; k++) {
+                sq_refs(c, x->pl[k], x->pv[k]);
+            }
+            sq_def(c, "agent_output");
+            break;
         case SQ_ASK:
             sq_refs(c, x->line, x->a);
             sq_def(c, "answer");
             break;
         case SQ_SAVE_VAR:
         case SQ_SAVE_FILE:
-            for (int k = 0; k < 3; k++) {
+            for (int k = 0; k < 4; k++) {
                 size_t n = strlen(implicit[k]);
                 if (strncmp(x->a, implicit[k], n) == 0 && (x->a[n] == ' ' || x->a[n] == '\0' || x->a[n] == '.') &&
                     !sq_in(c->vars, c->nvars, implicit[k])) {
                     sq_diag(c->p, x->line, 1, "SAVE %s: there is no %s yet (it comes from %s)", implicit[k], implicit[k],
-                            k == 0 ? "EXECUTE tool" : k == 1 ? "INVOKE SKILL" : "ASK USER");
+                            from[k]);
                 }
             }
             sq_refs(c, x->line, x->a);
@@ -1343,12 +1359,13 @@ static void sq_check_list(sq_cs *c, sq_list *l)
     }
 }
 
-void sq_check(sq_prog *p, int (*has_tool)(const char *), int (*has_skill)(const char *))
+void sq_check(sq_prog *p, int (*has_tool)(const char *), int (*has_skill)(const char *), int (*has_agent)(const char *))
 {
     sq_cs *c = sq_alloc(sizeof(*c));
     c->p = p;
     c->has_tool = has_tool;
     c->has_skill = has_skill;
+    c->has_agent = has_agent;
     sq_check_list(c, &p->top);
     free(c);
 }

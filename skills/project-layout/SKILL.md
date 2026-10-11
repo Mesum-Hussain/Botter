@@ -13,6 +13,8 @@ The project root is the folder the user started botter in. The built file is nam
   config.json          how to build and run the agent: name, version, internet, skills, tools ... (always write it; see "config.json" below)
   FLOW.md              OPTIONAL (recommended for multi-step agents): the session flow in FWL: one ```fwl block (frontmatter + UPPERCASE statements, no Markdown), checked by the build, run by botcore at start-up (see write-flow)
   skills/<name>/SKILL.md   task playbooks: how and when to use tools
+  secrets.vault        OPTIONAL: the agent's keys, encrypted with the user's password. Written only by the vault_seal tool (see build-agent)
+  agents/<name>/agent.md   OPTIONAL sub-agents: a frontmatter (--- description: one sentence ---) and then that sub-agent's persona
   tools/                OPTIONAL
     bin/<name>          the runnable tool: native x86-64 ELF, or a script starting with #!
     doc/<name>.json     REQUIRED for every bin: descriptor (description, parameters, timeout_s, network)
@@ -22,7 +24,7 @@ The project root is the folder the user started botter in. The built file is nam
 ```
 
 ## What is embedded in the .bot (read-only)
-agent.md, config.json, FLOW.md, skills/** , tools/doc/** , tools/bin/* (flat, no sub-folders); when config.json lists "skills" / "tools", only those
+agent.md, config.json, FLOW.md, secrets.vault, skills/** , agents/** , tools/doc/** , tools/bin/* (flat, no sub-folders); when config.json lists "skills" / "tools", only those
 
 ## What is NOT embedded
 tools/src, artifacts, hidden files (names starting with a dot), symlinks, everything else (README, .git, notes, test data).
@@ -30,6 +32,8 @@ tools/src, artifacts, hidden files (names starting with a dot), symlinks, everyt
 ## Rules
 - agent.md is the system prompt. If missing, the agent runs with a generic default prompt (build warns).
 - There is no manifest: at start-up the runtime lists the skills (path + frontmatter description) and tool docs in the system prompt; tool schemas come from tools/doc/*.json. If FLOW.md is present, botcore runs it when the agent starts (the FWL interpreter) and gives the agent one step at a time. So skill and tool descriptions must be accurate and short.
+- Sub-agents (agents/<name>/agent.md) are for a job that needs its own persona and a fresh conversation (a researcher, a reviewer, a writer). A sub-agent has the agent's tools and model, sees only the task it is handed, cannot ask the user anything and cannot delegate further; only its final reply comes back. FLOW.md hands it work with DELEGATE TO @name; the model can also do so itself with the delegate tool. For a recurring task the agent does itself, write a skill instead: it is cheaper.
+- A built agent also answers over two standard protocols, with nothing to add to the project: ./<name>.bot --acp inside an editor that speaks the Agent Client Protocol (Zed and others start it themselves), and ./<name>.bot --a2a 8080 to be called by other agents (A2A; put A2A_TOKEN=<secret> in .env, required when it listens beyond this machine: --a2a 0.0.0.0:8080). There is no user to type there: the model connection is the saved one or BOTTER_BASE_URL / BOTTER_API_KEY / BOTTER_MODEL in .env, a flow starts with the first message, and risky actions are asked through the editor (ACP) or refused (A2A).
 - Interpreted tools need no tools/src: the script in tools/bin is the source.
 - Tool name = file name in tools/bin = [A-Za-z0-9_-]{1,64}. It must not clash with a built-in tool.
 - Skill folder names: lowercase letters, digits and dashes, e.g. summarize-logs.
@@ -66,3 +70,6 @@ How Botter builds and runs the agent. Every agent has one, and it holds only thi
 - skills, tools: the skills (folder names) and tools (tools/bin names) compiled into the agent. List every one you wrote; a skill or tool left off the list stays in the folder but is not built in.
 - requires: every program the agent's tools or shell steps need on the machine (python3, node, git, ffmpeg ...). The build warns when a script tool's interpreter is missing from it; the agent says at start-up which ones are not installed.
 - builder: true only for agents that build agents (Botter itself).
+- mcp: OPTIONAL, only when the user names an MCP server to use: {"docs": {"url": "https://host/mcp", "token": "DOCS_TOKEN"}}. Its tools join the agent's own as <server>_<tool> (docs_search), for the model and for EXECUTE tool in FLOW.md. Only servers reached by URL: botcore makes one HTTPS request per call and starts nothing on the machine, so never configure a "command" to launch.
+- agents: OPTIONAL, other people's agents this one may hand work to (A2A): {"billing": {"url": "https://host", "token": "BILLING_TOKEN", "description": "Answers billing questions."}}. FLOW.md delegates with DELEGATE TO @billing, the model with the delegate tool, exactly like a sub-agent.
+- "token" in mcp / agents is a NAME, never the secret: the value comes from the agent's sealed vault (vault_seal asks the user for it) or, without a vault, from a line of that name in the .env file of the working directory (DOCS_TOKEN=...): config.json is embedded in the .bot for anyone to read. Tell the user which lines to put in .env. Leave "token" out for a server that needs none.

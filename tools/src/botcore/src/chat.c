@@ -286,6 +286,16 @@ static void trim_history(chat_t *c, size_t extra)
     }
 }
 
+void chat_clear(chat_t *c)
+{
+    const cJSON *m = cJSON_GetArrayItem(c->hist, 0);
+    const cJSON *role = cJSON_GetObjectItemCaseSensitive(m, "role");
+    int keep = cJSON_IsString(role) && !strcmp(role->valuestring, "system");
+    while (cJSON_GetArraySize(c->hist) > keep) {
+        cJSON_DeleteItemFromArray(c->hist, keep);
+    }
+}
+
 void chat_set_tools(chat_t *c, cJSON *tools, char *(*cb)(void *, const char *, const char *), void *ud)
 {
     cJSON_Delete(c->tools);

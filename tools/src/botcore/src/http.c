@@ -672,6 +672,23 @@ static int proxy_connect(conn_t *c, const url_t *px, const url_t *u)
     return rc;
 }
 
+static char g_xh[1024]; /* extra request headers for the next request */
+static char g_rh[4096]; /* header block of the last response */
+
+void http_next_headers(const char *lines)
+{
+    snprintf(g_xh, sizeof(g_xh), "%s", lines ? lines : "");
+}
+
+const char *http_last_header(const char *name)
+{
+    static char v[512];
+    size_t vl = 0;
+    const char *h = header_val(g_rh, strlen(g_rh), name, &vl);
+    snprintf(v, sizeof(v), "%.*s", h ? (int)(vl < sizeof(v) - 1 ? vl : sizeof(v) - 1) : 0, h ? h : "");
+    return v;
+}
+
 int http_request(const char *url, const char *bearer, const char *body,
                  int timeout_s, http_resp_t *out)
 {
@@ -734,10 +751,12 @@ int http_request_stream(const char *url, const char *bearer, const char *body, i
         c->tls = 1;
     }
 
-    int ok = sb_fmt(&rq, "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: botcore\r\nAccept: %s\r\n"
+    int ok = sb_fmt(&rq, "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: botcore\r\n%s%s%s%s"
                          "Connection: close\r\n",
-                    body ? "POST" : "GET", u.path, u.authority,
-                    on_body ? "text/event-stream, application/json" : "application/json");
+                    body ? "POST" : "GET", u.path, u.authority, strcasestr(g_xh, "accept:") ? "" : "Accept: ",
+                    strcasestr(g_xh, "accept:") ? "" : on_body ? "text/event-stream, application/json" : "application/json",
+                    strcasestr(g_xh, "accept:") ? "" : "\r\n", g_xh);
+    g_xh[0] = '\0';
     if (bearer && *bearer) {
         ok |= sb_add(&rq, "Authorization: Bearer ", 22);
         ok |= sb_add(&rq, bearer, strlen(bearer));
@@ -780,6 +799,7 @@ int http_request_stream(const char *url, const char *bearer, const char *body, i
     }
 
     size_t vl = 0;
+    snprintf(g_rh, sizeof(g_rh), "%.*s", (int)(hl < sizeof(g_rh) - 1 ? hl : sizeof(g_rh) - 1), rs.p);
     const char *te = header_val(rs.p, hl, "Transfer-Encoding", &vl);
     int chunked = te && memmem(te, vl, "chunked", 7);
     const char *cl = header_val(rs.p, hl, "Content-Length", &vl);

@@ -12,7 +12,7 @@ CORE=$ROOT/artifacts/botcore
 BOTTER=$ROOT/botter
 T=$(mktemp -d "${TMPDIR:-/tmp}/botter-test.XXXXXX")
 PASS=0 FAIL=0 SKIP=0
-STUB=
+STUB= REMOTE= A2A=
 # Never touch the user's real key cache; the keyring tests use their own namespace.
 export BOTCORE_NO_KEYRING=1
 # own tmux server: a running one would hand its sessions its own environment (e.g. a real saved key)
@@ -21,6 +21,8 @@ KRNS=botter-test-$$
 
 cleanup() {
     [ -n "$STUB" ] && kill "$STUB" 2>/dev/null
+    [ -n "$REMOTE" ] && kill "$REMOTE" 2>/dev/null
+    [ -n "$A2A" ] && kill "$A2A" 2>/dev/null
     tmux kill-server 2>/dev/null
     rm -f "$HOME/.botter_test_probe"
     rm -rf "$T"
@@ -118,8 +120,8 @@ sq_bad "indentation that matches no block" '        Skip it.' '        Skip it.
 sq_bad "indentation with no block above it" '2. SAVE answer' '    2. SAVE answer' 'FLOW.md:10: error: this line is indented deeper than the lines around it'
 sq_bad "ELSE lines up with its IF" '    ELSE:' '        ELSE:' 'ELSE lines up with its IF \(the IF on line 15\)'
 sq_bad "tabs are not indentation" '        Skip it.' '	Skip it.' 'indent with spaces, not tabs'
-sq_bad "MCP CONNECT is rejected" 'IMPORT:' 'CONNECT mcp://x AS y
-IMPORT:' 'CONNECT \(MCP servers\) is not supported'
+sq_bad "CONNECT points to config.json" 'IMPORT:' 'CONNECT mcp://x AS y
+IMPORT:' 'FWL has no CONNECT: list MCP servers in config.json'
 sq_bad "the file must start with \`\`\`fwl" '```fwl
 ---' '---' 'starts with ```fwl on its first line; the frontmatter goes inside the block'
 sq_bad "the old name gets a hint" '```fwl
@@ -370,6 +372,160 @@ stub_start --fwl no
 sq_drive
 check "FWL: the LLM's 'no' takes the ELSE branch" "$T/out" "Hi Alice, mood sad"
 
+# Sub-agents: agents/<name>/agent.md, DELEGATE TO in FWL, the delegate tool for the model
+mkagent "$T/team"
+mkdir -p "$T/team/agents/helper"
+printf -- '---\ndescription: Answers pings.\n---\nYou are ZETA, the helper.\n' >"$T/team/agents/helper/agent.md"
+cp -r "$T/team" "$T/team2"
+printf '```fwl\n---\nspec-version: "fwl-1"\ntitle: "Team"\n---\nDELEGATE TO @helper USING context "ping"\nSAVE agent_output INTO VARIABLE $got\nRETURN "Got: " + $got\n```\n' >"$T/team/FLOW.md"
+build "$T/team" "$T/team.bot"
+check_not "sub-agents: a flow that delegates builds" "$T/build.log" "error"
+echo "pong-from-sub" >"$T/pong"
+stub_start --text "$T/pong"
+drive "$T/team.bot" "$T/ws"
+check "sub-agents: DELEGATE TO returns the sub-agent's reply" "$T/out" "Got: pong-from-sub"
+check "sub-agents: the sub-agent runs on its own persona" "$T/rec/subsystem.txt" "You are ZETA, the helper"
+check_not "sub-agents: the frontmatter is not part of the persona" "$T/rec/subsystem.txt" "description: Answers"
+check "sub-agents: it sees only the context it was given" "$T/rec/subuser.txt" "^ping"
+check_not "sub-agents: a sub-agent cannot delegate further" "$T/rec/subtools.txt" "delegate"
+check "sub-agents: the main agent is told about them" "$T/rec/system.txt" "helper: Answers pings"
+check "sub-agents: the main agent gets the delegate tool" "$T/rec/tools.txt" "delegate"
+build "$T/team2" "$T/team2.bot"
+tool_call delegate '{"agent": "helper", "task": "ping2"}'
+drive "$T/team2.bot" "$T/ws"
+check "sub-agents: the model can delegate by itself" "$T/out" "Handing work to another agent"
+check "sub-agents: the task reaches the sub-agent" "$T/rec/subuser.txt" "^ping2"
+check "sub-agents: its result comes back as the tool result" "$T/rec/tool.txt" "^done"
+sed -i 's/@helper/@nobody/' "$T/team/FLOW.md"
+build "$T/team" "$T/team_bad.bot"
+check "sub-agents: delegating to a missing one is an error" "$T/build.log" 'DELEGATE TO @nobody: no such agent \(a sub-agent agents/nobody/agent.md'
+echo "You are a helper." >"$T/team2/agents/helper/agent.md"
+build "$T/team2" "$T/team_bad.bot"
+check "sub-agents: one without a description is an error" "$T/build.log" 'agents/helper/agent.md: start it with a frontmatter'
+
+# MCP and A2A (calling out): servers and remote agents from config.json, one HTTPS request per call
+python3 "$TESTS/remote_servers.py" "$T/rport" "$T/rrec" &
+REMOTE=$!
+i=0; while [ ! -s "$T/rport" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+RPORT=$(cat "$T/rport")
+mkagent "$T/net" "{\"name\": \"net\", \"version\": \"1.0.0\", \"description\": \"Uses remote things.\",
+  \"mcp\": {\"new\": {\"url\": \"http://127.0.0.1:$RPORT/mcp-new\", \"token\": \"MCP_TOKEN\"},
+            \"old\": {\"url\": \"http://127.0.0.1:$RPORT/mcp-old\", \"token\": \"MCP_TOKEN\"}},
+  \"agents\": {\"peer\": {\"url\": \"http://127.0.0.1:$RPORT/peer\", \"token\": \"PEER_TOKEN\", \"description\": \"Says things back.\"}}}"
+printf '```fwl\n---\nspec-version: "fwl-1"\ntitle: "Net"\n---\nEXECUTE tool $new_echo with payload { "text": "hi" }\nSAVE result INTO VARIABLE $a\nEXECUTE tool $old_echo with payload { "text": "yo" }\nSAVE result INTO VARIABLE $b\nDELEGATE TO @peer USING context "ping"\nRETURN $a + " | " + $b + " | " + $agent_output\n```\n' >"$T/net/FLOW.md"
+build "$T/net" "$T/net.bot"
+check_not "MCP/A2A: a flow that uses an MCP tool and a remote agent builds" "$T/build.log" "error"
+rm -rf "$T/netws"; mkdir -p "$T/netws"
+printf 'MCP_TOKEN=tok-mcp\nexport PEER_TOKEN="tok-a2a"\n' >"$T/netws/.env"
+stub_start --text /dev/null
+drive "$T/net.bot" "$T/netws"
+check "MCP: the servers' tools are listed at start" "$T/out" "MCP new: 1 tool"
+check "MCP + A2A: tools on both kinds of server and the remote agent answer" "$T/out" "echo:hi \\| echo:yo \\| remote says: ping"
+check "MCP: a stateless server gets no handshake, the headers say what is asked" "$T/rrec/mcp-new.txt" "^tools/call version=2026-07-28 method=tools/call name=echo session=None meta=yes"
+check_not "MCP: a stateless server is never sent initialize" "$T/rrec/mcp-new.txt" "^initialize"
+check "MCP: an older server gets its session handshake" "$T/rrec/mcp-old.txt" "^notifications/initialized version=2025-06-18 .* session=sid-1"
+check "MCP: and the session id on every call after" "$T/rrec/mcp-old.txt" "^tools/call version=2025-06-18 .* session=sid-1"
+check "MCP: the model is offered the remote tools" "$T/rec/tools.txt" "new_echo.*old_echo"
+check "A2A: SendMessage in the 1.0 wire format" "$T/rrec/a2a.txt" "^SendMessage version=1.0"
+check "A2A: a working task is polled until it completes" "$T/rrec/a2a.txt" "^GetTask"
+check "A2A: the main agent is told about remote agents" "$T/rec/system.txt" "peer: Says things back"
+rm "$T/netws/.env"
+drive "$T/net.bot" "$T/netws"
+check "MCP: a server that refuses the token is reported, the agent still starts" "$T/out" "MCP new is not available: new refused the request \\(HTTP 401\\)"
+sed -i 's|"token": "MCP_TOKEN"}|"token": "sk-live.secret"}|' "$T/net/config.json"
+build "$T/net" "$T/net_bad.bot"
+check "MCP: a secret in config.json is an error" "$T/build.log" '"token" is the NAME of a line in .env'
+kill "$REMOTE" 2>/dev/null
+
+# ACP and A2A (being called): the same agent behind a standard protocol, no terminal
+mkagent "$T/served" '{"name": "served", "display_name": "Served Agent", "version": "3.1.0", "description": "Answers over protocols."}'
+build "$T/served" "$T/served.bot"
+echo "reply-from-the-model" >"$T/said"
+stub_start --text "$T/said"
+rm -rf "$T/sws"; mkdir -p "$T/sws"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\nA2A_TOKEN=open-sesame\n' "$PORT" >"$T/sws/.env"
+timeout 60 python3 "$TESTS/acp_client.py" "$T/served.bot" "$T/sws" y "hello" "/exit" >"$T/acp.log" 2>"$T/acp.err"
+check "ACP: initialize names the agent" "$T/acp.log" '"protocolVersion": 1.*"name": "Served Agent".*"version": "3.1.0"'
+check "ACP: the answer arrives as message chunks" "$T/acp.log" '"sessionUpdate": "agent_message_chunk"'
+check "ACP: a prompt ends with a stop reason" "$T/acp.log" '"id": 10, "result": \{"stopReason": "end_turn"\}'
+check "ACP: /commands of a remote user are just text" "$T/acp.log" '"id": 11, "result": \{"stopReason": "end_turn"\}'
+check_not "ACP: nothing but the protocol on stdout" "$T/acp.log" "Connected"
+shell_call "rm -rf ./some-dir"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\nA2A_TOKEN=open-sesame\n' "$PORT" >"$T/sws/.env"
+timeout 60 python3 "$TESTS/acp_client.py" "$T/served.bot" "$T/sws" n "clean up" >"$T/acp.log" 2>"$T/acp.err"
+check "ACP: a tool call is shown to the editor" "$T/acp.log" '"sessionUpdate": "tool_call", "toolCallId": "call_1"|"toolCallId": "call_1".*"sessionUpdate": "tool_call"'
+check "ACP: a risky command asks the editor's user" "$T/acp.log" '"method": "session/request_permission"'
+check "ACP: the tool result follows" "$T/acp.log" '"sessionUpdate": "tool_call_update"|"tool_call_update"'
+stub_start --slow
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/sws/.env"
+timeout 30 python3 - "$T/served.bot" "$T/sws" >"$T/acp.log" 2>"$T/acp.err" <<'PY'
+import json, subprocess, sys, time
+p = subprocess.Popen([sys.argv[1], "--acp"], cwd=sys.argv[2], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+def send(o):
+    p.stdin.write(json.dumps(dict(o, jsonrpc="2.0")) + "\n"); p.stdin.flush()
+def until(rid):
+    for line in p.stdout:
+        m = json.loads(line)
+        if m.get("id") == rid: return m
+send({"id": 0, "method": "initialize", "params": {"protocolVersion": 1}}); until(0)
+send({"id": 1, "method": "session/new", "params": {"cwd": sys.argv[2], "mcpServers": []}})
+sid = until(1)["result"]["sessionId"]
+send({"id": 2, "method": "session/prompt", "params": {"sessionId": sid, "prompt": [{"type": "text", "text": "think long"}]}})
+time.sleep(1.5)
+t = time.time()
+send({"method": "session/cancel", "params": {"sessionId": sid}})
+print(json.dumps(until(2)), "after %.1fs" % (time.time() - t))
+PY
+check "ACP: session/cancel stops a running turn" "$T/acp.log" '"stopReason": "cancelled".* after [0-2]\.'
+stub_start --text "$T/said"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\nA2A_TOKEN=open-sesame\n' "$PORT" >"$T/sws/.env"
+APORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+(cd "$T/sws" && exec "$T/served.bot" --a2a "$APORT" >"$T/a2a.out" 2>&1) &
+A2A=$!
+python3 - "$APORT" >"$T/a2a.log" 2>&1 <<'PY'
+import json, sys, time, urllib.request, urllib.error
+base = "http://127.0.0.1:%s" % sys.argv[1]
+def call(path, body=None, token="open-sesame"):
+    h = {"Content-Type": "application/json", "A2A-Version": "1.0"}
+    if token: h["Authorization"] = "Bearer " + token
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(base + path, json.dumps(body).encode() if body else None, h), timeout=30)
+        return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, None
+for _ in range(100):
+    try: st, card = call("/.well-known/agent-card.json", token=None); break
+    except OSError: time.sleep(0.1)
+print("card", st, json.dumps(card))
+msg = {"jsonrpc": "2.0", "id": 7, "method": "SendMessage",
+       "params": {"message": {"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": "hello"}]}}}
+print("noauth", call("/", msg, token=None)[0])
+print("v1", json.dumps(call("/", msg)[1]))
+old = {"jsonrpc": "2.0", "id": 8, "method": "message/send",
+       "params": {"message": {"kind": "message", "messageId": "m2", "role": "user", "parts": [{"kind": "text", "text": "hi"}]}}}
+print("v03", json.dumps(call("/", old)[1]))
+print("task", json.dumps(call("/", {"jsonrpc": "2.0", "id": 9, "method": "GetTask", "params": {"id": "x"}})[1]))
+PY
+check "A2A: the agent card names the agent and how to call it" "$T/a2a.log" '^card 200 .*"name": "Served Agent".*"protocolBinding": "JSONRPC", "protocolVersion": "1.0"'
+check "A2A: the card says a bearer token is needed" "$T/a2a.log" '^card .*"httpAuthSecurityScheme"'
+check "A2A: a caller without the token is refused" "$T/a2a.log" "^noauth 401"
+check "A2A: SendMessage is answered with a message (1.0)" "$T/a2a.log" '^v1 .*"id": 7, "result": \{"message": \{.*"role": "ROLE_AGENT".*"text": "reply-from-the-model'
+check "A2A: 0.3 callers get the 0.3 shape" "$T/a2a.log" '^v03 .*"result": \{.*"role": "agent".*"kind": "message"'
+check "A2A: there are no tasks to get" "$T/a2a.log" '^task .*"code": -32001'
+# one Botter agent calling another
+mkagent "$T/caller" "{\"name\": \"caller\", \"version\": \"1.0.0\", \"description\": \"Calls the served agent.\",
+  \"agents\": {\"served\": {\"url\": \"http://127.0.0.1:$APORT\", \"token\": \"SERVED_TOKEN\"}}}"
+printf '```fwl\n---\nspec-version: "fwl-1"\ntitle: "Caller"\n---\nDELEGATE TO @served USING context "are you there?"\nRETURN "Served said: " + $agent_output\n```\n' >"$T/caller/FLOW.md"
+build "$T/caller" "$T/caller.bot"
+rm -rf "$T/cws"; mkdir -p "$T/cws"
+echo "SERVED_TOKEN=open-sesame" >"$T/cws/.env"
+drive "$T/caller.bot" "$T/cws"
+check "A2A: one Botter agent delegates to another over the network" "$T/out" "Served said: reply-from-the-model"
+kill "$A2A" 2>/dev/null
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/sws/.env"
+(cd "$T/sws" && timeout 10 "$T/served.bot" --a2a "0.0.0.0:$APORT" >"$T/a2a.out" 2>&1)
+check "A2A: listening for other machines without a token is refused" "$T/a2a.out" "put A2A_TOKEN=<secret> in .env first"
+
 # fwl_review: the LLM's logic check of a project's FLOW.md (builder agents only)
 mkagent "$T/builder" '{"builder": true}'
 build "$T/builder" "$T/builder.bot"
@@ -414,6 +570,34 @@ drive "$BOTTER" "$T" BOTTER_TUI=0
 check "tool_test: all ok says so" "$T/rec/tool.txt" "all ok"
 check_not "tool_test: all ok contains no FAILED (Botter loops while it does)" "$T/rec/tool.txt" "FAILED"
 [ -x "$T/proj/proj.bot" ] && pass "botter: the built agent is executable" || fail "botter: the built agent is executable"
+
+# Sealed vault (opt-in): Botter asks for the keys and a password itself; the built agent asks only for the password
+mkdir -p "$T/sealproj" && echo "You are sealed." >"$T/sealproj/agent.md"
+echo '{"name": "sealproj", "version": "1.0.0", "description": "Carries its keys.", "mcp": {"docs": {"url": "https://example.invalid/mcp", "token": "DOCS_TOKEN"}}}' >"$T/sealproj/config.json"
+tool_call vault_seal '{}'
+(cd "$T/sealproj" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nn\n6\nhttp://127.0.0.1:%s/v1\nsk-sealed-123\nstub\ndocs-secret-9\n\nshort\ncorrect horse 1\nsomething else 2\ncorrect horse 1\ncorrect horse 1\n' "$PORT" "$PORT" |
+    timeout 90 env BOTTER_TUI=0 "$BOTTER" >"$T/out" 2>&1)
+check "vault: Botter says what the LLM key is for" "$T/out" "The model the agent thinks with"
+check "vault: each MCP token is asked for by name, with its purpose" "$T/out" 'MCP server "docs".*example.invalid'
+check "vault: the A2A serving token is explained, and that ACP needs none" "$T/out" "ACP, needs no key"
+check "vault: a short password is refused" "$T/out" "Too short"
+check "vault: the password is typed twice and must match" "$T/out" "The two do not match"
+check "vault: the user is told the password is the whole login, offline" "$T/out" "That is the whole login"
+check "vault: the model learns what was sealed, not the keys" "$T/rec/tool_all.txt" "Sealed into secrets.vault: the LLM key .*, the MCP token for docs"
+check_not "vault: no key reaches the model" "$T/rec/tool_all.txt" "sk-sealed|docs-secret|correct horse"
+check_not "vault: the file holds no key in the clear" "$T/sealproj/secrets.vault" "sk-sealed|docs-secret|127.0.0.1"
+build "$T/sealproj" "$T/sealed.bot"
+rm -rf "$T/sealws"; mkdir -p "$T/sealws"
+(cd "$T/sealws" && printf 'not the password\ncorrect horse 1\ngo\n/exit\n' | timeout 60 "$T/sealed.bot" >"$T/out" 2>&1)
+check "vault: a wrong password is refused" "$T/out" "Wrong password\\."
+check "vault: the right password is the whole login" "$T/out" "Connected"
+check "vault: an ordinary agent cannot seal anything" "$T/rec/tool.txt" "unknown tool 'vault_seal'"
+check_not "vault: a sealed agent does not ask for a provider or key" "$T/out" "Select an OpenAI-compatible provider"
+check "vault: the sealed LLM key is the one used" "$T/rec/auth.txt" "Bearer sk-sealed-123"
+(cd "$T/sealws" && printf 'a\nb\nc\n' | timeout 60 "$T/sealed.bot" >"$T/out" 2>&1)
+check "vault: three wrong passwords and it gives up" "$T/out" "Giving up"
+(cd "$T/sealws" && timeout 20 "$T/sealed.bot" --a2a 18999 >"$T/out" 2>&1)
+check "vault: served without a terminal, it says how to unlock first" "$T/out" "run it once in a terminal first"
 
 # ---------------------------------------------------------------------------
 section "Pack integrity"

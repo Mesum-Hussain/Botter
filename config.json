@@ -2,7 +2,7 @@
   "name": "botter",
   "display_name": "Botter",
   "version": "0.2.0",
-  "description": "The agent based framework for building agents or agent based compiler for agents: describe one in plain English and Botter designs, writes, checks and builds it into a single Linux executable.",
+  "description": "The Markdown-first agent framework: describe an agent in plain English and Botter designs, writes, checks and builds it into one portable executable.",
   "internet": true,
   "skills": [
     "create-agent",

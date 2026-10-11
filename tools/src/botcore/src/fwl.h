@@ -19,6 +19,7 @@ enum {
     SQ_LOAD,      /* IMPORT: $a (one node per skill)      */
     SQ_EXEC,      /* EXECUTE tool $a <b>                 b = rest (payload / prose), pk/pv = "- k: v" lines */
     SQ_INVOKE,    /* INVOKE SKILL $a [USING <b>]            b = rest after the name (may start with USING) */
+    SQ_DELEGATE,  /* DELEGATE TO @a [USING <b>]            a sub-agent (agents/a/agent.md) or a remote agent does it */
     SQ_ASK,       /* ASK USER <a>                         */
     SQ_SAVE_VAR,  /* SAVE <a> INTO VARIABLE $b           */
     SQ_SAVE_FILE, /* SAVE <a> TO FILE "b"                 */
@@ -70,8 +71,9 @@ int  sq_parse(const char *src, size_t n, sq_prog *p);
 void sq_free(sq_prog *p);
 
 /* Build-time checks on a parsed program: tools and skills exist, IMPORT before INVOKE,
- * variables set before use, result/skill_output/answer after their producers. */
-void sq_check(sq_prog *p, int (*has_tool)(const char *), int (*has_skill)(const char *));
+ * sub-agents exist,
+ * variables set before use, result/skill_output/agent_output/answer after their producers. */
+void sq_check(sq_prog *p, int (*has_tool)(const char *), int (*has_skill)(const char *), int (*has_agent)(const char *));
 
 /* Length of the $name.field[n] reference at c (the '$' included), or 0 if c is not one. */
 size_t sq_dollar(const char *c);
