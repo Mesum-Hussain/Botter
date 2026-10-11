@@ -22,3 +22,4 @@ tui/botter-tui-dev
 *~
 *.swp
 *.o
+/pitch/
