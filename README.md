@@ -2,7 +2,7 @@
 
 # Botter
 
-### The Markdown-first agent framework.<br>Every agent ships as one portable executable.
+### `.bot` is a file format for agents.<br>One agent, one file, nothing else to ship.
 
 **396 KB** · **starts in 0.4 ms** · **nothing to install** · **runs on any x86-64 Linux**
 
@@ -10,7 +10,25 @@
 
 ---
 
-Here's an agent:
+Building an agent is a weekend. Shipping it is the rest of the month.
+
+That's because until now, shipping an agent has meant shipping a runtime. The agent itself is small: a persona, some steps, a few tools, maybe a few hundred lines of real intent. But it can't go anywhere alone. It needs its framework, the framework needs its packages, the packages need the right Python or Node, and the whole stack ends up in a container that crosses a gigabyte. You aren't shipping an agent. You're shipping an environment with an agent somewhere inside it.
+
+Everything else we make got a file format long ago. A document is a `.pdf`. A song is an `.mp3`. You send the file, and it works at the other end.
+
+An agent is now a `.bot`:
+
+```
+lead-outreach.bot      one file, about 400 KB
+```
+
+That file is the whole agent: its persona, its flow, its skills, its sub-agents, its tools, and everything it needs to think, talk to a model and run them. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
+
+And unlike a `.pdf`, a `.bot` needs no reader. Nothing has to be installed where it lands, because the file is also the program.
+
+## Where a .bot comes from
+
+You don't write a `.bot` by hand. You write an agent as a folder of plain text:
 
 ```
 lead-outreach/
@@ -20,15 +38,7 @@ lead-outreach/
   tools/         the jobs it can't do with words alone
 ```
 
-And here's the same agent, ready to ship:
-
-```
-lead-outreach.bot      one file, about 400 KB
-```
-
-One file. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
-
-That's Botter: a Markdown-first agent framework. You write an agent in Markdown and plain English, and Botter compiles it into a single statically linked binary with the whole runtime baked in. Nothing like LangChain or n8n has to be installed where the agent runs. It carries everything it needs to think, talk to a model and run its tools.
+and Botter turns the folder into the file. Botter is the Markdown-first agent framework that writes `.bot` files: you describe an agent in Markdown and plain English, and it packs that into a single statically linked executable with the whole runtime inside.
 
 ## Markdown-first is not Markdown-only
 
@@ -47,14 +57,6 @@ Markdown is where you start, not where the agent's power stops. The same single 
 | Keys that travel with the agent | An optional password-**sealed vault** inside the file |
 
 All of it fits in about 400 KB, in one process, with no framework to carry along.
-
-## The part nobody talks about
-
-Building an agent is a weekend. Shipping it is the rest of the month.
-
-Every agent today drags its framework along to wherever it runs, and every framework drags an ecosystem behind *it*. So you wrap the whole thing in Docker, watch the image cross a gigabyte, and hope the next `pip install` doesn't break it. The agent is maybe a few hundred lines of real intent. Everything else is packaging.
-
-Botter deletes the packaging.
 
 ## How small is small?
 
@@ -217,9 +219,24 @@ A flow that builds can still make no sense, so before building, your model revie
 
 Values live in `{braces}`, never mixed into instructions, and the model is told outright that whatever a value holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
 
-## What's inside 396 KB
+## Inside a .bot file
 
-Botter doesn't generate code, and no compiler or linker runs during a build. Your files are appended, read-only, to **botcore**, the runtime, and sealed with a checksum. A build takes about **2 ms**. A truncated or tampered `.bot` refuses to start.
+A `.bot` is three things, end to end:
+
+```
+lead-outreach.bot
+┌───────────────┐
+│ botcore       │  the runtime: a static x86-64 Linux executable, the same in every agent
+├───────────────┤
+│ your agent    │  agent.md, FLOW.fwl, skills, sub-agents, tools, config.json, read-only
+├───────────────┤
+│ footer        │  32 bytes: where the agent's files begin, how long they are, their checksum
+└───────────────┘
+```
+
+So building one is not compiling. Botter doesn't generate code, and no compiler or linker runs during a build. Your files are appended to **botcore** and sealed with a checksum, which takes about **2 ms**. A truncated or tampered `.bot` refuses to start.
+
+Because the front of the file is an ordinary executable, the operating system already knows what to do with it. There is no `.bot` player to install and no file association to set up. You run it.
 
 botcore is about 11,000 lines of C, statically linked against musl, and it packs a surprising amount into a few hundred kilobytes:
 
