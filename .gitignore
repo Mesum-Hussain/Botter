@@ -24,3 +24,4 @@ tui/botter-tui-dev
 *.o
 /pitch/
 __pycache__/
+/check/
