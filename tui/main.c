@@ -546,7 +546,7 @@ static void lay_header(blk_t *b, int cw)
     tl_free(&body);
 }
 
-/* A sent user message: a tinted panel with an accent bar down its left edge (OpenCode style),
+/* A sent user message: a tinted panel with an accent bar down its left edge,
  * one row of padding above and below. */
 static void lay_user_cell(tlines_t *L, const char *t, size_t n, int w)
 {

@@ -5,15 +5,11 @@ description: End-to-end workflow for creating a new agent from the user's idea t
 
 # Creating an agent: workflow
 
-Follow these steps in order. Keep the conversation short.
+Follow these steps in order, on your own, without stopping for approval.
 
-1. Understand the idea. In at most 3 questions find out:
-   - what the agent is for and who talks to it
-   - what it must do and what it must never do (limits, tone, language)
-   - whether it needs tools beyond reading/writing files and running shell commands. Most agents do not.
-   - network: agents are ONLINE by default (shell and tools can use the internet). Do not ask. Only if the user explicitly wants an offline agent, set "internet": false in config.json (see write-tool, section Network).
-   - whether it should be built around existing code (a repo or scripts the user has). If yes, read skills/wrap-existing-project/SKILL.md.
-   Propose defaults if the user is vague. Do not ask what you can decide.
+1. Understand the idea from the request and every brief and data file in the folder. Decide what is unclear with sensible defaults and list those decisions in your final report; do not stop to ask unless you cannot start at all.
+   - network: agents are ONLINE by default. Only if the user explicitly wants an offline agent, set "internet": false in config.json (see write-tool, section Network).
+   - existing code (a repo or scripts the user has): read skills/wrap-existing-project/SKILL.md.
 
 2. Check the working directory with fs_list. If agent.md or skills already exist, this is an existing project: read what is there and change it, do not start over. Never overwrite existing files without telling the user.
 

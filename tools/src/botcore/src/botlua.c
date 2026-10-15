@@ -787,19 +787,30 @@ bl_state *bl_open(const bl_io *io)
         luaL_requiref(L, l->name, l->func, 1);
         lua_pop(L, 1);
     }
-    /* nothing that loads code from elsewhere, and nothing random: same input, same output */
-    static const char *const drop[] = {"dofile", "loadfile", "load", NULL};
-    for (int i = 0; drop[i]; i++) {
-        lua_pushnil(L);
-        lua_setglobal(L, drop[i]);
-    }
-    lua_getglobal(L, "math");
-    lua_pushnil(L);
-    lua_setfield(L, -2, "random");
-    lua_pushnil(L);
-    lua_setfield(L, -2, "randomseed");
-    lua_pop(L, 1);
+    /* nothing that loads code from elsewhere, and nothing random: same input, same output (TEACH below
+     * replaces each with a function that says what to use instead) */
     lua_register(L, "print", l_print);
+    /* what models reach for out of habit: say what to use instead of "attempt to index a nil value" */
+    static const char TEACH[] =
+        "local function refuse(what, instead)\n"
+        "  return function() error(what .. ' is not available in functions: ' .. instead, 2) end\n"
+        "end\n"
+        "require = refuse('require', 'every file in functions/ is already loaded; call its global functions directly')\n"
+        "dofile = refuse('dofile', 'every file in functions/ is already loaded; read data files with bot.fs.read')\n"
+        "loadfile, load = dofile, refuse('load', 'write the code as a function instead')\n"
+        "local function guarded(name, instead)\n"
+        "  return setmetatable({}, { __index = function(_, k) error(name .. '.' .. tostring(k) .. "
+        "' is not available in functions: ' .. instead, 2) end })\n"
+        "end\n"
+        "io = guarded('io', 'read and write files with bot.fs.read(path), bot.fs.write(path, text), bot.fs.append, bot.fs.list')\n"
+        "os = guarded('os', 'use bot.today() for today, bot.date.add_days / add_months / diff_days / weekday for dates, "
+        "and bot.shell(command) for commands')\n"
+        "package = guarded('package', 'every file in functions/ is already loaded')\n"
+        "math.random = refuse('math.random', 'functions give the same answer every time; pass any choice in as a parameter')\n"
+        "math.randomseed = math.random\n";
+    if (luaL_dostring(L, TEACH) != LUA_OK) {
+        lua_pop(L, 1);
+    }
 
     lua_newtable(L); /* bot */
     static const luaL_Reg json[] = {{"encode", l_json_encode}, {"decode", l_json_decode}, {NULL, NULL}};
@@ -986,6 +997,50 @@ static void scan_uses(const char *body, size_t n, char *out, size_t cap)
 
 static int is_ident(char c) { return isalnum((unsigned char)c) || c == '_'; }
 
+/* Code that only looks done: a placeholder word in a comment, or a loop with nothing but comments in it.
+ * Weak models write these and call the job finished; the warning makes the build say otherwise. */
+static void scan_unfinished(rep_t *r, const char *name, const char *body, size_t n, int first_line)
+{
+    static const char *const words[] = {"todo", "fixme", "placeholder", "simplified", "for demo", "demo only",
+                                        "not implemented", "stub", "mock", "dummy", "hard-coded", "hardcoded",
+                                        "for this test", "in a real", "implement later", "to be implemented", "under construction", NULL};
+    int line = first_line, loop_line = 0, loop_empty = 0;
+    for (const char *p = body, *e = body + n; p < e; line++) {
+        const char *nl = memchr(p, '\n', (size_t)(e - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(e - p);
+        char low[400];
+        size_t k = 0;
+        for (size_t i = 0; i < ll && k < sizeof(low) - 1; i++) {
+            low[k++] = (char)tolower((unsigned char)p[i]);
+        }
+        low[k] = '\0';
+        const char *t = low + strspn(low, " \t");
+        const char *comment = strstr(low, "--");
+        for (int w = 0; comment && words[w]; w++) {
+            if (strstr(comment, words[w])) {
+                report(r, line, 0, "%s looks unfinished (\"%s\"): finish the real logic, or remove the note if it is done",
+                       name, words[w]);
+                break;
+            }
+        }
+        size_t tl = strlen(t);
+        int opens = (!strncmp(t, "for ", 4) || !strncmp(t, "while ", 6)) && tl >= 2 && !strcmp(t + tl - 2, "do");
+        if (opens) {
+            loop_line = line, loop_empty = 1;
+        } else if (loop_line && (!strncmp(t, "end", 3) && (t[3] == '\0' || !is_ident(t[3])))) {
+            if (loop_empty) {
+                report(r, loop_line, 0, "%s has a loop that does nothing (only comments inside): write what it should do", name);
+            }
+            loop_line = 0;
+        } else if (loop_line && *t && strncmp(t, "--", 2) != 0) {
+            loop_empty = 0;
+        }
+        p = nl ? nl + 1 : e;
+    }
+}
+
+
+
 /* The documented function that starts at `line`; doc = its comment lines. */
 static void add_function(bl_state *s, rep_t *r, const char *line, size_t ll, int lno, char **doc, int *docl, int nd,
                          const char *rest, size_t rest_n)
@@ -1143,6 +1198,7 @@ static void add_function(bl_state *s, rep_t *r, const char *line, size_t ll, int
         cJSON_Delete(req);
     }
     scan_uses(rest, rest_n, f.uses, sizeof(f.uses));
+    scan_unfinished(r, name, rest, rest_n, lno + 1);
     if (s->nfn == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 16;
         s->fn = realloc(s->fn, sizeof(*s->fn) * (size_t)s->cap);
@@ -1251,6 +1307,22 @@ int bl_load(bl_state *s, const char *file, const char *src, size_t len, int coll
         }
     }
     lua_settop(s->L, 0);
+    return r.errors ? -1 : 0;
+}
+
+int bl_check_syntax(const char *file, const char *src, size_t len, bl_diag diag, void *ud)
+{
+    bl_state *s = bl_open(NULL);
+    if (!s) {
+        return -1;
+    }
+    rep_t r = {diag, ud, file, 0};
+    char chunk[300];
+    snprintf(chunk, sizeof(chunk), "@%s", file);
+    if (luaL_loadbufferx(s->L, src, len, chunk, "t") != LUA_OK) {
+        report_lua(&r, lua_tostring(s->L, -1));
+    }
+    bl_close(s);
     return r.errors ? -1 : 0;
 }
 
@@ -1367,6 +1439,29 @@ char *bl_call_plain(bl_state *s, const char *name)
     }
     lua_settop(s->L, 0);
     return err;
+}
+
+char *bl_call_hook(bl_state *s, const char *name, const char *arg)
+{
+    if (!s) {
+        return NULL;
+    }
+    int top = lua_gettop(s->L);
+    if (lua_getglobal(s->L, name) != LUA_TFUNCTION) {
+        lua_settop(s->L, top);
+        return NULL;
+    }
+    lua_pushstring(s->L, arg ? arg : "");
+    char *out = NULL;
+    if (pcall_limited(s, 1, 1, BL_CALL_S) != LUA_OK) {
+        if (asprintf(&out, "ERROR: %s", lua_tostring(s->L, -1)) < 0) {
+            out = NULL;
+        }
+    } else if (lua_type(s->L, -1) == LUA_TSTRING && *lua_tostring(s->L, -1)) {
+        out = strdup(lua_tostring(s->L, -1));
+    }
+    lua_settop(s->L, top);
+    return out;
 }
 
 static int bl_cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }

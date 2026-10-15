@@ -513,6 +513,9 @@ mkdir -p "$T/proj" && echo "You are built by the test." >"$T/proj/agent.md"
 tool_call agent_build '{}'
 drive "$BOTTER" "$T/proj" BOTTER_TUI=0
 check "botter: agent_build builds a .bot from inside the sandbox" "$T/rec/tool.txt" "wrote .*proj\\.bot"
+mkdir -p "$T/proj2" && echo "You are built by the plain runtime." >"$T/proj2/agent.md"
+drive "$ROOT/artifacts/botter.bot" "$T/proj2"
+check "botter: agent_build also works run as a plain .bot from a folder the sandbox hides" "$T/rec/tool.txt" "wrote .*proj2\\.bot"
 # tool_test: runs each tool with its descriptor's example, like botcore does
 mkdir -p "$T/tt/tools/bin" "$T/tt/tools/doc"
 printf '#!/usr/bin/env python3\nimport json, sys\na = json.load(sys.stdin)\nprint("echo:", a["q"])\n' >"$T/tt/tools/bin/good"
@@ -704,6 +707,71 @@ tool_call run '{"cmd": "rm -rf ./nothing-here"}'
 drive "$T/fnio.bot" "$T/fnws"
 check "bot.shell: a risky command needs a yes, which nobody gave" "$T/rec/tool.txt" "ERROR: bot.shell: .*denied"
 rm -f "$T/fnws/.env"
+
+# what a model gets back while it writes functions: the build's own check, at once
+mkdir -p "$T/lw"
+tool_call fs_write '{"path": "functions/good.lua", "content": "--- Add two numbers.\n---@param a number  first\n---@param b number  second\nfunction add(a, b)\n  return a + b\nend\n"}'
+drive "$T/on.bot" "$T/lw"
+check "fs_write: a functions file is checked when written, its tools named" "$T/rec/tool.txt" "Lua check of functions/good.lua: ok. Tools the model can call: add"
+tool_call fs_write '{"path": "functions/bad.lua", "content": "function add(a, b)\n  return a +\nend\n"}'
+drive "$T/on.bot" "$T/lw"
+check "fs_write: a syntax error comes back with its line" "$T/rec/tool.txt" "functions/bad.lua:3: error: unexpected symbol"
+tool_call fs_write '{"path": "functions/mod.lua", "content": "local M = {}\nfunction M.add(a, b) return a + b end\nreturn M\n"}'
+(cd "$T/lw" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nwrite it\nwrite it again\n/exit\n' "$PORT" | timeout 60 "$T/on.bot" >"$T/out" 2>&1)
+check "fs_write: the agent's own file is replaced without asking" "$T/rec/tool_all.txt" "replaced existing file"
+check "fs_write: a file with no doc comment is reported as callable by nobody" "$T/rec/tool.txt" "no function here has a --- doc comment"
+echo "user data" >"$T/lw/notes.txt"
+tool_call fs_write '{"path": "notes.txt", "content": "gone"}'
+drive "$T/on.bot" "$T/lw"
+check "fs_write: a file that was there before still needs a yes" "$T/rec/tool.txt" "denied by user: not overwriting"
+tool_call fs_edit '{"path": "functions/good.lua", "old_text": "return a + b", "new_text": "return a + b + 0"}'
+drive "$T/on.bot" "$T/lw"
+check "fs_edit: replaces an exact piece, without asking" "$T/rec/tool.txt" "replaced 1 place in .*good.lua"
+check "fs_edit: and checks the file again" "$T/rec/tool.txt" "Lua check of functions/good.lua: ok"
+grep -q "return a + b + 0" "$T/lw/functions/good.lua" && pass "fs_edit: the file has the change" || fail "fs_edit: the file has the change"
+tool_call fs_edit '{"path": "functions/good.lua", "old_text": "not in the file", "new_text": "x"}'
+drive "$T/on.bot" "$T/lw"
+check "fs_edit: text that is not there says how to fix the call" "$T/rec/tool.txt" "old_text is not in"
+mkdir -p "$T/teach/functions"; echo "x" >"$T/teach/agent.md"
+printf -- '--- Uses io.\nfunction read_it()\n  return io.open("x")\nend\n--- Uses require.\nfunction need()\n  return require("functions.date")\nend\n' >"$T/teach/functions/t.lua"
+build "$T/teach" "$T/teach.bot"
+tool_call read_it '{}'
+drive "$T/teach.bot" "$T/fnws"
+check "Lua: io names what to use instead" "$T/rec/tool.txt" "io.open is not available in functions: read and write files with bot.fs.read"
+tool_call need '{}'
+drive "$T/teach.bot" "$T/fnws"
+check "Lua: require says every file is already loaded" "$T/rec/tool.txt" "require is not available in functions: every file in functions/ is already loaded"
+printf 'local function helper() return 1 end\n' >"$T/teach/functions/t.lua"
+build "$T/teach" "$T/teach.bot"
+check "functions: no documented function at all is a build warning" "$T/build.log" "no function has a --- doc comment directly above it"
+
+# code that only looks done is a warning: a placeholder note, or a loop with nothing in it
+mkdir -p "$T/stub/functions"; echo "x" >"$T/stub/agent.md"
+printf -- '--- Forecast.\n---@param n number  days\nfunction forecast(n)\n  -- Simplified logic for demo\n  for i = 1, n do\n    -- add the events here\n  end\n  return 0\nend\n' >"$T/stub/functions/f.lua"
+"$PACK" check "$T/stub" "$CORE" >"$T/build.log" 2>&1
+check "functions: a placeholder note is a warning" "$T/build.log" 'forecast looks unfinished \("simplified"\)'
+check "functions: a loop that does nothing is a warning" "$T/build.log" "forecast has a loop that does nothing"
+
+# on_turn_end: an agent's hook sends the model back to work, until it says the turn may end
+mkdir -p "$T/hook/functions" "$T/hookws"; echo "x" >"$T/hook/agent.md"
+cat >"$T/hook/functions/hook.lua" <<'EOF'
+function on_turn_end(reply)
+  if bot.fs.exists("nudged.txt") then
+    return nil
+  end
+  bot.fs.write("nudged.txt", reply)
+  return "One item is still open: finish it."
+end
+EOF
+build "$T/hook" "$T/hook.bot"
+check "on_turn_end: the build names the hook" "$T/build.log" "hook: on_turn_end"
+stub_start
+drive "$T/hook.bot" "$T/hookws"
+check "on_turn_end: its text goes back to the model as the next message" "$T/rec/user_all.txt" "^One item is still open: finish it.$"
+check "on_turn_end: the user sees that it continues" "$T/out" "\(continuing: One item is still open"
+check "on_turn_end: the hook got the model's reply" "$T/hookws/nudged.txt" "^done$"
+n=$(grep -c "One item is still open" "$T/rec/user_all.txt")
+[ "$n" -eq 1 ] && pass "on_turn_end: nil ends the turn" || fail "on_turn_end: nil ends the turn" "sent $n times"
 
 # batch mode: one task (reply alone on stdout), or one task per line (JSON lines), each in a fresh conversation
 stub_start

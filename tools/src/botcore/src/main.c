@@ -915,6 +915,7 @@ static void on_chat_event(void *ud, int kind, const char *text)
 }
 
 static int g_last_dropped;
+#define TURN_END_MAX 8 /* how often on_turn_end may send the model back in a row */
 static int g_mode_told = 0; /* mode the model was last told about (0 = Build, the default) */
 
 static const char PLAN_NOTE[] =
@@ -1390,7 +1391,27 @@ int main(int argc, char **argv)
         }
 
         term_history_add(line);
-        run_turn(&chat, line, NULL);
+        char *reply = NULL;
+        int r = run_turn(&chat, line, &reply);
+        /* the agent's on_turn_end hook (functions/) may send the model back to work: a checklist not done yet */
+        for (int more = 0; r == CHAT_OK && more < TURN_END_MAX; more++) {
+            char *next = fn_turn_end(reply ? reply : "");
+            if (!next) {
+                break;
+            }
+            if (!strncmp(next, "ERROR", 5)) {
+                say_err("on_turn_end", next);
+                free(next);
+                break;
+            }
+            printf(ANSI_DIM "(continuing: %.*s)" ANSI_RESET "\n", (int)strcspn(next, "\n"), next);
+            fflush(stdout);
+            free(reply);
+            reply = NULL;
+            r = run_turn(&chat, next, &reply);
+            free(next);
+        }
+        free(reply);
         free(in);
     }
 

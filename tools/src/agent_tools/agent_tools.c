@@ -26,6 +26,7 @@
 #undef main
 
 #include <libgen.h>
+#include <sys/mman.h>
 #include <limits.h>
 #include <stdarg.h>
 #include "cJSON.h"
@@ -198,7 +199,19 @@ static int cmd_build_tool(const cJSON *args)
         fprintf(stderr, "error: cannot find the botcore runtime: agent_build must be run by a botcore agent binary\n");
         return 1;
     }
-    snprintf(runtime, sizeof(runtime), "/proc/self/fd/%d", atoi(rfd));
+    /* Read the handle itself: reopening /proc/self/fd/N by path reopens the file where it lies, which the
+     * sandbox may hide (an agent run from ~/...). An in-memory copy can always be reopened. */
+    int src = atoi(rfd), mem = memfd_create("botcore-runtime", 0);
+    char buf[65536];
+    ssize_t got;
+    off_t at = 0;
+    while (mem >= 0 && (got = pread(src, buf, sizeof(buf), at)) > 0) {
+        if (write(mem, buf, (size_t)got) != got) {
+            break;
+        }
+        at += got;
+    }
+    snprintf(runtime, sizeof(runtime), "/proc/self/fd/%d", mem >= 0 && at > 0 ? mem : src);
 
     char *out = NULL;
     if (!dry_run) {

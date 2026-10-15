@@ -41,6 +41,17 @@ Why [D]: Lua is deterministic and an existing standard for embedded scripting; n
 - FWL is gone (fwl.c, fwl_run.c, tool_review.c/fwl_review, chat_ask, packer checks, write-flow skill, FWL tests, TUI highlighter). Botter's session procedure moved from FLOW.fwl into agent.md ("How a session goes"); skills teach functions (write-functions) and the three tiers.
 - Measured: runtime 542 KB (was 403 KB with FWL), minimal agent 532 KB; start 0.45 ms either way without functions, 0.9 ms with; RSS ~0.44 MB.
 
+## 3b. BUILDER HARNESS [D 2026-10-15: build from a brief, no questions]
+Goal: Botter builds an agent from a problem statement + data on its own, with a weak model (gemini-3.1-flash-lite).
+- agent.md: autonomous (no plan approval, no questions a default answers, no seal question), steps explore (head every data file) -> PLAN.md checklist -> functions+tests -> agent.md -> config.json -> dry run until 0 warnings -> compare with the brief's examples -> build -> report. The Lua rules and the bot module are inline (models skip skills).
+- on_turn_end(reply) hook [framework feature]: a global Lua function in an agent's functions/; botcore calls it after each user turn; a returned text goes back to the model (max 8 in a row). Botter's (functions/botter.lua) sends it back while PLAN.md has "- [ ]" items or functions/*.lua comments say the code is unfinished.
+- fs_write / fs_edit on functions/*.lua return the build's Lua check at once (diagnostics + which functions are tools). fs_edit (exact text replace) never asks inside the working dir; fs_write replaces files written this session without asking, earlier files still ask.
+- Lua teaches: require/dofile/load/io.*/os.*/package/math.random raise "X is not available in functions: use ...".
+- Lint (warning): placeholder words in a documented function's comments, loops with only comments; a functions/ folder with no tool and no hook.
+- CHAT_MAX_TOOL_ROUNDS 25 -> 150. BOTTER_TRACE=<file> dumps the conversation after each turn (harness debugging).
+- Fixed: agent_build failed when Botter ran as a plain .bot from a folder Landlock hides (reopened /proc/self/fd/3 by path); now copies the runtime into a memfd.
+- Measured on September 2026 (5 runs, flash-lite): no questions, explores data, uses the Lua check, builds a .bot (16-35 calls). But the model takes shortcuts: stubs with fixed results, ticks plan items it did not do, once copied sample_requests.csv into output.csv. The harness catches marked stubs, not unmarked ones or copied answers. Open: a stronger signal (score against the brief's examples inside the hook), and trying a stronger model for building.
+
 ## 4. PROTOCOLS [D 2026-10-11]
 All in botcore, in C; no bridge. Tested against the peers in tests/ plus the real cases noted.
 - MCP client (remote.c): config.json `"mcp": {"n": {"url", "token"}}` = Streamable HTTP, stateless 2026-07-28 first, session handshake (2025-06-18) when the server wants it; or `{"command": [...], "env": [NAMES]}` = server started by the agent over stdio, inside the tools' sandbox, killed with the agent. Tools appear as `<server>_<tool>`. Tools only (no resources/prompts; server-to-client requests declined). Bearer token only (no OAuth). Real test: npx @modelcontextprotocol/server-filesystem, 14 tools, used by the model.
@@ -69,7 +80,7 @@ botcore `tools/src/botcore/src` (~11K LOC): main.c (connect, system prompt, sub-
 `tools/src/packer/packer.c` (build | check | list; messages "packer: ..."), `tools/src/agent_tools` (agent_build, agent_inspect, tool_test: one ELF that includes the packer), `tui/`.
 Build: `make` -> ./botter (TUI + botcore + Botter's pack); `make test | dist | clean`. Version from config.json. After botcore changes re-run `make`; a version change needs the sources touched (objects do not depend on it).
 Sizes (KB of 1024): agent 532, botter 1043 (agent_tools grew to 350 KB: it carries Lua for the build checks). Start 0.4 ms, build ~2 ms, 0.4 MB.
-Tests: `make test` = tests/run.sh, 213 local (needs python3; tmux for UI tests). Stand-ins: stub_llm.py (model: one tool call then "done", or a fixed text; reports usage, records sampling and image parts), remote_servers.py (MCP stateless + session, A2A peer), mcp_stdio_server.py, acp_client.py, http_servers.py. BOTTER_TEST_NET=1 adds real providers. Real-model checks are manual (owner's saved Gemini key).
+Tests: `make test` = tests/run.sh, 233 local (needs python3; tmux for UI tests). Stand-ins: stub_llm.py (model: one tool call then "done", or a fixed text; reports usage, records sampling and image parts), remote_servers.py (MCP stateless + session, A2A peer), mcp_stdio_server.py, acp_client.py, http_servers.py. BOTTER_TEST_NET=1 adds real providers. Real-model checks are manual (owner's saved Gemini key).
 
 ## 8. ISSUES
 - TLS 1.2 only (BearSSL); IP-literal HTTPS hosts fail the name check; DNS not interruptible; no custom CA.

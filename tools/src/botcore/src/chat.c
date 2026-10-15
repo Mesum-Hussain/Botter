@@ -860,6 +860,18 @@ int chat_send(chat_t *c, const char *user, char **reply, char **err)
     int r = send_turn(c, user, reply, err);
     drop_images(c);
     g_running = outer;
+    const char *trace = getenv("BOTTER_TRACE");
+    if (trace && *trace) { /* for developing agents and the harness: the whole conversation, after each turn */
+        FILE *f = fopen(trace, "w");
+        char *all = f ? cJSON_Print(c->hist) : NULL;
+        if (all) {
+            fputs(all, f);
+        }
+        if (f) {
+            fclose(f);
+        }
+        free(all);
+    }
     return r;
 }
 

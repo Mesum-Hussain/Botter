@@ -24,7 +24,7 @@ void        guard_set_offline(int offline);
 int         guard_offline(void);
 
 /*
- * Plan / Build mode (like OpenCode). Build (the default) works as before. Plan
+ * Plan / Build mode. Build (the default) works as before. Plan
  * is read-only: fs_write and cron_set refuse, shell_exec and tools run with the
  * working directory read-only in Landlock (only /tmp-style scratch dirs stay
  * writable), privileged commands are refused, and agent tools not marked

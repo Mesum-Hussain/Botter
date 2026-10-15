@@ -487,8 +487,19 @@ static void check_functions(void)
         size_t l = strlen(line);
         snprintf(line + l, sizeof(line) - l, "%s%s (%s)", l ? ", " : "", f->name, f->uses[0] ? f->uses : "pure");
     }
+    int hooks = 0;
+    char **hook = bl_globals(s, "on_turn_end", &hooks);
+    for (int i = 0; i < hooks; i++) {
+        free(hook[i]);
+    }
+    free(hook);
     if (line[0]) {
-        fprintf(stderr, "packer: functions: %s\n", line);
+        fprintf(stderr, "packer: functions: %s%s\n", line, hooks ? "; hook: on_turn_end" : "");
+    } else if (hooks) {
+        fprintf(stderr, "packer: functions: no tools; hook: on_turn_end\n");
+    } else {
+        warn("%s", "functions/: no function has a --- doc comment directly above it, so the model can call none of "
+                   "them (see the write-functions skill)");
     }
     bl_close(s);
     if (errors) {

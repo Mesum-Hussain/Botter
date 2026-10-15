@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "botlua.h"
 #include "chat.h"
 #include "guard.h"
 #include "tools.h"
@@ -178,38 +179,124 @@ static int mkdir_parents(char *path) /* path is modified temporarily */
     return 0;
 }
 
-static bool fs_write(const cJSON *in, char *result, size_t rl)
-{
-    const char *path = str_arg(in, "path");
-    const char *content = str_arg(in, "content");
-    const cJSON *aj = cJSON_GetObjectItemCaseSensitive(in, "append");
-    int append = cJSON_IsTrue(aj);
-    char res[PATH_MAX];
+/* Files this session wrote: rewriting them needs no confirmation, they are the agent's own work. */
+static char *g_written[512];
+static int   g_nwritten;
 
-    if (guard_plan()) {
-        snprintf(result, rl, "%s", GUARD_PLAN_REFUSAL);
-        return false;
+static int written_here(const char *path)
+{
+    for (int i = 0; i < g_nwritten; i++) {
+        if (!strcmp(g_written[i], path)) {
+            return 1;
+        }
     }
-    if (!path || !content) {
-        snprintf(result, rl, "'path' and 'content' (strings) are required");
-        return false;
+    return 0;
+}
+
+static void note_written(const char *path)
+{
+    if (!written_here(path) && g_nwritten < (int)(sizeof(g_written) / sizeof(g_written[0]))) {
+        g_written[g_nwritten++] = strdup(path);
     }
-    if (access_path("fs_write", path, "write", res, result, rl) != 0) {
-        return false;
+}
+
+typedef struct {
+    char  *p;
+    size_t len, cap;
+} text_t;
+
+static void text_add(text_t *t, const char *s)
+{
+    size_t n = strlen(s);
+    if (t->len + n + 1 > t->cap) {
+        size_t nc = (t->cap ? t->cap * 2 : 1024) + n;
+        char *np = realloc(t->p, nc);
+        if (!np) {
+            return;
+        }
+        t->p = np;
+        t->cap = nc;
     }
+    memcpy(t->p + t->len, s, n + 1);
+    t->len += n;
+}
+
+static void lua_diag(void *ud, const char *file, int line, int error, const char *msg)
+{
+    char l[800];
+    if (line) {
+        snprintf(l, sizeof(l), "  %s:%d: %s: %s\n", file, line, error ? "error" : "warning", msg);
+    } else {
+        snprintf(l, sizeof(l), "  %s: %s: %s\n", file, error ? "error" : "warning", msg);
+    }
+    text_add(ud, l);
+}
+
+/* After a write to functions/<name>.lua: check it as the build will, so a mistake shows at once
+ * (like an editor's diagnostics). The note goes after the write's own result. */
+static void lua_check(const char *res, const char *content, size_t n, char *result, size_t rl)
+{
+    const char *f = strstr(res, "/functions/");
+    size_t pl = strlen(res);
+    if (!f || pl < 5 || strcmp(res + pl - 4, ".lua") != 0) {
+        return;
+    }
+    const char *file = f + 1, *rest = file + 10;
+    int test = !strncmp(rest, "tests/", 6) && !strchr(rest + 6, '/');
+    if (!test && strchr(rest, '/')) {
+        return;
+    }
+    text_t diags = {0};
+    char note[1200] = "";
+    if (test) {
+        if (bl_check_syntax(file, content, n, lua_diag, &diags) == 0) {
+            snprintf(note, sizeof(note), "\nLua check of %s: the syntax is fine (the build runs its test_ functions).", file);
+        }
+    } else {
+        bl_state *s = bl_open(NULL); /* no files and no network while checking: only the code itself */
+        if (s && bl_load(s, file, content, n, 1, lua_diag, &diags) == 0) {
+            char names[700] = "";
+            for (int i = 0; i < bl_count(s); i++) {
+                size_t l = strlen(names);
+                snprintf(names + l, sizeof(names) - l, "%s%s", l ? ", " : "", bl_get(s, i)->name);
+            }
+            snprintf(note, sizeof(note),
+                     names[0] ? "\nLua check of %s: ok. Tools the model can call: %s."
+                              : "\nLua check of %s: ok, but no function here has a --- doc comment directly above it, so "
+                                "the model cannot call any of them%s (fine for helpers that another file's tools use).",
+                     file, names);
+        }
+        bl_close(s);
+    }
+    size_t used = strlen(result);
+    if (diags.len) {
+        snprintf(result + used, rl - used, "\nLua check of %s found problems; fix them before building:\n%s", file, diags.p);
+    } else {
+        snprintf(result + used, rl - used, "%s", note);
+    }
+    free(diags.p);
+}
+
+/* Write content to the resolved path res (asking before replacing a file this session did not write,
+ * unless ask is 0). */
+static bool write_file(const char *tool, const char *path, const char *res, const char *content, int append, int ask,
+                       char *result, size_t rl)
+{
     struct stat st;
     int exists = stat(res, &st) == 0;
     if (exists && !S_ISREG(st.st_mode)) {
         snprintf(result, rl, "'%s' exists and is not a regular file", path);
         return false;
     }
-    if (exists && !append && st.st_size > 0 &&
-        !guard_confirm_cat(GUARD_CAT_OVERWRITE, "fs_write would OVERWRITE existing file (%lld bytes):\n  %s",
+    if (exists && !append && ask && st.st_size > 0 && !written_here(res) &&
+        !guard_confirm_cat(GUARD_CAT_OVERWRITE, "%s would OVERWRITE existing file (%lld bytes):\n  %s", tool,
                            (long long)st.st_size, res)) {
         snprintf(result, rl, "denied by user: not overwriting %s", res);
         return false;
     }
-    if (mkdir_parents(res) != 0) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", res);
+    if (mkdir_parents(tmp) != 0) {
         snprintf(result, rl, "cannot create parent directories of '%s': %s", path, strerror(errno));
         return false;
     }
@@ -232,9 +319,108 @@ static bool fs_write(const cJSON *in, char *result, size_t rl)
         done += (size_t)w;
     }
     close(fd);
+    note_written(res);
     snprintf(result, rl, "%s %zu bytes to %s%s", append ? "appended" : "wrote", n, res,
              exists && !append ? " (replaced existing file)" : "");
     return true;
+}
+
+static bool fs_write(const cJSON *in, char *result, size_t rl)
+{
+    const char *path = str_arg(in, "path");
+    const char *content = str_arg(in, "content");
+    int append = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(in, "append"));
+    char res[PATH_MAX];
+
+    if (guard_plan()) {
+        snprintf(result, rl, "%s", GUARD_PLAN_REFUSAL);
+        return false;
+    }
+    if (!path || !content) {
+        snprintf(result, rl, "'path' and 'content' (strings) are required");
+        return false;
+    }
+    if (access_path("fs_write", path, "write", res, result, rl) != 0 ||
+        !write_file("fs_write", path, res, content, append, 1, result, rl)) {
+        return false;
+    }
+    if (!append) {
+        lua_check(res, content, strlen(content), result, rl);
+    }
+    return true;
+}
+
+#define EDIT_MAX (8u * 1024 * 1024)
+
+/* Replace an exact piece of a file: the way to fix a few lines without rewriting the whole file. */
+static bool fs_edit(const cJSON *in, char *result, size_t rl)
+{
+    const char *path = str_arg(in, "path"), *old = str_arg(in, "old_text"), *new = str_arg(in, "new_text");
+    int all = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(in, "replace_all"));
+    char res[PATH_MAX];
+    if (guard_plan()) {
+        snprintf(result, rl, "%s", GUARD_PLAN_REFUSAL);
+        return false;
+    }
+    if (!path || !old || !new || !*old) {
+        snprintf(result, rl, "'path', 'old_text' (not empty) and 'new_text' are required");
+        return false;
+    }
+    if (access_path("fs_edit", path, "change", res, result, rl) != 0) {
+        return false;
+    }
+    FILE *f = fopen(res, "rb");
+    struct stat st;
+    if (!f || fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) || (size_t)st.st_size > EDIT_MAX) {
+        snprintf(result, rl, "cannot edit '%s': %s", path, !f ? strerror(errno) : "not a regular text file under 8 MB");
+        if (f) {
+            fclose(f);
+        }
+        return false;
+    }
+    char *text = calloc(1, (size_t)st.st_size + 1);
+    size_t got = text ? fread(text, 1, (size_t)st.st_size, f) : 0;
+    fclose(f);
+    if (!text) {
+        snprintf(result, rl, "out of memory");
+        return false;
+    }
+    text[got] = '\0';
+    size_t ol = strlen(old), nl = strlen(new), count = 0;
+    for (const char *p = text; (p = strstr(p, old)); p += ol) {
+        count++;
+    }
+    if (count == 0 || (count > 1 && !all)) {
+        snprintf(result, rl, count ? "old_text is in '%s' %zu times: include more of the surrounding lines so it is "
+                                     "unique, or set replace_all"
+                                   : "old_text is not in '%s': read the file again and copy the lines exactly, "
+                                     "spaces and line breaks included",
+                 path, count);
+        free(text);
+        return false;
+    }
+    char *out = malloc(got + count * (nl > ol ? nl - ol : 0) + 1), *w = out;
+    if (!out) {
+        free(text);
+        snprintf(result, rl, "out of memory");
+        return false;
+    }
+    const char *p = text;
+    for (const char *hit; (hit = strstr(p, old)); p = hit + ol) {
+        memcpy(w, p, (size_t)(hit - p));
+        w += hit - p;
+        memcpy(w, new, nl);
+        w += nl;
+    }
+    strcpy(w, p);
+    free(text);
+    bool ok = write_file("fs_edit", path, res, out, 0, 0, result, rl); /* a quoted, exact change: no question */
+    if (ok) {
+        snprintf(result, rl, "replaced %zu place%s in %s", count, count == 1 ? "" : "s", res);
+        lua_check(res, out, strlen(out), result, rl);
+    }
+    free(out);
+    return ok;
 }
 
 #define IMAGE_MAX (20u * 1024 * 1024)
@@ -302,12 +488,22 @@ const tool_t TOOLS_FS[] = {
      "\"required\":[\"path\"]}",
      fs_read},
     {"fs_write",
-     "Create or overwrite a text file (parent directories are created). Overwriting an existing "
-     "non-empty file asks the user for approval. Set append=true to add to the end instead.",
+     "Create or overwrite a text file (parent directories are created). Replacing a file that was there before "
+     "this session asks the user first; files you wrote yourself are replaced without asking. Set append=true to "
+     "add to the end instead. For a few changed lines use fs_edit. Writing functions/<name>.lua returns the "
+     "same Lua check the build does.",
      "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},"
      "\"append\":{\"type\":\"boolean\",\"description\":\"Append instead of overwrite, default false\"}},"
      "\"required\":[\"path\",\"content\"]}",
      fs_write},
+    {"fs_edit",
+     "Change part of a text file in the working directory without asking: replace old_text (copied exactly from the file, spaces and line breaks "
+     "included) with new_text. old_text must appear once, unless replace_all is true. Use it to fix a few "
+     "lines instead of rewriting the whole file with fs_write.",
+     "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},"
+     "\"new_text\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"Replace every "
+     "occurrence, default false\"}},\"required\":[\"path\",\"old_text\",\"new_text\"]}",
+     fs_edit},
     {"image_view",
      "Look at an image file (PNG, JPEG, GIF or WEBP): it is shown to you right after this call, for this "
      "turn only. Use it to read numbers, text or details in pictures, scans and screenshots.",

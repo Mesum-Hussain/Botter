@@ -278,7 +278,7 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 213 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
+make test                     # 233 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```

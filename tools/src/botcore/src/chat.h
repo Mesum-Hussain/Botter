@@ -28,7 +28,7 @@ typedef struct {
 #define CHAT_EV_THINK_DELTA 4 /* streamed piece of reasoning */
 
 /* Max model<->tool round trips inside one user turn. */
-#define CHAT_MAX_TOOL_ROUNDS 25
+#define CHAT_MAX_TOOL_ROUNDS 150
 
 /* Context budget (bytes of message text kept in RAM and sent per request). */
 #ifndef CHAT_HIST_MAX_BYTES

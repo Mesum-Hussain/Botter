@@ -69,6 +69,8 @@ bl_state    *bl_open(const bl_io *io);
 void         bl_close(bl_state *s);
 /* Run one file (chunk name "functions/x.lua") and collect its documented functions. 0 ok, -1 errors (reported). */
 int          bl_load(bl_state *s, const char *file, const char *src, size_t len, int collect, bl_diag diag, void *ud);
+/* Syntax only (a test file, which needs the other files to run). 0 ok, -1 errors (reported). */
+int          bl_check_syntax(const char *file, const char *src, size_t len, bl_diag diag, void *ud);
 int          bl_count(const bl_state *s);
 const bl_fn *bl_get(const bl_state *s, int i);
 const bl_fn *bl_find(const bl_state *s, const char *name);
@@ -78,6 +80,9 @@ void         bl_schema_append(const bl_state *s, cJSON *arr);
 char        *bl_call(bl_state *s, const char *name, const char *args_json);
 /* Call a global function with no arguments (tests): NULL = it returned, else a malloc'd error message. */
 char        *bl_call_plain(bl_state *s, const char *name);
+/* Call a global function with one text argument, if it exists: malloc'd text it returned, or NULL when
+ * it does not exist or returned nothing. An error is returned as "ERROR: ...". */
+char        *bl_call_hook(bl_state *s, const char *name, const char *arg);
 /* Names of the global functions whose names start with prefix, sorted; caller frees each and the array. */
 char       **bl_globals(bl_state *s, const char *prefix, int *n);
 
