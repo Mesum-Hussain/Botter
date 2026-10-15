@@ -256,6 +256,14 @@ int fn_count(void) { return bl_count(g_bl); }
 
 char *fn_turn_end(const char *reply) { return bl_call_hook(g_bl, "on_turn_end", reply); }
 
+char *fn_check(const char *name, const char *run_json)
+{
+    if (!g_bl) {
+        return strdup("ERROR: this agent has no functions, so no check function");
+    }
+    return bl_call_hook(g_bl, name, run_json);
+}
+
 void fn_schema_append(cJSON *arr) { bl_schema_append(g_bl, arr); }
 
 int fn_is(const char *name) { return bl_find(g_bl, name) != NULL; }

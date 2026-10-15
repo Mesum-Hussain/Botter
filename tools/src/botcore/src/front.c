@@ -36,10 +36,27 @@ static char       *g_acc;                 /* A2A: the answer so far */
 static char        g_host[200];
 static const char *g_task;                /* --run "task": the only one */
 static char       *g_input, *g_err;       /* --run: the task in flight, and why it failed */
+static const char *g_eval_dir;            /* --eval: where the cases are */
 
 int front_remote(void) { return g_on >= F_ACP; }
 
 int front_batch(void) { return g_on == F_RUN; }
+
+const char *front_eval_dir(void) { return g_eval_dir; }
+
+void front_result(const char *line)
+{
+    for (size_t off = 0, l = strlen(line); off < l;) {
+        ssize_t w = write(g_out, line + off, l - off);
+        if (w <= 0) {
+            break;
+        }
+        off += (size_t)w;
+    }
+    if (write(g_out, "\n", 1) < 0) {
+        return;
+    }
+}
 
 int front_take_cmd(void)
 {
@@ -136,6 +153,13 @@ int front_init(int argc, char **argv)
             dup2(nul, STDOUT_FILENO);
         }
         g_on = F_MCP;
+        return 1;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--eval")) { /* the agent's eval cases, against the real model */
+        g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        dup2(STDERR_FILENO, STDOUT_FILENO);
+        g_eval_dir = argc > 2 ? argv[2] : "evals";
+        g_on = F_RUN;
         return 1;
     }
     if (argc > 1 && !strcmp(argv[1], "--run")) { /* batch: tasks in, results out, nobody to ask */

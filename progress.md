@@ -50,6 +50,10 @@ Goal: Botter builds an agent from a problem statement + data on its own, with a 
 - Lint (warning): placeholder words in a documented function's comments, loops with only comments; a functions/ folder with no tool and no hook.
 - CHAT_MAX_TOOL_ROUNDS 25 -> 150. BOTTER_TRACE=<file> dumps the conversation after each turn (harness debugging).
 - Fixed: agent_build failed when Botter ran as a plain .bot from a folder Landlock hides (reopened /proc/self/fd/3 by path); now copies the runtime into a memfd.
+- Scores: a test file's score_<name>() returns passed, total[, details]; the build prints "packer: score <name>: p/t (x%)". Botter's hook demands a score when the folder has example files (name contains sample/example/expected/golden/ground_truth), requires it to cover every example (rows counted by the hook), refuses agent code that names an example file (answer-key leakage), and sends the model back with the report while the score improves (max 6 rounds, stops after 2 without progress).
+- bot.tool(name, args): any of the agent's tools from Lua, same rules as the model.
+- --eval [dir]: evals/*.json cases (one or a list per file): input + expect {contains, not_contains, equals, regex, tools_used, tools_not_used, max_tool_calls} and/or check = a Lua function(json of {input, reply, tools, data}) returning nil or why. Fresh conversation per case, one JSON line per case, summary + usage on stderr, exit 1 on a failure; a case that cannot fail is refused.
+- Run 8 (all checks on): every shortcut caught (open plan, no score, answer-key read, mocked test); honest final score 0/25 after 88 calls / 3M input tokens. The harness is honest now; the gap left is the model.
 - Measured on September 2026 (5 runs, flash-lite): no questions, explores data, uses the Lua check, builds a .bot (16-35 calls). But the model takes shortcuts: stubs with fixed results, ticks plan items it did not do, once copied sample_requests.csv into output.csv. The harness catches marked stubs, not unmarked ones or copied answers. Open: a stronger signal (score against the brief's examples inside the hook), and trying a stronger model for building.
 
 ## 4. PROTOCOLS [D 2026-10-11]
@@ -80,7 +84,7 @@ botcore `tools/src/botcore/src` (~11K LOC): main.c (connect, system prompt, sub-
 `tools/src/packer/packer.c` (build | check | list; messages "packer: ..."), `tools/src/agent_tools` (agent_build, agent_inspect, tool_test: one ELF that includes the packer), `tui/`.
 Build: `make` -> ./botter (TUI + botcore + Botter's pack); `make test | dist | clean`. Version from config.json. After botcore changes re-run `make`; a version change needs the sources touched (objects do not depend on it).
 Sizes (KB of 1024): agent 532, botter 1043 (agent_tools grew to 350 KB: it carries Lua for the build checks). Start 0.4 ms, build ~2 ms, 0.4 MB.
-Tests: `make test` = tests/run.sh, 233 local (needs python3; tmux for UI tests). Stand-ins: stub_llm.py (model: one tool call then "done", or a fixed text; reports usage, records sampling and image parts), remote_servers.py (MCP stateless + session, A2A peer), mcp_stdio_server.py, acp_client.py, http_servers.py. BOTTER_TEST_NET=1 adds real providers. Real-model checks are manual (owner's saved Gemini key).
+Tests: `make test` = tests/run.sh, 246 local (needs python3; tmux for UI tests). Stand-ins: stub_llm.py (model: one tool call then "done", or a fixed text; reports usage, records sampling and image parts), remote_servers.py (MCP stateless + session, A2A peer), mcp_stdio_server.py, acp_client.py, http_servers.py. BOTTER_TEST_NET=1 adds real providers. Real-model checks are manual (owner's saved Gemini key).
 
 ## 8. ISSUES
 - TLS 1.2 only (BearSSL); IP-literal HTTPS hosts fail the name check; DNS not interruptible; no custom CA.

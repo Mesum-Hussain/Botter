@@ -11,7 +11,7 @@ Steps
 2. Plan in PLAN.md (in the folder; never built into the agent) as a checklist, one "- [ ] ..." line per item: every requirement and rule of the brief with the function, check or agent.md rule that implements it; the tests; comparing with the brief's examples when it has any; the build. Tick an item ("- [x]") as soon as it is really done. While items are open, you are sent back to them.
 3. Write the functions and their tests first (the exact part), then agent.md, then config.json. Add skills for longer procedures and tools only when Lua cannot do the job.
 4. agent_build with "dry_run": true. Fix every error, warning and failing test (fs_edit for small fixes) and check again, until it says "check passed" with 0 warnings.
-5. When the brief gives worked examples or expected answers, write a test that compares your functions' results with them, and improve the functions until they match or you know why they cannot.
+5. When the brief gives worked examples or expected answers, measure the agent against them: in functions/tests/examples.lua write score_examples(), which runs your functions on every example and returns passed, total and a text of what differs. The build prints the score. Improve the functions until they match or you know why they cannot; you are sent back while the score keeps improving. Never copy expected answers into the agent.
 6. agent_build, then agent_inspect. Report: the file, its size, how to run it, what it needs at start (a model connection, programs to install), what you decided on your own, and what is still weak. Mention that its keys can be sealed into it with vault_seal if the user wants; do not ask.
 
 The agent project
@@ -27,7 +27,7 @@ Lua functions: the rules that matter
 - Write global functions. All files share one Lua state, so a function in one file can call any function in another. There is no require, no module tables and no `return M`: helpers are `local function` or undocumented globals.
 - There is no io and no os. Use the bot module: bot.fs.read(path) / write / append / list / exists (paths relative to the working folder); bot.csv.parse(text) gives rows keyed by the header, empty fields as ""; bot.csv.encode(rows, {"col1", "col2"}); bot.json.encode / decode; bot.date.add_days(d, n) / add_months / diff_days(from, to) / weekday / is_valid with "YYYY-MM-DD" texts; bot.today(); bot.http.get(url) / post(url, body) -> {status, body, json}; bot.shell(command) -> output, exit code; bot.secret(name) for keys in .env.
 - Return a table (the model gets JSON) or a short text; fail with error("what went wrong"). Results over 100 KB are cut: write big results to a file.
-- Tests: `function test_something() assert(result == expected, "why") end`. Tests read files relative to the project folder.
+- Tests: `function test_something() assert(result == expected, "why") end`. A score: `function score_examples() ... return passed, total, "what differs" end`. Tests read files relative to the project folder.
 - fs_write and fs_edit check a functions file the moment you write it: read that check and fix what it reports.
 
 Agents that work through data (CSV in, CSV out)

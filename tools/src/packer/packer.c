@@ -521,7 +521,25 @@ static void check_functions(void)
         free(full);
         bl_state *t = load_functions(0);
         if (src && bl_load(t, rel, src, len, 0, lua_diag, NULL) == 0) {
-            int n = 0;
+            int n = 0, ns = 0;
+            char **scores = bl_globals(t, "score_", &ns); /* how close to the examples: reported, never a failure */
+            for (int k = 0; k < ns; k++) {
+                double passed = 0, total = 0;
+                char *details = NULL, *why = bl_call_score(t, scores[k], &passed, &total, &details);
+                if (why) {
+                    fprintf(stderr, "%s: %s FAILED: %s\n", rel, scores[k], why);
+                    errors++;
+                } else {
+                    fprintf(stderr, "packer: score %s: %g/%g (%.0f%%)\n", scores[k] + 6, passed, total, 100.0 * passed / total);
+                    if (details && *details) {
+                        fprintf(stderr, "%s%s", details, details[strlen(details) - 1] == '\n' ? "" : "\n");
+                    }
+                }
+                free(why);
+                free(details);
+                free(scores[k]);
+            }
+            free(scores);
             char **names = bl_globals(t, "test_", &n);
             for (int k = 0; k < n; k++) {
                 char *why = bl_call_plain(t, names[k]);

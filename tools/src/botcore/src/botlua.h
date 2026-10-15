@@ -30,6 +30,7 @@
  *   bot.http.get(url [, headers]) / bot.http.post(url, body [, headers]) -> {status, body, json}
  *   bot.shell(command [, timeout_s]) -> output, exit code    (the shell_exec tool: same rules, same asking)
  *   bot.mcp(server, tool, args) -> text      bot.agent(name, task) -> text      bot.secret(name) -> value
+ *   bot.tool(name, args) -> text: any of the agent's tools, as the model would call it (same rules)
  */
 
 typedef struct {
@@ -80,6 +81,9 @@ void         bl_schema_append(const bl_state *s, cJSON *arr);
 char        *bl_call(bl_state *s, const char *name, const char *args_json);
 /* Call a global function with no arguments (tests): NULL = it returned, else a malloc'd error message. */
 char        *bl_call_plain(bl_state *s, const char *name);
+/* Call a score_ function (tests): it returns passed, total [, details]. NULL ok (*details may be set,
+ * malloc'd), else a malloc'd error message. */
+char        *bl_call_score(bl_state *s, const char *name, double *passed, double *total, char **details);
 /* Call a global function with one text argument, if it exists: malloc'd text it returned, or NULL when
  * it does not exist or returned nothing. An error is returned as "ERROR: ...". */
 char        *bl_call_hook(bl_state *s, const char *name, const char *arg);

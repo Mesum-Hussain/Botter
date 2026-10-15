@@ -15,6 +15,9 @@ int         fn_count(void);
 /* The agent's on_turn_end(reply) hook, if its functions define one: what to tell the model next (malloc'd),
  * or NULL when the turn may end. */
 char       *fn_turn_end(const char *reply);
+/* An eval case's check: the global Lua function name(json_of_the_run) -> NULL when it passes, else why
+ * (malloc'd); "ERROR: no such function" when the agent has none of that name. */
+char       *fn_check(const char *name, const char *run_json);
 /* How bot.shell / bot.mcp / bot.agent run a tool: main.c's runner (shows it, asks when risky). */
 void        fn_set_tool_runner(char *(*run)(const char *name, const char *args_json));
 

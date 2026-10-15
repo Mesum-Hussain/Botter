@@ -12,10 +12,14 @@
 #include "vfs.h"
 
 #include <ctype.h>
+#include <dirent.h>
+#include <regex.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <errno.h>
 #include <limits.h>
 #include <unistd.h>
 
@@ -832,9 +836,14 @@ end:
 static char *run_tool(const char *name, const char *args);
 
 /* Runs between a tool call being requested and executed: show what happens, then run it. */
+static cJSON *g_eval_calls; /* --eval: the tools the running case called */
+
 static char *on_tool(void *ud, const char *name, const char *args)
 {
     (void)ud;
+    if (g_eval_calls) {
+        cJSON_AddItemToArray(g_eval_calls, cJSON_CreateString(name));
+    }
     return run_tool(name, args);
 }
 
@@ -1013,6 +1022,196 @@ static void run_due_schedules(chat_t *chat)
         puts("");
         snprintf(msg, sizeof(msg), "[Scheduled task #%d fired] %s", id, action);
         run_turn(chat, msg, NULL);
+    }
+}
+
+/* ---- --eval: the agent's cases against the real model ---- */
+
+static void eval_fail(cJSON *failures, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void eval_fail(cJSON *failures, const char *fmt, ...)
+{
+    char m[600];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(m, sizeof(m), fmt, ap);
+    va_end(ap);
+    cJSON_AddItemToArray(failures, cJSON_CreateString(m));
+}
+
+static int called(const char *tool)
+{
+    const cJSON *c;
+    cJSON_ArrayForEach(c, g_eval_calls)
+    {
+        if (cJSON_IsString(c) && !strcmp(c->valuestring, tool)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Run one case in a fresh conversation and grade it. */
+static cJSON *eval_case(chat_t *chat, const cJSON *c, const char *file, int index)
+{
+    const char *input = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(c, "input"));
+    const char *name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(c, "name"));
+    const cJSON *expect = cJSON_GetObjectItemCaseSensitive(c, "expect");
+    const char *check = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(c, "check"));
+    cJSON *res = cJSON_CreateObject(), *failures = cJSON_CreateArray();
+    char label[300];
+    snprintf(label, sizeof(label), "%s#%d", file, index);
+    cJSON_AddStringToObject(res, "name", name ? name : label);
+    if (!input || (!cJSON_GetArraySize(expect) && !check)) { /* a case that cannot fail proves nothing */
+        eval_fail(failures, "%s", !input ? "the case has no \"input\"" : "the case has no \"expect\" and no \"check\", so it could never fail");
+        cJSON_AddBoolToObject(res, "passed", 0);
+        cJSON_AddItemToObject(res, "failures", failures);
+        return res;
+    }
+    chat_clear(chat);
+    g_eval_calls = cJSON_CreateArray();
+    char *reply = NULL;
+    int r = run_turn(chat, input, &reply);
+    const char *text = reply ? reply : "";
+    if (r != CHAT_OK) {
+        eval_fail(failures, "the model request failed");
+    }
+    const cJSON *e;
+    cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(expect, "contains"))
+    {
+        if (cJSON_IsString(e) && !strstr(text, e->valuestring)) {
+            eval_fail(failures, "the reply does not contain \"%.200s\"", e->valuestring);
+        }
+    }
+    cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(expect, "not_contains"))
+    {
+        if (cJSON_IsString(e) && strstr(text, e->valuestring)) {
+            eval_fail(failures, "the reply contains \"%.200s\"", e->valuestring);
+        }
+    }
+    const char *equals = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(expect, "equals"));
+    if (equals) {
+        char *t = strdup(text), *trimmed = t ? trim(t) : NULL;
+        if (!trimmed || strcmp(trimmed, equals) != 0) {
+            eval_fail(failures, "the reply is not exactly \"%.200s\"", equals);
+        }
+        free(t);
+    }
+    const char *pattern = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(expect, "regex"));
+    if (pattern) {
+        regex_t re;
+        if (regcomp(&re, pattern, REG_EXTENDED | REG_NOSUB) != 0) {
+            eval_fail(failures, "\"regex\" is not a valid regular expression: %.200s", pattern);
+        } else {
+            if (regexec(&re, text, 0, NULL, 0) != 0) {
+                eval_fail(failures, "the reply does not match /%.200s/", pattern);
+            }
+            regfree(&re);
+        }
+    }
+    cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(expect, "tools_used"))
+    {
+        if (cJSON_IsString(e) && !called(e->valuestring)) {
+            eval_fail(failures, "%s was not called", e->valuestring);
+        }
+    }
+    cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(expect, "tools_not_used"))
+    {
+        if (cJSON_IsString(e) && called(e->valuestring)) {
+            eval_fail(failures, "%s was called", e->valuestring);
+        }
+    }
+    const cJSON *max = cJSON_GetObjectItemCaseSensitive(expect, "max_tool_calls");
+    if (cJSON_IsNumber(max) && cJSON_GetArraySize(g_eval_calls) > max->valueint) {
+        eval_fail(failures, "%d tool calls, at most %d expected", cJSON_GetArraySize(g_eval_calls), max->valueint);
+    }
+    if (check) { /* the agent's own Lua judge: gets {input, reply, tools}, returns nothing to pass or why not */
+        cJSON *run = cJSON_CreateObject();
+        cJSON_AddStringToObject(run, "input", input);
+        cJSON_AddStringToObject(run, "reply", text);
+        cJSON_AddItemToObject(run, "tools", cJSON_Duplicate(g_eval_calls, 1));
+        if (cJSON_GetObjectItemCaseSensitive(c, "data")) {
+            cJSON_AddItemToObject(run, "data", cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(c, "data"), 1));
+        }
+        char *arg = cJSON_PrintUnformatted(run), *why = fn_check(check, arg ? arg : "{}");
+        if (why) {
+            eval_fail(failures, "%s: %.400s", check, why);
+        }
+        free(why);
+        free(arg);
+        cJSON_Delete(run);
+    }
+    cJSON_AddBoolToObject(res, "passed", cJSON_GetArraySize(failures) == 0);
+    cJSON_AddItemToObject(res, "failures", failures);
+    cJSON_AddItemToObject(res, "tools", g_eval_calls);
+    g_eval_calls = NULL;
+    cJSON_AddStringToObject(res, "reply", text);
+    free(reply);
+    return res;
+}
+
+static int by_name(const struct dirent **a, const struct dirent **b) { return strcmp((*a)->d_name, (*b)->d_name); }
+
+/* Every case in dir/ *.json (one case or a list of cases per file), in file order. 0 = all passed. */
+static int run_evals(chat_t *chat, const char *dir)
+{
+    struct dirent **names = NULL;
+    int n = scandir(dir, &names, NULL, by_name), passed = 0, total = 0;
+    if (n < 0) {
+        fprintf(stderr, "eval: cannot read %s: %s (cases go in %s/*.json)\n", dir, strerror(errno), dir);
+        return 2;
+    }
+    for (int i = 0; i < n; i++) {
+        size_t l = strlen(names[i]->d_name);
+        if (l > 5 && !strcmp(names[i]->d_name + l - 5, ".json")) {
+            char path[PATH_MAX];
+            snprintf(path, sizeof(path), "%s/%s", dir, names[i]->d_name);
+            FILE *f = fopen(path, "rb");
+            char *text = NULL;
+            size_t len = 0;
+            FILE *m = open_memstream(&text, &len);
+            for (int ch; f && m && (ch = fgetc(f)) != EOF;) {
+                fputc(ch, m);
+            }
+            if (m) {
+                fclose(m);
+            }
+            if (f) {
+                fclose(f);
+            }
+            cJSON *cases = text ? cJSON_Parse(text) : NULL;
+            free(text);
+            if (!cases) {
+                fprintf(stderr, "eval: %s is not valid JSON\n", path);
+                total++;
+            }
+            int k = 0;
+            const cJSON *one = cJSON_IsArray(cases) ? cases->child : cases;
+            for (; one; one = cJSON_IsArray(cases) ? one->next : NULL) {
+                cJSON *res = eval_case(chat, one, names[i]->d_name, ++k);
+                total++;
+                passed += cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(res, "passed"));
+                char *line = cJSON_PrintUnformatted(res);
+                front_result(line ? line : "{}");
+                fprintf(stderr, "eval: %s %s\n", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(res, "passed")) ? "PASS" : "FAIL",
+                        cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(res, "name")));
+                free(line);
+                cJSON_Delete(res);
+            }
+            cJSON_Delete(cases);
+        }
+        free(names[i]);
+    }
+    free(names);
+    fprintf(stderr, "eval: %d/%d passed\n", passed, total);
+    return total && passed == total ? 0 : 1;
+}
+
+static void print_usage(void)
+{
+    const chat_usage_t *u;
+    for (int i = 0, n = chat_usage(&u); i < n; i++) {
+        fprintf(stderr, "usage: {\"model\":\"%s\",\"calls\":%ld,\"input_tokens\":%lld,\"output_tokens\":%lld}\n",
+                u[i].model, u[i].calls, u[i].input_tokens, u[i].output_tokens);
     }
 }
 
@@ -1349,6 +1548,12 @@ int main(int argc, char **argv)
         }
         front_set_card(card);
     }
+    if (front_eval_dir()) {
+        int rc = run_evals(&chat, front_eval_dir());
+        print_usage();
+        chat_free(&chat);
+        return rc;
+    }
     int intr_armed = 0; /* a 2nd consecutive Ctrl-C at the prompt exits */
     for (;;) {
         char *in = NULL;
@@ -1416,11 +1621,7 @@ int main(int argc, char **argv)
     }
 
     if (front_batch()) { /* what the run cost, for the record */
-        const chat_usage_t *u;
-        for (int i = 0, n = chat_usage(&u); i < n; i++) {
-            fprintf(stderr, "usage: {\"model\":\"%s\",\"calls\":%ld,\"input_tokens\":%lld,\"output_tokens\":%lld}\n",
-                    u[i].model, u[i].calls, u[i].input_tokens, u[i].output_tokens);
-        }
+        print_usage();
     }
     chat_free(&chat);
     return 0;

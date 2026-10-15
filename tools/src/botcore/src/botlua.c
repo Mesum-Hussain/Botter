@@ -728,6 +728,23 @@ static int l_agent(lua_State *L)
     return 1;
 }
 
+/* bot.tool(name, args): any of the agent's tools as the model would call it -> its text */
+static int l_tool(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    cJSON *a = lua_istable(L, 2) ? to_json(L, 2, 0) : cJSON_CreateObject();
+    if (!cJSON_IsObject(a)) {
+        cJSON_Delete(a);
+        return luaL_error(L, "bot.tool: the arguments must be a table of names and values");
+    }
+    char what[120];
+    snprintf(what, sizeof(what), "bot.tool %s", name);
+    char *r = call_tool(L, what, name, a);
+    lua_pushstring(L, r);
+    free(r);
+    return 1;
+}
+
 /* bot.secret(name): a key from .env or the sealed vault (never return it to the model) */
 static int l_secret(lua_State *L)
 {
@@ -826,8 +843,8 @@ bl_state *bl_open(const bl_io *io)
     static const luaL_Reg http[] = {{"get", l_http_get}, {"post", l_http_post}, {NULL, NULL}};
     set_funcs(L, "fs", fs);
     set_funcs(L, "http", http);
-    static const luaL_Reg top[] = {{"today", l_today}, {"shell", l_shell},   {"mcp", l_mcp},
-                                   {"agent", l_agent}, {"secret", l_secret}, {NULL, NULL}};
+    static const luaL_Reg top[] = {{"today", l_today}, {"shell", l_shell},   {"mcp", l_mcp},  {"agent", l_agent},
+                                   {"secret", l_secret}, {"tool", l_tool}, {NULL, NULL}};
     luaL_setfuncs(L, top, 0);
     lua_setglobal(L, "bot");
     lua_sethook(L, bl_hook, LUA_MASKCOUNT, 10000);
@@ -984,7 +1001,7 @@ static void scan_uses(const char *body, size_t n, char *out, size_t cap)
         {"bot.fs.read", "reads files"},   {"bot.fs.list", "reads files"},  {"bot.fs.exists", "reads files"},
         {"bot.fs.write", "writes files"}, {"bot.fs.append", "writes files"}, {"bot.today", "the clock"},
         {"bot.http", "the network"},      {"bot.shell", "commands"},      {"bot.mcp", "MCP servers"},
-        {"bot.agent", "other agents"},    {"bot.secret", "secrets"},
+        {"bot.agent", "other agents"},    {"bot.secret", "secrets"},     {"bot.tool", "tools"},
     };
     out[0] = '\0';
     for (size_t i = 0; i < sizeof(pat) / sizeof(pat[0]); i++) {
@@ -1438,6 +1455,27 @@ char *bl_call_plain(bl_state *s, const char *name)
         err = strdup(lua_tostring(s->L, -1) ? lua_tostring(s->L, -1) : "failed");
     }
     lua_settop(s->L, 0);
+    return err;
+}
+
+char *bl_call_score(bl_state *s, const char *name, double *passed, double *total, char **details)
+{
+    int top = lua_gettop(s->L);
+    char *err = NULL;
+    *details = NULL;
+    lua_getglobal(s->L, name);
+    if (pcall_limited(s, 0, 3, BL_CALL_S) != LUA_OK) {
+        err = strdup(lua_tostring(s->L, -1) ? lua_tostring(s->L, -1) : "failed");
+    } else if (!lua_isnumber(s->L, top + 1) || !lua_isnumber(s->L, top + 2) || lua_tonumber(s->L, top + 2) <= 0) {
+        err = strdup("a score_ function returns passed, total (numbers, total > 0) and optionally a text of details");
+    } else {
+        *passed = lua_tonumber(s->L, top + 1);
+        *total = lua_tonumber(s->L, top + 2);
+        if (lua_type(s->L, top + 3) == LUA_TSTRING) {
+            *details = strdup(lua_tostring(s->L, top + 3));
+        }
+    }
+    lua_settop(s->L, top);
     return err;
 }
 

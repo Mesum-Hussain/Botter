@@ -40,6 +40,9 @@
  *   --run ["task"]     Batch: one task per stdin line (or the one given), each in a fresh conversation;
  *                      stdout gets one JSON line per task {"input","reply"[,"error"]} (the reply alone for a
  *                      single task); everything else goes to stderr, with token usage at the end.
+ *   --eval [dir]       Run the agent's eval cases (dir/ *.json, default evals/) against the real model, each
+ *                      in a fresh conversation: one JSON line per case on stdout, a summary and the token usage
+ *                      on stderr; exit status 1 when a case fails.
  * Remote users cannot type /commands, are never asked for keys (the model connection is the
  * saved one, or BOTTER_BASE_URL / BOTTER_API_KEY / BOTTER_MODEL in .env), and risky actions are
  * asked through the protocol (ACP) or refused (A2A, MCP).
@@ -47,7 +50,9 @@
 int  front_init(int argc, char **argv); /* 1 if a front end is on */
 int  front_active(void);
 int  front_remote(void);          /* --acp, --a2a, --mcp or --run */
-int  front_batch(void);           /* --run */
+int  front_batch(void);           /* --run or --eval */
+const char *front_eval_dir(void); /* --eval [dir]: the folder of cases, else NULL */
+void front_result(const char *line); /* --run / --eval: one line on the results stream (stdout) */
 int  front_take_cmd(void);        /* 1 if the line just read is the front end's own command (/new) */
 void front_set_card(void *card);  /* cJSON: name, description, version, skills (takes it) */
 /* Emit a record: event name, then key/value string pairs, NULL-terminated. */

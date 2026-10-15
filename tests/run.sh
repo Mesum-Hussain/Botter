@@ -752,6 +752,61 @@ printf -- '--- Forecast.\n---@param n number  days\nfunction forecast(n)\n  -- S
 check "functions: a placeholder note is a warning" "$T/build.log" 'forecast looks unfinished \("simplified"\)'
 check "functions: a loop that does nothing is a warning" "$T/build.log" "forecast has a loop that does nothing"
 
+# scores: a test file's score_ functions measure the agent against examples; the build reports them
+mkdir -p "$T/fn/functions/tests"
+printf 'function score_examples()\n  return 3, 4, "example 2: got 5, expected 6"\nend\nfunction score_broken()\n  return "no"\nend\n' >"$T/fn/functions/tests/score.lua"
+"$PACK" check "$T/fn" "$CORE" >"$T/build.log" 2>&1
+check "scores: the build reports passed/total" "$T/build.log" "packer: score examples: 3/4 \(75%\)"
+check "scores: with what differs" "$T/build.log" "^example 2: got 5, expected 6$"
+check "scores: one that returns no numbers is an error" "$T/build.log" "score_broken FAILED: a score_ function returns passed, total"
+rm "$T/fn/functions/tests/score.lua"
+# bot.tool: a function uses one of the agent's tools the way the model would
+printf -- '--- List the folder with the fs_list tool.\nfunction listing()\n  return bot.tool("fs_list", { path = "." })\nend\n' >"$T/fn/functions/viatool.lua"
+build "$T/fn" "$T/fn.bot"
+check "bot.tool: reported as reaching tools" "$T/build.log" "listing \(tools\)"
+tool_call listing '{}'
+echo "x" >"$T/fnws/seen-by-tool.txt"
+drive "$T/fn.bot" "$T/fnws"
+check "bot.tool: the tool's answer comes back to the function" "$T/rec/tool.txt" "seen-by-tool.txt"
+rm "$T/fn/functions/viatool.lua"; build "$T/fn" "$T/fn.bot"
+
+# --eval: cases in evals/*.json against the model, graded by expectations or the agent's own Lua check
+mkdir -p "$T/ev/functions" "$T/ev/evals"; echo "x" >"$T/ev/agent.md"
+cat >"$T/ev/functions/judge.lua" <<'EOF'
+function says_done(run)
+  local r = bot.json.decode(run)
+  if r.reply ~= "done" then
+    return "expected done, got " .. r.reply .. " (case data: " .. tostring(r.data and r.data.note) .. ")"
+  end
+end
+function says_more(run)
+  return "the reply is too short"
+end
+EOF
+build "$T/ev" "$T/ev.bot"
+cat >"$T/ev/evals/cases.json" <<'EOF'
+[
+  {"name": "answers", "input": "list it", "expect": {"contains": ["done"], "tools_used": ["fs_list"], "regex": "^d.ne$"}},
+  {"name": "wrong text", "input": "list it", "expect": {"not_contains": ["done"], "equals": "finished"}},
+  {"name": "too many calls", "input": "list it", "expect": {"max_tool_calls": 0, "tools_not_used": ["fs_list"]}},
+  {"name": "lua judge", "input": "list it", "check": "says_done", "data": {"note": "n1"}},
+  {"name": "lua judge fails", "input": "list it", "check": "says_more"},
+  {"name": "cannot fail", "input": "list it"}
+]
+EOF
+tool_call fs_list '{}'
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/ev/.env"
+(cd "$T/ev" && timeout 60 "$T/ev.bot" --eval >"$T/out" 2>"$T/err"; echo "exit $?" >>"$T/err")
+check "--eval: one JSON line per case, a passing one" "$T/out" '"name":"answers","passed":true'
+check "--eval: contains/equals failures say what" "$T/out" 'the reply contains \\"done\\".*the reply is not exactly \\"finished\\"'
+check "--eval: tool-call limits are graded" "$T/out" 'fs_list was called.*1 tool calls, at most 0 expected'
+check "--eval: the agent's Lua check passes" "$T/out" '"name":"lua judge","passed":true'
+check "--eval: a check's reason comes back" "$T/out" 'says_more: the reply is too short'
+check "--eval: a case that could never fail is refused" "$T/out" 'could never fail'
+check "--eval: the summary and the usage on stderr" "$T/err" '^eval: 2/6 passed$'
+check "--eval: a failing case fails the run" "$T/err" '^exit 1$'
+rm -f "$T/ev/.env"
+
 # on_turn_end: an agent's hook sends the model back to work, until it says the turn may end
 mkdir -p "$T/hook/functions" "$T/hookws"; echo "x" >"$T/hook/agent.md"
 cat >"$T/hook/functions/hook.lua" <<'EOF'
