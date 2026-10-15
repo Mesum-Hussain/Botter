@@ -1,6 +1,6 @@
 # BOTCORE + BOTTER: SPEC + STATUS (AI-consumed; terse by design)
 
-Updated: 2026-10-15 | Version 0.2.0 (released; binary refreshed in place) | Lang: C (gnu11) | Target: x86_64 Linux (dev: Fedora 44, kernel 7.2, SELinux enforcing, Landlock + userns on, musl-gcc)
+Updated: 2026-10-15 (late) | Version 0.2.0 (released; binary refreshed in place) | Lang: C (gnu11) | Target: x86_64 Linux (dev: Fedora 44, kernel 7.2, SELinux enforcing, Landlock + userns on, musl-gcc)
 State: sub-agents, MCP (both directions, URL + command), A2A, ACP and the sealed vault are done and pushed. DONE 2026-10-15 (not yet committed): Lua functions replaced FWL (§3), batch mode --run, image_view, token usage, temperature/seed. NEXT: the HackerRank Orchestrate practice run (§9).
 Legend: [D] = owner decided
 
@@ -55,6 +55,19 @@ Goal: Botter builds an agent from a problem statement + data on its own, with a 
 - --eval [dir]: evals/*.json cases (one or a list per file): input + expect {contains, not_contains, equals, regex, tools_used, tools_not_used, max_tool_calls} and/or check = a Lua function(json of {input, reply, tools, data}) returning nil or why. Fresh conversation per case, one JSON line per case, summary + usage on stderr, exit 1 on a failure; a case that cannot fail is refused.
 - Run 8 (all checks on): every shortcut caught (open plan, no score, answer-key read, mocked test); honest final score 0/25 after 88 calls / 3M input tokens. The harness is honest now; the gap left is the model.
 - Measured on September 2026 (5 runs, flash-lite): no questions, explores data, uses the Lua check, builds a .bot (16-35 calls). But the model takes shortcuts: stubs with fixed results, ticks plan items it did not do, once copied sample_requests.csv into output.csv. The harness catches marked stubs, not unmarked ones or copied answers. Open: a stronger signal (score against the brief's examples inside the hook), and trying a stronger model for building.
+
+## 3c. NEXT SESSION [D 2026-10-15]: harness architecture (performance + results), not new integrations
+Owner's focus: improve the harness itself for better results and lower cost; widening integrations waits.
+Baseline to measure every change against: run 8 on the September 2026 brief (check/by-botter9, trace9.json): flash-lite, 88 calls, 3.03M input / 17.6k output tokens, honest score 0/25. Final context ~220k chars: tool results 135.7k (62%; fs_read 94k = raw 32 KB slices of the 2.8 MB events CSV), tool-call args 60k (27%; whole files via fs_write), system 10.7k, model text 6.7k. Every call resends the whole history, so cost ~ calls x context.
+Plan, in order of payoff:
+1. Fade old tool traffic: past a context threshold, replace large old tool results and already-written file contents with one-line stubs ("[fs_read dataset/x.csv: 32 KB, removed; read it again if needed]"). Batch it (only at the threshold) so provider prompt caching keeps working between batches. Expect 3-5x fewer input tokens and a cleaner context.
+2. Pin the task: history trimming (CHAT_HIST_MAX_BYTES, drops whole oldest turns) can drop the original brief. Keep the first user message plus a short summary of what was dropped.
+3. Data reads: fs_read on a large file returns size, line count and the first lines with a hint (head/grep/a Lua function) instead of 32 KB of raw rows.
+4. config.json "reasoning": "low|medium|high" -> reasoning_effort on every request; Botter builds with it.
+5. Focused feedback: on a low score the hook sends one failing example in full detail at a time, not a 6000-char report.
+Also open: the model's final report can contradict its score (run 8 said "fully functional" at 0/25): the report should quote the measured score, not judge it. Try a stronger builder model on the same brief to separate harness from model.
+Ideas noted for later (integrations, on hold): OpenAI-compatible --serve (/v1/chat/completions); one listener for A2A + MCP + chat; each remote A2A skill as its own tool; recover tool calls written as text (<tool_call>/JSON) for local models; large tool output to a temp file instead of cutting at 32 KB; richer ACP (commands, model switch, sub-agent progress); ACP agents by command as sub-agents.
+Local research material lives in inspiration/ (gitignored); never name it in commits or docs.
 
 ## 4. PROTOCOLS [D 2026-10-11]
 All in botcore, in C; no bridge. Tested against the peers in tests/ plus the real cases noted.
