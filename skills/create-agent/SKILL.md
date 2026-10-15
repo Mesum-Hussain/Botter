@@ -22,9 +22,9 @@ Follow these steps in order. Keep the conversation short.
 4. Write one SKILL.md per recurring task the agent should do well (same skill file explains how). Skip skills for trivial agents.
    Only when a job needs its own persona and a fresh conversation (a researcher, a critic, a writer whose work the main agent then uses), add a sub-agent in agents/<name>/agent.md (see project-layout). Most agents need none.
 
-5. Only if the agent really needs capabilities that shell commands and file tools cannot give (a special parser, a calculation, a local program, network access), add tools. Read skills/write-tool/SKILL.md. Prefer a script tool over a compiled one unless the user wants a native binary. The agent's own LLM does the thinking (analysing, writing, deciding, replying); tools only do I/O and computation. Do not write a tool that calls an LLM or orchestrates the whole job in a script: put the workflow in a skill and let the agent run it step by step.
+5. Exact work the model is bad at (calculations, dates, joining or checking data, reading and writing CSV/JSON, fixed HTTP calls) goes in Lua functions with tests: read skills/write-functions/SKILL.md. Only when Lua cannot do it, add a tool (skills/write-tool/SKILL.md): a shell script when it needs a program on the machine, Python or Node only for a library with no other way. The agent's own LLM does the thinking (analysing, writing, deciding, replying); functions and tools only do exact work and I/O. Do not write one that calls an LLM or does the whole job in code: the steps of the job go in agent.md or a skill, and the model runs them, calling functions where they must be exact.
 
-6. If the agent has more than one step, write FLOW.fwl: the session flow in FWL, naming the agent's skills and tools exactly (read skills/write-flow/SKILL.md).
+6. If the agent has more than one step, write them in agent.md (a short "How a session goes" list) or in a skill, naming the functions and tools exactly.
 
 7. Build: read skills/build-agent/SKILL.md. Run agent_build with dry_run=true, fix all errors, then agent_build, then agent_inspect.
 
@@ -37,7 +37,7 @@ Follow these steps in order. Keep the conversation short.
 - No mocks, placeholders or hard-coded responses anywhere. If a real integration needs something you do not have (an API key, a running service), make the tool fail with a clear message saying what is missing.
 - Always write config.json: name, display_name, version "0.1.0", a one-sentence description, the skills and tools to compile in, and the programs they need in "requires" (see project-layout, section config.json).
 - Offline agent (only when asked): "internet": false in config.json; agent.md says it works offline. If a tool there has "network": true, agent.md names it and says the user is asked to allow it at startup.
-- Test every tool by hand with realistic stdin JSON before building (see write-tool). A build only checks file formats, not that tools work.
+- Test every tool with tool_test before building (see write-tool), and give every function tests in functions/tests (see write-functions): the build runs them.
 
 ## Iterating
 After the first build, the user usually wants changes. Read each file before changing it and edit it in place: change only what the request needs and never drop an action, parameter, step or rule that still belongs (rewriting a tool from memory loses working features). Edit the files, bump "version" in config.json (PATCH for fixes, MINOR for new abilities, MAJOR for changed behaviour), then dry_run and build again. The new build overwrites the old .bot of the same name.

@@ -19,7 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { F_OFF, F_UI, F_ACP, F_A2A, F_MCP };
+enum { F_OFF, F_UI, F_ACP, F_A2A, F_MCP, F_RUN };
 static int g_on; /* F_* */
 
 /* --acp / --a2a: the request being answered and the conversation it belongs to */
@@ -34,8 +34,12 @@ static int         g_lsock = -1, g_conn = -1, g_v03; /* A2A: listener, caller, c
 static const char *g_token;
 static char       *g_acc;                 /* A2A: the answer so far */
 static char        g_host[200];
+static const char *g_task;                /* --run "task": the only one */
+static char       *g_input, *g_err;       /* --run: the task in flight, and why it failed */
 
 int front_remote(void) { return g_on >= F_ACP; }
+
+int front_batch(void) { return g_on == F_RUN; }
 
 int front_take_cmd(void)
 {
@@ -134,6 +138,13 @@ int front_init(int argc, char **argv)
         g_on = F_MCP;
         return 1;
     }
+    if (argc > 1 && !strcmp(argv[1], "--run")) { /* batch: tasks in, results out, nobody to ask */
+        g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        dup2(STDERR_FILENO, STDOUT_FILENO); /* stdout carries the results only; notes go to stderr */
+        g_task = argc > 2 ? argv[2] : NULL;
+        g_on = F_RUN;
+        return 1;
+    }
     const char *v = getenv("BOTCORE_FRONTEND");
     if (!v || strcmp(v, "1") != 0) {
         return 0;
@@ -227,6 +238,14 @@ static void remote_event(const cJSON *o)
     const char *ev = jstr(o, "ev"), *text = jstr(o, "text");
     if (!strcmp(ev, "permission")) {
         snprintf(g_perm, sizeof(g_perm), "%s", text);
+    } else if (!strcmp(ev, "error")) {
+        free(g_err);
+        g_err = strdup(text);
+    } else if (g_on == F_RUN) {
+        if (!strcmp(ev, "reply")) { /* the result is the final answer, not the notes before tool calls */
+            free(g_acc);
+            g_acc = strdup(text);
+        }
     } else if (g_on == F_A2A || g_on == F_MCP) {
         if ((!strcmp(ev, "reply") || !strcmp(ev, "text")) && *text) { /* the answer is the text, whole */
             char *n = NULL;
@@ -306,10 +325,43 @@ static void a2a_error(int c, const cJSON *id, int code, const char *msg)
 }
 
 /* The request in flight gets its answer: the turn is over. */
+/* --run: write all of s to the results stream */
+static void out_all(const char *s)
+{
+    for (size_t off = 0, l = strlen(s); off < l;) {
+        ssize_t w = write(g_out, s + off, l - off);
+        if (w <= 0) {
+            break;
+        }
+        off += (size_t)w;
+    }
+}
+
 static void finish_request(void)
 {
     busy(0);
-    if (g_on == F_ACP && g_rid) {
+    if (g_on == F_RUN && g_input) {
+        if (g_task) { /* one task: the answer as it is */
+            out_all(g_acc ? g_acc : "");
+            out_all("\n");
+        } else { /* one JSON line per task */
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddStringToObject(o, "input", g_input);
+            cJSON_AddItemToObject(o, "reply", g_acc ? cJSON_CreateString(g_acc) : cJSON_CreateNull());
+            if (!g_acc || g_err) {
+                cJSON_AddStringToObject(o, "error", g_err ? g_err : "no answer");
+            }
+            char *line = cJSON_PrintUnformatted(o);
+            out_all(line ? line : "{}");
+            out_all("\n");
+            free(line);
+            cJSON_Delete(o);
+        }
+        free(g_input);
+        g_input = NULL;
+        free(g_err);
+        g_err = NULL;
+    } else if (g_on == F_ACP && g_rid) {
         cJSON *r = cJSON_CreateObject();
         cJSON_AddStringToObject(r, "stopReason", g_cancel ? "cancelled" : "end_turn");
         acp_result(g_rid, r, 0, NULL);
@@ -726,6 +778,42 @@ static int a2a_next(int (*idle)(void), char **out)
     }
 }
 
+/* --run: the next task, each in a conversation of its own. */
+static int run_next(char **out)
+{
+    static int done;
+    char sess[32];
+    if (g_task) {
+        if (done++) {
+            return TERM_EOF;
+        }
+        g_input = strdup(g_task);
+        snprintf(sess, sizeof(sess), "run-1");
+        return take_prompt(sess, strdup(g_task), out);
+    }
+    for (;;) {
+        char *line = NULL;
+        int r = read_line(-1, &line);
+        if (r == -2 || r == 1) {
+            continue;
+        }
+        if (r < 0) {
+            return TERM_EOF;
+        }
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\r' || line[n - 1] == ' ' || line[n - 1] == '\t')) {
+            line[--n] = '\0';
+        }
+        if (!n) {
+            free(line);
+            continue;
+        }
+        g_input = strdup(line);
+        snprintf(sess, sizeof(sess), "run-%d", ++g_seq);
+        return take_prompt(sess, line, out);
+    }
+}
+
 static int remote_readline(const char *prompt, int (*idle)(void), char **out)
 {
     if (!strstr(prompt, ">>")) { /* not the chat prompt */
@@ -743,6 +831,9 @@ static int remote_readline(const char *prompt, int (*idle)(void), char **out)
         return TERM_LINE;
     }
     finish_request();
+    if (g_on == F_RUN) {
+        return run_next(out);
+    }
     return g_on == F_ACP ? acp_next(idle, out) : g_on == F_MCP && g_lsock < 0 ? mcp_next(idle, out) : a2a_next(idle, out);
 }
 

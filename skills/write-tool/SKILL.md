@@ -7,7 +7,7 @@ description: How to add a custom tool to an agent: protocol, descriptor format, 
 
 A tool is an external program embedded in the .bot and started by the agent when the LLM calls it. There is no compiler in botter: you write the source, the user (or you, with shell_exec, if the machine has the toolchain) produces the executable.
 
-Only add a tool when file tools and shell commands are not enough.
+Only add a tool when file tools, shell commands and Lua functions are not enough. Exact work goes in a Lua function first (write-functions): it needs nothing installed. A tool is for a program on the machine: a shell script (sqlite3, ffmpeg, git ...) before Python or Node, which are the last resort for a library with no other way. Every program it needs goes in config.json "requires".
 
 ## Protocol
 - The call arguments arrive on STDIN as one JSON object, e.g. {"city":"Oslo"}.
@@ -17,7 +17,7 @@ Only add a tool when file tools and shell commands are not enough.
 - Files (Landlock, where the kernel supports it): it may write only inside the working directory, /tmp, /var/tmp, ~/.cache and ~/.npm; it may read and run system directories and programs on $PATH. The rest of $HOME (~/.ssh, ~/.config, ...) is invisible: "Permission denied". Keep a tool's data and config in the working directory. Default timeout 60 s (descriptor timeout_s, max 600).
 - Command-line arguments ($1, sys.argv) are always EMPTY. A tool that reads argv instead of stdin JSON is broken. A tool that calls another of the agent's tools must pass it JSON on stdin too.
 - Never ship mock, placeholder or hard-coded results. Never write a tool that calls an LLM: the agent's own model does the reasoning.
-- Never parse what a person wrote (split on " in ", keyword lists, regexes for intent or names): that is understanding, the agent's own model does it. In FLOW.fwl: `Work out the city named in {clients} and call it {city}.` Tools take clean, structured arguments.
+- Never parse what a person wrote (split on " in ", keyword lists, regexes for intent or names): that is understanding, the agent's own model does it and passes the tool clean, structured arguments.
 - Read stdin fully before answering. Do not prompt the user: stdin is not a terminal.
 
 ## Files for a tool called <name>

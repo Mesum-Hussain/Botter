@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "chat.h"
 #include "guard.h"
 #include "tools.h"
 
@@ -236,6 +237,57 @@ static bool fs_write(const cJSON *in, char *result, size_t rl)
     return true;
 }
 
+#define IMAGE_MAX (20u * 1024 * 1024)
+
+/* Show a picture to the model: the bytes go into the conversation for this turn (chat_attach_image). */
+static bool image_view(const cJSON *in, char *result, size_t rl)
+{
+    const char *path = str_arg(in, "path");
+    char res[PATH_MAX];
+    if (!path) {
+        snprintf(result, rl, "'path' (string) is required");
+        return false;
+    }
+    if (access_path("image_view", path, "read", res, result, rl) != 0) {
+        return false;
+    }
+    FILE *f = fopen(res, "rb");
+    struct stat st;
+    if (!f || fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
+        snprintf(result, rl, "cannot open '%s': %s", path, f ? "not a regular file" : strerror(errno));
+        if (f) {
+            fclose(f);
+        }
+        return false;
+    }
+    if ((size_t)st.st_size > IMAGE_MAX) {
+        fclose(f);
+        snprintf(result, rl, "'%s' is larger than %u MB", path, IMAGE_MAX >> 20);
+        return false;
+    }
+    unsigned char *d = malloc((size_t)st.st_size + 1);
+    size_t n = d ? fread(d, 1, (size_t)st.st_size, f) : 0;
+    fclose(f);
+    const char *mime = n >= 8 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8)                ? "image/png"
+                       : n >= 3 && !memcmp(d, "\xff\xd8\xff", 3)                      ? "image/jpeg"
+                       : n >= 6 && (!memcmp(d, "GIF87a", 6) || !memcmp(d, "GIF89a", 6)) ? "image/gif"
+                       : n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)  ? "image/webp"
+                                                                                       : NULL;
+    if (!mime) {
+        free(d);
+        snprintf(result, rl, "'%s' is not a PNG, JPEG, GIF or WEBP image", path);
+        return false;
+    }
+    int ok = chat_attach_image(path, mime, d, n) == 0;
+    free(d);
+    if (!ok) {
+        snprintf(result, rl, "could not attach '%s'", path);
+        return false;
+    }
+    snprintf(result, rl, "%s (%s, %zu bytes) is attached below: look at it before you answer.", path, mime, n);
+    return true;
+}
+
 const tool_t TOOLS_FS[] = {
     {"fs_list",
      "List the entries of a directory (default: the working directory). Directories end with '/'. "
@@ -256,5 +308,10 @@ const tool_t TOOLS_FS[] = {
      "\"append\":{\"type\":\"boolean\",\"description\":\"Append instead of overwrite, default false\"}},"
      "\"required\":[\"path\",\"content\"]}",
      fs_write},
+    {"image_view",
+     "Look at an image file (PNG, JPEG, GIF or WEBP): it is shown to you right after this call, for this "
+     "turn only. Use it to read numbers, text or details in pictures, scans and screenshots.",
+     "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+     image_view},
 };
 const size_t TOOLS_FS_N = sizeof(TOOLS_FS) / sizeof(TOOLS_FS[0]);

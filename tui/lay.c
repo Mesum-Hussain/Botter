@@ -613,7 +613,7 @@ static void lay_inline(tlines_t *L, const char *s, size_t n, tsty_t base, int wi
 
 /* ---------------- code highlighting ---------------- */
 
-enum { LG_NONE, LG_C, LG_HASH, LG_DASH, LG_DIFF, LG_JSON, LG_MD, LG_FWL };
+enum { LG_NONE, LG_C, LG_HASH, LG_DASH, LG_DIFF, LG_JSON, LG_MD };
 
 static int lang_of(const char *l, size_t n)
 {
@@ -656,9 +656,6 @@ static int lang_of(const char *l, size_t n)
     if (!strcmp(b, "md") || !strcmp(b, "markdown")) {
         return LG_MD;
     }
-    if (!strcmp(b, "fwl") || !strcmp(b, "oml")) {
-        return LG_FWL;
-    }
     return LG_NONE;
 }
 
@@ -691,95 +688,6 @@ static int is_kw(const char *s, size_t n)
 
 static int id_char(char ch) { return isalnum((unsigned char)ch) || ch == '_' || (unsigned char)ch >= 0x80; }
 
-/*
- * FWL (FLOW.fwl): the few UPPERCASE keywords (ASK, IF ...:, FOR EACH,
- * IS EQUAL TO ..., STEP n:), $variables, "strings", numbers, list markers,
- * headings and frontmatter. Everything else is plain English.
- */
-static int fwl_kw(const char *s, size_t n)
-{
-    static const char *const KW[] = {"STEP", "ASK", "IF", "ELSE", "FOR", "EACH", "WHILE", "RETRY", "RETURN", NULL};
-    for (int k = 0; KW[k]; k++) {
-        if (strlen(KW[k]) == n && strncmp(KW[k], s, n) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void fwl_line(tcells_t *c, const char *s, size_t n)
-{
-    uint32_t B = T.code_bg;
-    tsty_t plain = sty_bg(T.text, B, 0), kw = sty_bg(T.kw, B, TA_BOLD), str = sty_bg(T.str, B, 0),
-           num = sty_bg(T.num, B, 0), head = sty_bg(T.fn, B, TA_BOLD), var = sty_bg(T.info, B, 0),
-           mut = sty_bg(T.muted, B, 0);
-    size_t i = 0;
-    while (i < n && s[i] == ' ') {
-        i++;
-    }
-    tc_add(c, s, i, plain);
-    if (i < n && ((s[i] == '#' && i + 1 < n && s[i + 1] == ' ') || (n - i >= 3 && !strncmp(s + i, "---", 3)))) { /* heading / frontmatter fence */
-        tc_add(c, s + i, n - i, s[i] == '#' ? head : mut);
-        return;
-    }
-    size_t j = i;
-    while (j < n && isdigit((unsigned char)s[j])) {
-        j++;
-    }
-    if (j > i && j < n && s[j] == '.') { /* "1." list marker */
-        tc_add(c, s + i, j + 1 - i, mut);
-        i = j + 1;
-    } else if (i + 1 < n && s[i] == '-' && s[i + 1] == ' ') {
-        tc_add(c, s + i, 1, mut);
-        i++;
-    }
-    while (i < n) {
-        char ch = s[i];
-        if (ch == '"') {
-            size_t e = i + 1;
-            while (e < n && s[e] != '"') {
-                e += s[e] == '\\' && e + 1 < n ? 2 : 1;
-            }
-            e = e < n ? e + 1 : n;
-            tc_add(c, s + i, e - i, str);
-            i = e;
-        } else if (ch == '{' && memchr(s + i, '}', n - i) && i + 1 < n && (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
-            size_t e = (size_t)((const char *)memchr(s + i, '}', n - i) - s) + 1; /* {value} */
-            tc_add(c, s + i, e - i, var);
-            i = e;
-        } else if ((ch == '$' || ch == '#' || ch == '@') && (i == 0 || !isalnum((unsigned char)s[i - 1])) && i + 1 < n &&
-                   (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')) {
-            size_t e = i + 1; /* $tool, #skill, @agent */
-            while (e < n && (isalnum((unsigned char)s[e]) || s[e] == '_' ||
-                             (s[e] == '-' && e + 1 < n && isalnum((unsigned char)s[e + 1])))) {
-                e++;
-            }
-            tc_add(c, s + i, e - i, head);
-            i = e;
-        } else if (isdigit((unsigned char)ch) && (i == 0 || !id_char(s[i - 1]))) {
-            size_t e = i;
-            while (e < n && isdigit((unsigned char)s[e])) {
-                e++;
-            }
-            tc_add(c, s + i, e - i, num);
-            i = e;
-        } else if (id_char(ch)) {
-            size_t e = i;
-            while (e < n && id_char(s[e])) {
-                e++;
-            }
-            int k = fwl_kw(s + i, e - i);
-            tc_add(c, s + i, e - i, k ? kw : plain);
-            i = e;
-        } else {
-            int l;
-            tu_decode(s + i, n - i, &l);
-            tc_add(c, s + i, (size_t)l, plain);
-            i += (size_t)l;
-        }
-    }
-}
-
 /* One source line -> cells. *blk: inside a C block comment. */
 static void code_line(tcells_t *c, const char *s, size_t n, int lang, int *blk)
 {
@@ -800,10 +708,6 @@ static void code_line(tcells_t *c, const char *s, size_t n, int lang, int *blk)
     }
     if (lang == LG_NONE || lang == LG_MD) {
         tc_add(c, s, n, plain);
-        return;
-    }
-    if (lang == LG_FWL) {
-        fwl_line(c, s, n);
         return;
     }
     size_t i = 0;
@@ -1163,14 +1067,6 @@ void lay_markdown(tlines_t *L, const char *md, int width)
             size_t langn = 0;
             while (lang + langn < e && !isspace((unsigned char)lang[langn]) && lang[langn] != '{') {
                 langn++;
-            }
-            /* "```python fwl": highlighted as Python by GitHub/editors, as FWL here */
-            for (const char *w = lang + langn; w + 3 <= e; w++) {
-                if (isspace((unsigned char)w[-1]) && !strncmp(w, "fwl", 3) && (w + 3 == e || isspace((unsigned char)w[3]))) {
-                    lang = "fwl";
-                    langn = 3;
-                    break;
-                }
             }
             size_t j = i + 1;
             while (j < nl) {

@@ -18,7 +18,6 @@
  *     {"ev":"tool","name":..,"args":..,"status":..} / {"ev":"tool_result","text":..}
  *     {"ev":"delta","kind":"text"|"thinking","text":..}  streamed piece of a reply
  *     {"ev":"mode","mode":"plan"|"build"}             Plan/Build mode
- *     {"ev":"flow"}                                   the agent's FLOW.md flow starts
  * UI -> botcore (stdin, one JSON object per line, answers a prompt):
  *     {"line":<text>} | {"eof":true} | {"intr":true}
  *   Interrupting work = SIGINT to the botcore process.
@@ -38,13 +37,17 @@
  *                      client (a coding agent, an editor). Without a port the client starts the
  *                      agent and talks over stdin/stdout; with one it listens for Streamable HTTP
  *                      like --a2a does (MCP_TOKEN is the bearer token).
+ *   --run ["task"]     Batch: one task per stdin line (or the one given), each in a fresh conversation;
+ *                      stdout gets one JSON line per task {"input","reply"[,"error"]} (the reply alone for a
+ *                      single task); everything else goes to stderr, with token usage at the end.
  * Remote users cannot type /commands, are never asked for keys (the model connection is the
  * saved one, or BOTTER_BASE_URL / BOTTER_API_KEY / BOTTER_MODEL in .env), and risky actions are
  * asked through the protocol (ACP) or refused (A2A, MCP).
  */
 int  front_init(int argc, char **argv); /* 1 if a front end is on */
 int  front_active(void);
-int  front_remote(void);          /* --acp, --a2a or --mcp */
+int  front_remote(void);          /* --acp, --a2a, --mcp or --run */
+int  front_batch(void);           /* --run */
 int  front_take_cmd(void);        /* 1 if the line just read is the front end's own command (/new) */
 void front_set_card(void *card);  /* cJSON: name, description, version, skills (takes it) */
 /* Emit a record: event name, then key/value string pairs, NULL-terminated. */

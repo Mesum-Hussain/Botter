@@ -197,7 +197,7 @@ typedef struct {
 } msrv_t;
 
 typedef struct {
-    char    fn[65]; /* <server>_<tool>: the name the model and FWL use */
+    char    fn[65]; /* <server>_<tool>: the name the model and bot.mcp use */
     char   *tool;
     msrv_t *srv;
     cJSON  *def;

@@ -4,7 +4,7 @@
 
 ### `.bot` is a file format for agents.<br>One agent, one file, nothing else to ship.
 
-**396 KB** · **starts in 0.4 ms** · **nothing to install** · **runs on any x86-64 Linux**
+**532 KB** · **starts in 0.4 ms** · **nothing to install** · **runs on any x86-64 Linux**
 
 </div>
 
@@ -19,10 +19,10 @@ Everything else we make got a file format long ago. A document is a `.pdf`. A so
 An agent is now a `.bot`:
 
 ```
-lead-outreach.bot      one file, about 400 KB
+lead-outreach.bot      one file, about 530 KB
 ```
 
-That file is the whole agent: its persona, its flow, its skills, its sub-agents, its tools, and everything it needs to think, talk to a model and run them. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
+That file is the whole agent: its persona, its skills, its functions, its sub-agents, its tools, and everything it needs to think, talk to a model and run them. No `requirements.txt`, no virtualenv, no Node version to match, no 1.2 GB container with LangChain buried somewhere inside. You copy it to a server and run it. It starts before you lift your finger off the Enter key.
 
 And unlike a `.pdf`, a `.bot` needs no reader. Nothing has to be installed where it lands, because the file is also the program.
 
@@ -32,10 +32,10 @@ You don't write a `.bot` by hand. You write an agent as a folder of plain text:
 
 ```
 lead-outreach/
-  agent.md       who it is
-  FLOW.fwl       what it does, step by step
-  skills/        how it does it
-  tools/         the jobs it can't do with words alone
+  agent.md       who it is and how it works
+  skills/        playbooks for its tasks
+  functions/     the exact part, in Lua: sums, dates, data files, checks
+  tools/         programs it runs, when Lua is not enough
 ```
 
 and Botter turns the folder into the file. Botter is the Markdown-first agent framework that writes `.bot` files: you describe an agent in Markdown and plain English, and it packs that into a single statically linked executable with the whole runtime inside.
@@ -46,9 +46,10 @@ Markdown is where you start, not where the agent's power stops. The same single 
 
 | You want | Botter gives you |
 |---|---|
-| Multi-step work that happens in order, every time | **FWL** flows: plain sentences inside loops, branches and retries that an interpreter follows exactly |
-| A team, not one agent | **Sub-agents**, each with its own persona, handed work by the flow or by the main agent |
-| Real capabilities | **Tools** in any language, plus file, shell and scheduling tools built in |
+| Exact work that comes out the same every time | **Functions** in Lua: documented in plain English, tested at build time, run inside the agent |
+| A team, not one agent | **Sub-agents**, each with its own persona, handed work by the main agent or by a function |
+| Real capabilities | **Tools** in any language, plus file, shell, image and scheduling tools built in |
+| One job over thousands of records | **Batch mode**: one task per line, a fresh conversation for each, JSON lines out, tokens counted |
 | Other people's tools | **MCP** servers, unmodified: by URL, or started by command the way Claude Code and opencode run them |
 | Other people's agents | **A2A**, both calling out and being called |
 | Your agent as a tool for other agents | **MCP** again, the other way round: Claude Code, opencode or any MCP client can call it |
@@ -56,7 +57,7 @@ Markdown is where you start, not where the agent's power stops. The same single 
 | Safety on a real machine | A kernel **sandbox**, a network kill switch, and approval before anything destructive |
 | Keys that travel with the agent | An optional password-**sealed vault** inside the file |
 
-All of it fits in about 400 KB, in one process, with no framework to carry along.
+All of it fits in about 530 KB, in one process, with no framework to carry along.
 
 ## How small is small?
 
@@ -64,7 +65,7 @@ Same laptop, comparable agents:
 
 | | Botter agent | OpenClaw agent | |
 |---|---|---|---|
-| On disk | **396 KB**, 1 file | 646 MB, 41,408 files | **~1,600× smaller** |
+| On disk | **532 KB**, 1 file | 646 MB, 41,408 files | **~1,200× smaller** |
 | Ready in | **0.4 ms** | 7.3 s | **~18,000× faster** |
 | Idle memory | **0.4 MB** | 730 MB | **~1,800× lighter** |
 
@@ -78,9 +79,9 @@ Every compiler you've ever used has the same personality. You hand it code, and 
 
 Botter talks back.
 
-Run it in an empty folder and tell it what you want: *"an agent that finds local businesses without a website and pitches them my web design service."* It asks the two or three questions that matter. It proposes a plan. Then it writes the persona, the flow and the playbooks, writes the tools and tests them, lints its own work, has your model review the logic, and builds the binary. If you want to grab the wheel at any point, every file is plain text sitting right there in your folder.
+Run it in an empty folder and tell it what you want: *"an agent that finds local businesses without a website and pitches them my web design service."* It asks the two or three questions that matter. It proposes a plan. Then it writes the persona and the playbooks, writes the exact parts as Lua functions with their tests, writes any tools and tests them, checks its work against what you asked for, and builds the binary. If you want to grab the wheel at any point, every file is plain text sitting right there in your folder.
 
-How does a compiler do all that? **Botter is itself an agent.** Its persona, its flow and its skills are plain-text files in this repo (`agent.md`, `FLOW.fwl`, `skills/`), compiled by Botter and running on the same runtime as every agent it builds.
+How does a compiler do all that? **Botter is itself an agent.** Its persona and its skills are plain-text files in this repo (`agent.md`, `skills/`), compiled by Botter and running on the same runtime as every agent it builds.
 
 We use Botter to build Botter.
 
@@ -103,8 +104,8 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 | File | What it is |
 |---|---|
-| `agent.md` | Persona and rules: who the agent is, what it must never do |
-| `FLOW.fwl` | What the agent does, step by step, in **FWL** |
+| `agent.md` | Persona, rules and how a session goes: who the agent is, what it does, what it must never do |
+| `functions/<name>.lua` | Exact work in **Lua**, each documented function a tool; `functions/tests/` runs at build time |
 | `skills/<name>/SKILL.md` | Playbooks for specific tasks |
 | `agents/<name>/agent.md` | Sub-agents: a persona of their own for one kind of job |
 | `tools/` | Executables plus a JSON description of each |
@@ -112,11 +113,13 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 **Skills** follow the `SKILL.md` convention. The agent sees a one-line summary of each and opens the full playbook only when the task calls for it, so it can carry dozens without stuffing its context window.
 
-**Sub-agents** live in the same file as the agent. Each gets its own persona and a fresh conversation, does one job with the agent's tools, and hands back only its result. A flow gives one work by naming it in a sentence, like `Have @researcher look into {lead}.`, and the agent can also delegate on its own. No second process, no second binary.
+**Sub-agents** live in the same file as the agent. Each gets its own persona and a fresh conversation, does one job with the agent's tools, and hands back only its result. The agent delegates on its own, and a function can hand one a task with `bot.agent("researcher", task)`. No second process, no second binary.
 
 **What it needs.** If an agent relies on programs being installed, say `sqlite3` for a database or `python3` for a tool, they are listed under `requires` in `config.json`. The build warns when a tool needs something that isn't listed, and when the agent starts it checks the machine: the user is told what is missing, and so is the model, so it says "install sqlite3 first" instead of failing one command at a time.
 
-**Tools** are any executable at all: Python, bash, Go, Rust, C. A tool gets one JSON object on stdin and prints its answer. That's the whole protocol. A tool brings its own needs with it, so a Python tool needs Python on the box and a static binary needs nothing. Users never see tool names or JSON. They see *"Searching for leads…"*.
+**Tools** are any executable at all: bash, Python, Go, Rust, C. A tool gets one JSON object on stdin and prints its answer. That's the whole protocol. A tool brings its own needs with it, so a Python tool needs Python on the box and a static binary needs nothing. Users never see tool names or JSON. They see *"Searching for leads…"*.
+
+Botter picks in this order: a **Lua function** first (it needs nothing on the machine), a **shell script** when the job needs a program such as `sqlite3` or `ffmpeg`, and **Python or Node** only for a library there is no other way to get.
 
 ## It speaks the standards
 
@@ -125,7 +128,7 @@ MCP, A2A and ACP are built into the runtime, in C. There is no bridge, no adapte
 - **MCP, by URL.** Name a server's URL in `config.json` and its tools join the agent's own. Each call is one HTTPS request from the agent's built-in client, using the stateless 2026 revision of the protocol, and falling back to the older session handshake for servers that still want it. Nothing is installed and nothing is started.
 - **MCP, by command.** Most MCP servers are programs you start, like `npx -y @modelcontextprotocol/server-filesystem .`. Give the agent that same command and it starts the server itself, unmodified, inside the same sandbox as its tools, and stops it when it exits. The agent needs no Node or Python of its own; such a server needs whatever it was written in, so list that under `requires`.
 - **MCP, being used.** `./myagent.bot --mcp` turns the agent into an MCP server with one tool, `ask`. Any MCP client that starts a command can use it: a coding agent such as Claude Code or opencode, an editor, another framework. The client starts the agent and talks to it over its input and output, so nothing listens. Give it a port (`--mcp 8080`) and it serves MCP over HTTP instead.
-- **A2A, calling out.** List another agent's URL under `agents` and a flow hands it work by naming it `@billing` in a sentence, exactly like a sub-agent.
+- **A2A, calling out.** List another agent's URL under `agents` and the agent hands it work exactly like a sub-agent; a function can too, with `bot.agent("billing", task)`.
 - **A2A, being called.** `./myagent.bot --a2a 8080` publishes an agent card and answers other agents. Like `--mcp 8080`, it listens only because you asked it to.
 - **ACP.** `./myagent.bot --acp` is what an editor such as Zed runs to put the agent in its sidebar, with tool calls and permission prompts shown in the editor.
 
@@ -147,77 +150,54 @@ claude mcp add lead-outreach -- /path/to/lead-outreach.bot --mcp
 
 With `--acp`, `--a2a` and `--mcp` there is nobody at a keyboard, so the agent never asks for a key there. It uses the model connection you saved by running it once in a terminal, its sealed vault, or `BOTTER_BASE_URL`, `BOTTER_API_KEY` and `BOTTER_MODEL` in that `.env` file. `--a2a` and `--mcp` with a port listen on this machine only unless you give them an address (`--a2a 0.0.0.0:8080`), and then they insist on a token that callers must send (`A2A_TOKEN` or `MCP_TOKEN`). Risky actions, which a person at the terminal would be asked about, are refused in these modes.
 
-## FWL: plain English that runs the same way every time
+## Functions: the part that has to be exact
 
-Prompts are a terrible way to write a program. You say *"first do X, then Y, and if Z then stop"*, and the model nods and does something adjacent.
+A model is good at reading a messy email and bad at adding up thirty numbers. Ask it for both and you get a confident answer that is off by a few hundred.
 
-So Botter has a language. **FWL** (the Flow Writeup Language) is plain sentences inside a little structure. Only the structure is in CAPITALS; everything else is English.
+So a Botter agent splits the work. The **model** runs the conversation, from `agent.md` and the skills: it reads, decides, writes and talks. **Functions** do the exact part, in plain Lua, the same way every time:
 
-```
-STEP 1: Find leads
-ASK "What do you sell, and to whom?" into {target}
-RETRY 2 times:
-    Find leads for {target} with $scrape_leads and keep them as {leads}.
-IF {leads} is empty:
-    RETURN "No leads found. Try a broader search."
-
-STEP 2: Pitch each one
-FOR EACH {lead} in {leads}:
-    Write a pitch for {lead} as #pitching says and keep it as {pitch}.
-    Have @reviewer check {pitch}, and fix what it finds.
-    ASK "Send this to {lead.name}?\n\n{pitch}" [yes, no] into {send}
-    IF {send} is "yes":
-        Send {pitch} to {lead.email} with $send_email.
-    ELSE:
-        Skip this lead.
-
-RETURN "Done."
-```
-
-That is the whole agent's behaviour, in a file called `FLOW.fwl`. Four marks say what a sentence is talking about:
-
-| Mark | Means |
-|---|---|
-| `$send_email` | a tool |
-| `#pitching` | a skill |
-| `@reviewer` | an agent |
-| `{lead}` | a remembered value |
-
-Nothing is imported or declared. The first sentence that mentions a new `{value}` fills it, and the model decides what goes in.
-
-### What it buys you: certainty
-
-Botter follows the structure itself. The loop runs once per lead, the `IF` branches the way it says, and the steps happen in order. Each sentence is handed to the model on its own, so none is skipped and none is reached before its turn.
-
-Two things are never left to the model:
-
-- **`ASK` is asked.** Botter shows the question and waits. With choices, the answer is one of them, so the `IF {send} is "yes":` under it is decided exactly and the sending step is only reached on a yes.
-- **A tool's answer is the tool's answer.** When a sentence names one tool and keeps its result, the value is exactly what the tool returned, not the model's retelling of it.
-
-A condition that compares values, like `{send} is "yes"` or `{leads} is empty`, is decided exactly. One that needs judgement, like `IF the customer is asking about their own account:`, is one short question to the model.
-
-### It refuses to build nonsense
-
-FWL comes with a linter, and Botter runs it before every build. Break the flow above and you get this:
-
-```
-FLOW.fwl:15: error: ELSE lines up with its IF (the IF on line 13), not with the lines inside it
-FLOW.fwl:18: error: {lead} only exists inside its FOR EACH loop
-FLOW.fwl:11: warning: {pich} is filled here and never used again: a typo, or drop the name
-FLOW.fwl:10: error: #pitchng: no such skill (there is no skills/pitchng/SKILL.md)
-FLOW.fwl:11: error: @reviewr: no such agent (a sub-agent agents/reviewr/agent.md, or one listed in config.json "agents")
-FLOW.fwl:14: error: $send_mail: no such tool (built-in, tools/bin/send_mail, or <server>_<tool> of a config.json "mcp" server)
+```lua
+--- What the balance will be on each of the next days, from today's
+--- balance and the known payments. Call it before saying anything is affordable.
+---@param today string  today's date, YYYY-MM-DD
+---@param balance number  today's balance
+---@param payments table[]  {date = "YYYY-MM-DD", amount = number}, negative = money out
+---@param days integer  how many days ahead
+---@return table  the lowest balance and the day it happens
+function lowest_balance(today, balance, payments, days)
+  local lowest, lowest_day = balance, today
+  for day = 1, days do
+    local date = bot.date.add_days(today, day)
+    for _, p in ipairs(payments) do
+      if p.date == date then
+        balance = balance + p.amount
+      end
+    end
+    if balance < lowest then
+      lowest, lowest_day = balance, date
+    end
+  end
+  return { lowest = lowest, on = lowest_day }
+end
 ```
 
-Line numbers, indentation and scope checking, and every tool, skill and agent checked against what the agent actually has. These are compiler errors for a language that is mostly English.
+The `---` comment is how the model learns the function exists: it becomes a tool, with that description and those parameters. The model decides **when** to call it; the code decides **what comes out**.
 
-### Then it gets a second opinion
+- **No new language.** It is Lua 5.4, the language games and editors already embed, built into the runtime. A function reaches the outside world only through a small `bot` module: JSON and CSV, dates, files in the working folder, HTTPS, the shell, MCP servers and other agents, each under the same rules and permission prompts as the model's own tools.
+- **Tested before it ships.** Put tests in `functions/tests/` and the build runs them. A failing test means no `.bot`.
+- **Checked like code.** A syntax error, a parameter without a type, or a name another tool already has stops the build with the file and line. The build also says what each function reaches: `lowest_balance (pure)`, `save_report (writes files)`, `fetch_rates (the network, secrets)`.
+- **Nothing to install.** Lua runs inside the agent. The runtime grew by about 140 KB to carry it, and an agent without functions never starts it.
 
-A flow that builds can still make no sense, so before building, your model reviews the logic. Can each step actually be done with the tool it names? Is anything sent, paid for or deleted without an `ASK` first? Can every loop end? Does a value look like a typo of another? You get the line, the reason and a suggested fix. Nothing changes until you say yes.
+## Batch mode
 
-### Data stays data
+Some jobs are not conversations: answer 250 support tickets, score 10,000 rows. `--run` does one task per line, each in a fresh conversation, and prints one JSON line per task:
 
-Values live in `{braces}`, never mixed into instructions, and the model is told outright that whatever a value holds is data. A scraped web page, an inbound email, anything. That makes prompt injection a lot harder to pull off.
+```sh
+cut -d, -f1 requests.csv | ./triage.bot --run > answers.jsonl
+./triage.bot --run "Summarise yesterday's report"     # one task: just the answer
+```
+
+Nobody is there to approve anything, so risky actions are refused. Set `"temperature": 0` (and a `"seed"`) in `config.json` for answers that repeat, and the run ends with the token count per model on stderr, ready for a cost report.
 
 ## Inside a .bot file
 
@@ -228,7 +208,7 @@ lead-outreach.bot
 ┌───────────────┐
 │ botcore       │  the runtime: a static x86-64 Linux executable, the same in every agent
 ├───────────────┤
-│ your agent    │  agent.md, FLOW.fwl, skills, sub-agents, tools, config.json, read-only
+│ your agent    │  agent.md, skills, functions, sub-agents, tools, config.json, read-only
 ├───────────────┤
 │ footer        │  32 bytes: where the agent's files begin, how long they are, their checksum
 └───────────────┘
@@ -238,13 +218,13 @@ So building one is not compiling. Botter doesn't generate code, and no compiler 
 
 Because the front of the file is an ordinary executable, the operating system already knows what to do with it. There is no `.bot` player to install and no file association to set up. You run it.
 
-botcore is about 11,000 lines of C, statically linked against musl, and it packs a surprising amount into a few hundred kilobytes:
+botcore is about 11,000 lines of C, statically linked against musl, and it packs a surprising amount into half a megabyte:
 
-- an FWL parser, linter and interpreter
+- Lua 5.4 for functions (only its safe core: no `io`, no `os`, no loading code from disk), with the `bot` module on top
 - its own HTTPS stack, using vendored BearSSL with Mozilla's CA roots compiled in, so no curl, no OpenSSL and no system certificates
 - an OpenAI-compatible client with streaming and tool calling
 - clients for MCP and A2A, and MCP, A2A and ACP front ends
-- file, shell and scheduling tools
+- file, shell, image and scheduling tools
 - a sandbox enforced by the kernel itself
 
 ## Paranoid by default
@@ -277,10 +257,11 @@ AMD Ryzen 5 7520U, Fedora 44, median of 15 to 30 runs. Sizes are in KB of 1,024 
 
 | | Time / size | Peak memory |
 |---|---|---|
-| `botter` itself (UI + runtime + packer) | **715 KB** | |
-| A built agent | **396 KB** | |
+| `botter` itself (UI + runtime + packer) | **1,043 KB** | |
+| A built agent | **532 KB** | |
 | Build an agent | **2 ms** | 0.4 MB |
 | Start an agent | **0.4 ms** | **0.4 MB** |
+| Start an agent with Lua functions | 0.9 ms | 0.4 MB |
 | Full session: connect, one turn with a tool call, exit | 131 ms | **3.9 MB** |
 | *For scale:* `python3 -c pass` | 15 ms | 9.2 MB |
 | *For scale:* `node -e 0` | 29 ms | 40.6 MB |
@@ -297,16 +278,16 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 231 tests: FWL, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
+make test                     # 213 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```
 
-`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` holds Botter's build tools, and `tui/` is Botter's full-screen UI. `agent.md`, `FLOW.fwl`, `config.json` and `skills/` in the repo root are Botter itself.
+`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` holds Botter's build tools, and `tui/` is Botter's full-screen UI. `agent.md`, `config.json` and `skills/` in the repo root are Botter itself.
 
 ## License
 
-MIT. botcore includes cJSON (MIT), BearSSL (MIT) and Mozilla's CA data (MPL-2.0). See `THIRD_PARTY.md`, and ship those notices with agents you build.
+MIT. botcore includes cJSON (MIT), BearSSL (MIT), Lua (MIT) and Mozilla's CA data (MPL-2.0). See `THIRD_PARTY.md`, and ship those notices with agents you build.
 
 ---
 

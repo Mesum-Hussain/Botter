@@ -9,7 +9,7 @@ Binds 127.0.0.1 on a free port and writes it to --portfile when ready.
 Records the last system prompt to DIR/system.txt, the last user message to DIR/user.txt and the
 last tool result to DIR/tool.txt.
 """
-import re, argparse, json, os, time
+import argparse, json, os, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ap = argparse.ArgumentParser()
@@ -22,7 +22,6 @@ ap.add_argument("--slow", action="store_true")
 ap.add_argument("--nostream", action="store_true", help='answer 400 to "stream": true')
 ap.add_argument("--busy", type=int, default=0, help="answer 503 (high demand) to the first N requests")
 ap.add_argument("--think", action="store_true", help="start the text answer with a <think> block")
-ap.add_argument("--fwl", choices=["yes", "no"], help="answer FWL interpreter requests (decisions = this word)")
 a = ap.parse_args()
 os.makedirs(a.record, exist_ok=True)
 
@@ -61,6 +60,10 @@ class H(BaseHTTPRequestHandler):
         save("auth.txt", self.headers.get("Authorization", ""))
         if msgs and msgs[0]["role"] == "system":
             save("system.txt", msgs[0]["content"])
+        for m in msgs:  # image_view sends a list of parts: the text of it is what the tests read
+            if isinstance(m.get("content"), list):
+                m["parts"] = m["content"]
+                m["content"] = " ".join(p.get("text", "") for p in m["content"] if p.get("type") == "text")
         users = [m for m in msgs if m["role"] == "user"]
         if users:
             save("user.txt", users[-1]["content"])
@@ -74,8 +77,18 @@ class H(BaseHTTPRequestHandler):
         else:
             save("tools.txt", names)
 
+        # the tool result being answered: the last message, or the one before image_view's pictures
+        after_tool = msgs[-1] if msgs[-1]["role"] == "tool" else \
+            msgs[-2] if msgs[-1].get("parts") and len(msgs) > 1 and msgs[-2]["role"] == "tool" else None
         stream = bool(req.get("stream"))
         save("stream.txt", "stream" if stream else "plain")
+        save("sampling.txt", "temperature=%s seed=%s usage=%s" % (req.get("temperature"), req.get("seed"),
+                                                                 (req.get("stream_options") or {}).get("include_usage")))
+        parts = [p for m in msgs for p in m.get("parts", [])]
+        if parts:
+            save("parts.txt", " ".join(p.get("type", "?") for p in parts))
+            with open(os.path.join(a.record, "parts_all.txt"), "a") as f:
+                f.write(" ".join(p.get("type", "?") for p in parts) + "\n")
         if stream and a.nostream:
             self.send({"error": {"message": "stream not supported"}}, 400)
             return
@@ -88,9 +101,12 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(0.02)
 
+        usage = {"prompt_tokens": 11, "completion_tokens": 7}
+
         def reply(msg):
             if not stream:
-                self.send({"choices": [{"message": dict(role="assistant", **msg), "finish_reason": "stop"}]})
+                self.send({"choices": [{"message": dict(role="assistant", **msg), "finish_reason": "stop"}],
+                           "usage": usage})
                 return
             # Server-Sent Events: text in 3-character pieces, tool call arguments split in two
             self.send_response(200)
@@ -109,64 +125,21 @@ class H(BaseHTTPRequestHandler):
                 sse({"choices": [{"index": 0, "delta": {"tool_calls": [first]}}]})
                 sse({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": k, "function": {"arguments": args[h:]}}]}}]})
             sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+            if (req.get("stream_options") or {}).get("include_usage"):
+                sse({"choices": [], "usage": usage})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
-        if msgs and msgs[0]["role"] == "system" and msgs[0]["content"].startswith("You review FLOW.fwl"):
-            save("review.txt", msgs[-1]["content"])
-            reply({"content": json.dumps({"makes_sense": False, "summary": "one step cannot work",
-                                          "problems": [{"line": 7, "statement": "Read it with $fs_read.",
-                                                        "why": "reads a file that is never written",
-                                                        "suggestion": "write the file first"}]})})
-        elif a.fwl and users and users[-1]["content"].startswith("[FWL") and msgs[-1]["role"] == "user":
-            last = users[-1]["content"]
-            with open(os.path.join(a.record, "fwl.txt"), "a") as f:
-                f.write(last.split("\n")[0] + "\n")
-            if last.startswith("[FWL] Decide"):
-                save("decide.txt", last)
-                save("decide_hist.txt", "tool messages: %d, tools offered: %d" % (
-                    sum(1 for m in msgs if m["role"] == "tool" or m.get("tool_calls")), len(req.get("tools") or [])))
-                reply({"content": a.fwl})
-            elif last.startswith("[FWL] Work out the value of"):
-                # what a sentence filled: "Remember X as {name}" -> X, "as a JSON array" -> a list
-                m = re.search(r"Remember (\w+) as", last)
-                reply({"content": m.group(1) if m else '["a", "b", "c"]' if "JSON array" in last else '"worked-out value"'})
-            elif last.startswith("[FWL step") and re.search(r"[$@][A-Za-z_]", last.split("\n")[0]):
-                # a sentence that names a tool or an agent: use it, the way a model would
-                line = last.split("\n")[0]
-                tool = re.search(r"\$([A-Za-z0-9_-]*[A-Za-z0-9_])", line)
-                obj = re.search(r"\{\".*?\}", line)
-                quoted = re.search(r'"([^"]*)"', line)
-                if tool:
-                    name, args = tool.group(1), obj.group(0) if obj else "{}"
-                else:
-                    name = "delegate"
-                    args = json.dumps({"agent": re.search(r"@([A-Za-z0-9_-]*[A-Za-z0-9_])", line).group(1),
-                                       "task": quoted.group(1) if quoted else line})
-                reply({"content": None, "tool_calls": [{"id": "c1", "type": "function",
-                                                        "function": {"name": name, "arguments": args}}]})
-            elif last.startswith("[FWL] Work out"):
-                reply({"content": '"worked-out value"'})
-            elif last.startswith("[FWL] Build the JSON"):
-                reply({"content": "{}"})
-            elif last.startswith("[FWL final step"):
-                reply({"content": "All done, final message."})
-            else:
-                reply({"content": "did: " + last.split("\n")[0][:80]})
-        elif a.fwl and msgs[-1]["role"] == "tool" and users and users[-1]["content"].startswith("[FWL step"):
-            save("tool.txt", msgs[-1]["content"])
-            failed = msgs[-1]["content"].startswith("ERROR")
-            reply({"content": ("FAILED: " if failed else "did it: ") + msgs[-1]["content"][:80]})
-        elif a.text:
+        if a.text:
             reply({"content": open(a.text).read()})
-        elif a.tool and msgs[-1]["role"] != "tool":
+        elif a.tool and not after_tool:
             call = {"id": "c1", "type": "function", "function": {"name": a.tool, "arguments": a.args}}
             reply({"content": None, "tool_calls": [call]})
         else:
-            if msgs[-1]["role"] == "tool":
-                save("tool.txt", msgs[-1]["content"])
+            if after_tool:
+                save("tool.txt", after_tool["content"])
                 with open(os.path.join(a.record, "tool_all.txt"), "a") as f:
-                    f.write(msgs[-1]["content"] + "\n")
+                    f.write(after_tool["content"] + "\n")
             reply({"content": "<think>pondering the task</think>Hello there, streamed reply." if a.think else "done"})
 
 

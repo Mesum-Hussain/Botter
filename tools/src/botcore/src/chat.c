@@ -12,6 +12,129 @@
 #define VALIDATE_TIMEOUT_S 20
 #define CHAT_TIMEOUT_S     300
 
+static double       g_temp = -1; /* config.json "temperature"; < 0 = the provider's default */
+static int          g_has_seed;
+static long long    g_seed;
+static chat_t      *g_running;   /* the conversation whose tool calls are running (innermost) */
+static chat_usage_t g_use[8];
+static int          g_nuse;
+
+void chat_set_sampling(double temperature, int has_seed, long long seed)
+{
+    g_temp = temperature;
+    g_has_seed = has_seed;
+    g_seed = seed;
+}
+
+static void add_sampling(cJSON *root)
+{
+    if (g_temp >= 0) {
+        cJSON_AddNumberToObject(root, "temperature", g_temp);
+    }
+    if (g_has_seed) {
+        cJSON_AddNumberToObject(root, "seed", (double)g_seed);
+    }
+}
+
+/* One model call answered: count it, with its tokens when the endpoint reported them. */
+static void count_usage(const char *model, const cJSON *u)
+{
+    int i = 0;
+    while (i < g_nuse && strcmp(g_use[i].model, model) != 0) {
+        i++;
+    }
+    if (i == g_nuse) {
+        if (g_nuse == (int)(sizeof(g_use) / sizeof(g_use[0]))) {
+            i = g_nuse - 1; /* more models than slots: the last one collects the rest */
+        } else {
+            snprintf(g_use[g_nuse++].model, sizeof(g_use[0].model), "%s", model);
+        }
+    }
+    g_use[i].calls++;
+    const char *in[] = {"prompt_tokens", "input_tokens"}, *out[] = {"completion_tokens", "output_tokens"};
+    for (int k = 0; k < 2; k++) {
+        const cJSON *a = cJSON_GetObjectItemCaseSensitive(u, in[k]), *b = cJSON_GetObjectItemCaseSensitive(u, out[k]);
+        if (cJSON_IsNumber(a) || cJSON_IsNumber(b)) {
+            g_use[i].input_tokens += cJSON_IsNumber(a) ? (long long)a->valuedouble : 0;
+            g_use[i].output_tokens += cJSON_IsNumber(b) ? (long long)b->valuedouble : 0;
+            break;
+        }
+    }
+}
+
+int chat_usage(const chat_usage_t **u)
+{
+    *u = g_use;
+    return g_nuse;
+}
+
+static char *base64(const unsigned char *d, size_t n)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char *o = malloc((n + 2) / 3 * 4 + 1), *p = o;
+    if (!o) {
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = (unsigned)d[i] << 16 | (i + 1 < n ? (unsigned)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        *p++ = T[v >> 18 & 63];
+        *p++ = T[v >> 12 & 63];
+        *p++ = i + 1 < n ? T[v >> 6 & 63] : '=';
+        *p++ = i + 2 < n ? T[v & 63] : '=';
+    }
+    *p = '\0';
+    return o;
+}
+
+int chat_attach_image(const char *label, const char *mime, const unsigned char *data, size_t len)
+{
+    if (!g_running) {
+        return -1;
+    }
+    char *b = base64(data, len), *url = NULL, note[300];
+    if (!b || asprintf(&url, "data:%s;base64,%s", mime, b) < 0) {
+        free(b);
+        return -1;
+    }
+    free(b);
+    if (!g_running->images) {
+        g_running->images = cJSON_CreateArray();
+    }
+    cJSON *t = cJSON_CreateObject(), *im = cJSON_CreateObject();
+    snprintf(note, sizeof(note), "Image %.200s:", label);
+    cJSON_AddStringToObject(t, "type", "text");
+    cJSON_AddStringToObject(t, "text", note);
+    cJSON_AddStringToObject(im, "type", "image_url");
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(im, "image_url"), "url", url);
+    cJSON_AddItemToArray(g_running->images, t);
+    cJSON_AddItemToArray(g_running->images, im);
+    free(url);
+    return 0;
+}
+
+/* After a turn: images leave the conversation (they are large); a note says where they were. */
+static void drop_images(chat_t *c)
+{
+    cJSON *m;
+    cJSON_ArrayForEach(m, c->hist)
+    {
+        cJSON *content = cJSON_GetObjectItemCaseSensitive(m, "content"), *part;
+        cJSON_ArrayForEach(part, (cJSON_IsArray(content) ? content : NULL))
+        {
+            const cJSON *ty = cJSON_GetObjectItemCaseSensitive(part, "type");
+            if (cJSON_IsString(ty) && !strcmp(ty->valuestring, "image_url")) {
+                cJSON *t = cJSON_CreateObject();
+                cJSON_AddStringToObject(t, "type", "text");
+                cJSON_AddStringToObject(t, "text", "(the image was shown here; use image_view again to look at it)");
+                cJSON_ReplaceItemViaPointer(content, part, t);
+                part = t;
+            }
+        }
+    }
+    cJSON_Delete(c->images);
+    c->images = NULL;
+}
+
 int chat_init(chat_t *c, const char *base, const char *key, const char *model)
 {
     memset(c, 0, sizeof(*c));
@@ -45,6 +168,7 @@ void chat_free(chat_t *c)
     free(c->model);
     cJSON_Delete(c->hist);
     cJSON_Delete(c->tools);
+    cJSON_Delete(c->images);
     memset(c, 0, sizeof(*c));
 }
 
@@ -401,6 +525,7 @@ typedef struct {
     cJSON  *calls;   /* tool calls assembled from deltas */
     char   *err;     /* error object sent in the stream */
     int     events;  /* data: lines seen */
+    cJSON  *usage;   /* the last "usage" object (stream_options.include_usage) */
 } stream_t;
 
 static void emit(stream_t *s, int kind, const char *p, size_t n)
@@ -548,6 +673,11 @@ static void on_sse_event(stream_t *s, const char *data)
         return;
     }
     s->events++;
+    const cJSON *u = cJSON_GetObjectItemCaseSensitive(j, "usage");
+    if (cJSON_IsObject(u)) {
+        cJSON_Delete(s->usage);
+        s->usage = cJSON_Duplicate(u, 1);
+    }
     const cJSON *e = cJSON_GetObjectItemCaseSensitive(j, "error");
     if (e && !s->err) {
         char *t = cJSON_PrintUnformatted(e);
@@ -630,6 +760,7 @@ static void stream_free(stream_t *s)
     free(s->pend.p);
     free(s->err);
     cJSON_Delete(s->calls);
+    cJSON_Delete(s->usage);
 }
 
 /* Append a tool-role result message. */
@@ -678,27 +809,6 @@ static int run_tool_calls(chat_t *c, const cJSON *calls)
     return interrupted;
 }
 
-/* Remove leading <think>/<thinking>/<thought> blocks in place. */
-static void strip_thoughts(char *text)
-{
-    static const char *const tags[] = {"think", "thinking", "thought"};
-    for (int found = 1; text && found;) {
-        found = 0;
-        char *p = text + strspn(text, " \n\r\t");
-        for (size_t i = 0; i < 3 && !found; i++) {
-            char open[16], close[20];
-            snprintf(open, sizeof(open), "<%s>", tags[i]);
-            snprintf(close, sizeof(close), "</%s>", tags[i]);
-            if (strncmp(p, open, strlen(open)) == 0) {
-                char *end = strstr(p, close);
-                char *rest = end ? end + strlen(close) : p + strlen(p);
-                memmove(text, rest, strlen(rest) + 1);
-                found = 1;
-            }
-        }
-    }
-}
-
 /* Overloaded or rate-limited endpoints (Gemini 503 "high demand", 429) usually
  * recover within a minute: wait 2, 4, 8, 16, 32 s (Ctrl-C ends the wait) and
  * retry, which also outlasts a per-minute quota. */
@@ -741,145 +851,19 @@ static int busy_wait(int attempt, const char *body)
     return 0;
 }
 
-/* The history as plain text for a side question (FWL decisions, values): tool calls
- * and results become text, so the model answers in words. With real tool calls in
- * the history Gemini answers with another call, even under "tool_choice": "none". */
-static void text_add(cJSON *msgs, const char *role, const char *text)
-{
-    cJSON *last = cJSON_GetArrayItem(msgs, cJSON_GetArraySize(msgs) - 1);
-    const cJSON *lr = cJSON_GetObjectItemCaseSensitive(last, "role");
-    const cJSON *lc = cJSON_GetObjectItemCaseSensitive(last, "content");
-    if (cJSON_IsString(lr) && !strcmp(lr->valuestring, role) && cJSON_IsString(lc)) {
-        char *j = NULL;
-        if (asprintf(&j, "%s\n\n%s", lc->valuestring, text) >= 0) {
-            cJSON_SetValuestring((cJSON *)lc, j);
-        }
-        free(j);
-        return;
-    }
-    add_msg(msgs, role, text);
-}
-
-static void text_history(const cJSON *hist, cJSON *msgs)
-{
-    const cJSON *m;
-    cJSON_ArrayForEach(m, hist)
-    {
-        const cJSON *role = cJSON_GetObjectItemCaseSensitive(m, "role");
-        const cJSON *content = cJSON_GetObjectItemCaseSensitive(m, "content");
-        const cJSON *calls = cJSON_GetObjectItemCaseSensitive(m, "tool_calls"), *tc;
-        const char *rs = cJSON_IsString(role) ? role->valuestring : "";
-        char *text = extract_content(content), *t = NULL;
-        if (!strcmp(rs, "tool")) {
-            if (asprintf(&t, "[tool result] %.1500s%s", text ? text : "", text && strlen(text) > 1500 ? " ...(cut)" : "") >= 0) {
-                text_add(msgs, "user", t);
-            }
-        } else if (!strcmp(rs, "assistant")) {
-            size_t len = 0;
-            char *acc = NULL;
-            FILE *f = open_memstream(&acc, &len);
-            if (f) {
-                fputs(text ? text : "", f);
-                cJSON_ArrayForEach(tc, calls)
-                {
-                    const cJSON *fn = cJSON_GetObjectItemCaseSensitive(tc, "function");
-                    const cJSON *nm = cJSON_GetObjectItemCaseSensitive(fn, "name");
-                    const cJSON *ar = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
-                    fprintf(f, "%s[called %s %.300s]", ftell(f) ? "\n" : "", cJSON_IsString(nm) ? nm->valuestring : "a tool",
-                            cJSON_IsString(ar) ? ar->valuestring : "");
-                }
-                fclose(f);
-                if (acc && *acc) {
-                    text_add(msgs, "assistant", acc);
-                }
-                free(acc);
-            }
-        } else if (text && (*rs)) {
-            text_add(msgs, rs, text);
-        }
-        free(t);
-        free(text);
-    }
-}
-
-int chat_ask(chat_t *c, const char *system, const char *question, int with_history, char **reply, char **err)
-{
-    http_resp_t r;
-    *reply = NULL;
-    *err = NULL;
-    char *url = url_for(c, "/chat/completions");
-    cJSON *root = cJSON_CreateObject();
-    cJSON *msgs = cJSON_AddArrayToObject(root, "messages");
-    cJSON_AddStringToObject(root, "model", c->model);
-    if (with_history) {
-        text_history(c->hist, msgs);
-    } else if (system && *system) {
-        add_msg(msgs, "system", system);
-    }
-    add_msg(msgs, "user", question);
-    char *body = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (!url || !body) {
-        free(url);
-        free(body);
-        *err = strdup("out of memory");
-        return CHAT_ERR_OTHER;
-    }
-    char *text = NULL;
-    int ret = CHAT_OK;
-    /* busy endpoints are retried like chat_send; an empty answer (Gemini sometimes
-     * sends a message without content) is asked again twice */
-    for (int busy = 0, empty = 0; !text;) {
-        int rc = http_request(url, c->key, body, CHAT_TIMEOUT_S, &r);
-        if (rc != HTTP_OK) {
-            ret = transport_error(rc, &r, err);
-            http_resp_free(&r);
-            break;
-        }
-        if (busy_status(r.status) && busy < CHAT_BUSY_RETRIES) {
-            int stop = busy_wait(busy++, r.body);
-            http_resp_free(&r);
-            if (stop < 0) {
-                ret = CHAT_ERR_ABORT;
-                break;
-            }
-            continue;
-        }
-        if (r.status < 200 || r.status >= 300) {
-            *err = error_text(r.status, r.body);
-            ret = (r.status == 401 || r.status == 403) ? CHAT_ERR_AUTH : CHAT_ERR_OTHER;
-            http_resp_free(&r);
-            break;
-        }
-        cJSON *j = cJSON_Parse(r.body);
-        http_resp_free(&r);
-        cJSON *msg = cJSON_GetObjectItemCaseSensitive(
-            cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(j, "choices"), 0), "message");
-        text = extract_content(cJSON_GetObjectItemCaseSensitive(msg, "content"));
-        int called = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(msg, "tool_calls")) > 0;
-        cJSON_Delete(j);
-        if (text && !text[strspn(text, " \t\r\n")] && empty < 2) {
-            free(text);
-            text = NULL;
-        }
-        if (!text && empty++ >= 2) {
-            *err = strdup(called ? "the model answered with a tool call instead of text"
-                                 : "unexpected response format (no message content)");
-            ret = CHAT_ERR_OTHER;
-            break;
-        }
-    }
-    free(body);
-    free(url);
-    if (!text) {
-        return ret;
-    }
-    strip_thoughts(text);
-    *reply = text;
-    return CHAT_OK;
-}
+static int send_turn(chat_t *c, const char *user, char **reply, char **err);
 
 int chat_send(chat_t *c, const char *user, char **reply, char **err)
+{
+    chat_t *outer = g_running; /* a sub-agent's turn runs inside the main one's tool call */
+    g_running = c;
+    int r = send_turn(c, user, reply, err);
+    drop_images(c);
+    g_running = outer;
+    return r;
+}
+
+static int send_turn(chat_t *c, const char *user, char **reply, char **err)
 {
     int busy = 0;
     http_resp_t r;
@@ -908,7 +892,9 @@ int chat_send(chat_t *c, const char *user, char **reply, char **err)
         int streaming = c->ev_cb && !c->no_stream;
         if (streaming) {
             cJSON_AddTrueToObject(root, "stream");
+            cJSON_AddTrueToObject(cJSON_AddObjectToObject(root, "stream_options"), "include_usage");
         }
+        add_sampling(root);
         if (c->thoughts) {
             cJSON *eb = cJSON_AddObjectToObject(root, "extra_body");
             cJSON *tc = cJSON_AddObjectToObject(cJSON_AddObjectToObject(eb, "google"), "thinking_config");
@@ -931,9 +917,11 @@ int chat_send(chat_t *c, const char *user, char **reply, char **err)
             stream_free(&st);
             goto fail;
         }
-        if (r.status == 400 && (c->thoughts || streaming)) {
-            /* endpoint refused extra_body, then "stream": retry without it */
-            if (c->thoughts) {
+        if (r.status == 400 && (g_has_seed || c->thoughts || streaming)) {
+            /* endpoint refused the seed, then extra_body, then "stream": retry without it */
+            if (g_has_seed) {
+                g_has_seed = 0;
+            } else if (c->thoughts) {
                 c->thoughts = 0;
             } else {
                 c->no_stream = 1;
@@ -972,6 +960,7 @@ int chat_send(chat_t *c, const char *user, char **reply, char **err)
         /* A streamed answer is assembled into the shape of a plain one; an endpoint
          * that ignored "stream" sent plain JSON, parsed as before. */
         cJSON *j = streaming && st.events ? stream_result(&st) : cJSON_Parse(r.body);
+        count_usage(c->model, streaming && st.events ? st.usage : cJSON_GetObjectItemCaseSensitive(j, "usage"));
         stream_free(&st);
         http_resp_free(&r);
         cJSON *ch = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(j, "choices"), 0);
@@ -1003,6 +992,13 @@ int chat_send(chat_t *c, const char *user, char **reply, char **err)
             if (intr || term_interrupted()) {
                 ret = CHAT_ERR_ABORT;
                 goto fail;
+            }
+            if (cJSON_GetArraySize(c->images)) { /* image_view ran: the pictures go in as the user's message */
+                cJSON *m = cJSON_CreateObject();
+                cJSON_AddStringToObject(m, "role", "user");
+                cJSON_AddItemToObject(m, "content", c->images);
+                c->images = NULL;
+                cJSON_AddItemToArray(c->hist, m);
             }
             continue;
         }

@@ -73,68 +73,20 @@ mkagent() {
 build() { "$PACK" build "$1" "$CORE" "$2" >"$T/build.log" 2>&1; }
 
 # ---------------------------------------------------------------------------
-section "Packaging and FWL"
+section "Packaging"
 
 "$PACK" check "$ROOT" "$CORE" >"$T/self.log" 2>&1
 check "botter's own project builds with 0 warnings" "$T/self.log" "check passed.* 0 warning"
 
-# FWL (FLOW.fwl): a valid flow compiles; each kind of mistake is an error with its line and stops the build
-mkagent "$T/flow_good"
-mkdir -p "$T/flow_good/skills/pitching"
-printf -- '---\nname: pitching\ndescription: p\n---\n' >"$T/flow_good/skills/pitching/SKILL.md"
-cp "$TESTS/good.fwl" "$T/flow_good/FLOW.fwl"
-"$PACK" check "$T/flow_good" "$CORE" >"$T/lint.log" 2>&1
-check_not "FWL: a valid FLOW.fwl has no errors or warnings" "$T/lint.log" "FLOW.fwl"
-# sq_bad NAME OLD NEW PATTERN: good.fwl with OLD replaced by NEW must report PATTERN
-sq_bad() {
-    rm -rf "$T/flow_bad" "$T/flow_bad.bot"
-    cp -r "$T/flow_good" "$T/flow_bad"
-    python3 -c 'import sys;p=sys.argv[1];s=open(p).read();assert sys.argv[2] in s;open(p,"w").write(s.replace(sys.argv[2],sys.argv[3],1))' \
-        "$T/flow_bad/FLOW.fwl" "$2" "$3"
-    "$PACK" build "$T/flow_bad" "$CORE" "$T/flow_bad.bot" >"$T/lint.log" 2>&1
-    check "FWL: $1" "$T/lint.log" "$4"
-}
-sq_bad "capital pseudo-code is not FWL" 'Skip it.' 'SEARCH LEADS (with the scraper)' 'error: "SEARCH LEADS" is not FWL: only ASK, IF, ELSE'
-sq_bad "a made-up capital keyword is not FWL" 'Skip it.' 'CALCULATE {t} = {f} * 2' 'error: "CALCULATE" is not FWL: only ASK, IF, ELSE'
-sq_bad "BREAK is not FWL" 'Skip it.' 'BREAK' 'error: FWL has no BREAK'
-sq_bad "keyword typo is an error with its line" 'RETRY 2 times:' 'RETRI 2 times:' 'FLOW.fwl:11: error: unknown keyword RETRI; did you mean RETRY'
-if [ -e "$T/flow_bad.bot" ]; then fail "FWL: a flow with errors is not built"; else pass "FWL: a flow with errors is not built"; fi
-sq_bad "a \$tool must exist" '$fs_read' '$fs_reed' 'FLOW.fwl:12: error: \$fs_reed: no such tool'
-sq_bad "a #skill must exist" '#pitching' '#ghost' '#ghost: no such skill \(there is no skills/ghost/SKILL.md\)'
-sq_bad "an @agent must exist" 'Skip it.' 'Ask @nobody about it.' '@nobody: no such agent'
-sq_bad "marks inside quotes are only text" 'Skip it.' 'Tell the user "mail @nobody about #ghost for $5".' 'wrote .*flow_bad.bot'
-sq_bad "the old statements say what to write instead" 'Skip it.' 'EXECUTE tool $fs_read' 'FWL has no EXECUTE: say it in a sentence that names the tool'
-sq_bad "nothing is imported" 'STEP 1: GATHER' 'IMPORT:
-STEP 1: GATHER' 'FWL has no IMPORT: nothing is imported any more'
-sq_bad "ELIF is ELSE IF" '    ELSE IF {f} is empty:' '    ELIF {f} is empty:' 'FWL has no ELIF: write ELSE IF'
-sq_bad "backtick names are gone" 'List {folder} with' 'List `folder` with' 'write \{folder\}, not `folder`'
-sq_bad "a value read before anything fills it" 'IF {f.name} is "notes.txt":' 'IF {g.name} is "notes.txt":' 'FLOW.fwl:6: error: \{g\} has no value here'
-sq_bad "loop value used after its loop" 'RETURN "Read' 'RETURN "{f.name} Read' 'only exists inside its FOR EACH'
-sq_bad "a value filled and never used is a warning" 'Skip it.' 'Skip it and call the reason {reson}.' 'FLOW.fwl:9: warning: \{reson\} is filled here and never used again'
-sq_bad "END lines are gone" 'RETURN "Read' 'END FOR
-RETURN "Read' 'FLOW.fwl:13: error: FWL has no END line: a block ends where its indentation ends'
-sq_bad "THEN is gone" '"notes.txt":' '"notes.txt" THEN' 'IF reads: IF <condition>:  \(no THEN'
-sq_bad "IF without its colon" '"notes.txt":' '"notes.txt"' 'IF reads: IF <condition>:'
-sq_bad "a block with nothing indented under it" '            Read {f.name}' 'Read {f.name}' 'FLOW.fwl:11: error: this line opens a block, but nothing is indented under it'
-sq_bad "indentation that matches no block" '        Skip it.' '        Skip it.
-      Skip it again.' 'FLOW.fwl:10: error: this line.s indentation matches no block'
-sq_bad "indentation with no block above it" 'List {folder}' '    List {folder}' 'FLOW.fwl:3: error: this line is indented deeper than the lines around it'
-sq_bad "ELSE lines up with its IF" '    ELSE:' '        ELSE:' 'ELSE lines up with its IF \(the IF on line 6\)'
-sq_bad "tabs are not indentation" '        Skip it.' '	Skip it.' 'indent with spaces, not tabs'
-sq_bad "CONNECT points to config.json" 'STEP 1: GATHER' 'CONNECT mcp://x AS y
-STEP 1: GATHER' 'FWL has no CONNECT: list MCP servers in config.json'
-sq_bad "no Markdown fence" 'STEP 1: GATHER' '```fwl
-STEP 1: GATHER' 'FLOW.fwl is plain FWL: no ``` fence'
-sq_bad "Markdown headings are rejected" 'STEP 1: GATHER' '## STEP 1: GATHER' 'Markdown .* is not part of FWL'
-sq_bad "STEP labels are numbered in order" 'STEP 2: WORK' 'STEP 3: WORK' 'warning: STEP 3 follows STEP 1'
-sq_bad "decisions written as prose are a warning" 'Skip it.' 'if it is empty, skip it' "FLOW.fwl:9: warning: write 'if' as FWL structure"
-sq_bad "ASK choices come at least in twos" '"Which folder?" into' '"Which folder?" [one] into' 'ASK \[...\] needs at least two choices'
-sq_bad "ASK USER is just ASK" 'ASK "Which folder?"' 'ASK USER "Which folder?"' 'ASK reads: ASK "question"'
-sq_bad "a WHILE wants a bound" 'RETRY 2 times:' 'WHILE {f} is not empty:' 'warning: give the WHILE loop a bound'
-mv "$T/flow_good/FLOW.fwl" "$T/flow_good/FLOW.md"
-build "$T/flow_good" "$T/flow_bad.bot"
-check "FWL: an old FLOW.md is reported" "$T/build.log" "FLOW.md: the flow is now FLOW.fwl"
-mv "$T/flow_good/FLOW.md" "$T/flow_good/FLOW.fwl"
+# the flow languages are gone: an old flow file says what to do instead and stops the build
+for old in FLOW.fwl FLOW.md SQNC.md; do
+    mkagent "$T/flow_old"
+    rm -f "$T/flow_old/"*.fwl "$T/flow_old/"FLOW.md "$T/flow_old/"SQNC.md "$T/flow_old.bot"
+    echo 'RETURN "x"' >"$T/flow_old/$old"
+    build "$T/flow_old" "$T/flow_old.bot"
+    check "an old $old is reported" "$T/build.log" "$old is no longer used: write how the agent works in agent.md"
+    [ -e "$T/flow_old.bot" ] && fail "an old $old stops the build"
+done
 
 # config.json: checked by the build, shown by list, --version, the start-up line and the system prompt
 mkagent "$T/meta" '{"name": "meta-agent", "display_name": "Meta Agent", "version": "1.2.3", "description": "Tests metadata."}'
@@ -164,10 +116,6 @@ mkagent "$T/cfg_old"
 echo '{}' >"$T/cfg_old/agent.json"
 "$PACK" check "$T/cfg_old" "$CORE" >"$T/build.log" 2>&1
 check "config.json: an old agent.json is reported" "$T/build.log" "agent.json is now config.json"
-mkagent "$T/flow_old"
-printf '```sqnc\nRETURN "x"\n```\n' >"$T/flow_old/SQNC.md"
-"$PACK" check "$T/flow_old" "$CORE" >"$T/build.log" 2>&1
-check "an old SQNC.md is reported" "$T/build.log" "SQNC.md: the flow is now FLOW.fwl"
 # skills / tools lists choose what is compiled in
 mkagent "$T/pick" '{"name": "pick", "version": "1.0.0", "description": "d", "skills": ["keep"], "tools": ["tkeep"], "requires": ["python3"]}'
 mkdir -p "$T/pick/skills/keep" "$T/pick/skills/drop" "$T/pick/tools/bin" "$T/pick/tools/doc"
@@ -226,7 +174,6 @@ echo comment-ok"
 drive "$T/on.bot" "$T/ws"
 check "classifier: an apostrophe in a # comment does not make a command unsafe" "$T/rec/tool.txt" "comment-ok"
 check "online agent: system prompt says internet access" "$T/rec/system.txt" "You have internet access"
-check_not "no FLOW.fwl: no flow instruction in the system prompt" "$T/rec/system.txt" "driven by its FLOW.fwl"
 
 shell_call "python3 -c \"import socket;socket.create_connection(('127.0.0.1',$PORT));print('NET-OK')\""
 drive "$T/on.bot" "$T/ws"
@@ -324,15 +271,6 @@ stub_start --text /dev/null
 drive "$T/skilled.bot" "$T/ws"
 check "system prompt lists skills with their frontmatter descriptions" "$T/rec/system.txt" "skills/pitching/SKILL.md: Write one specific idea per lead"
 
-mkagent "$T/flowagent"
-cp -r "$T/flow_good/FLOW.fwl" "$T/flow_good/skills" "$T/flowagent/"
-build "$T/flowagent" "$T/flow.bot"
-stub_start --text /dev/null
-(cd "$T/ws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nhello after the flow\n/exit\n' "$PORT" |
-    timeout 60 "$T/flow.bot" >"$T/out" 2>&1)
-check "FLOW.fwl present: the flow starts by itself" "$T/out" "Which folder\\?"
-check "FLOW.fwl present: system prompt explains the [FWL] steps" "$T/rec/system.txt" "session is driven by its FLOW.fwl flow"
-
 stub_start --text /dev/null
 drive "$T/meta.bot" "$T/ws"
 check "config.json: the agent shows its display name and version at start" "$T/out" "Meta Agent.*1\.2\.3.*Tests metadata"
@@ -342,65 +280,29 @@ build "$T/needcmd" "$T/needcmd.bot"
 drive "$T/needcmd.bot" "$T/ws"
 check "config.json requires: missing programs are reported at start" "$T/out" "not installed here: definitely-not-installed-cmd"
 
-# FWL interpreter: botcore follows the structure; sentences and judgements go to the LLM
-mkagent "$T/sqagent"
-cp "$TESTS/run.fwl" "$T/sqagent/FLOW.fwl"
-build "$T/sqagent" "$T/sq.bot"
-check_not "FWL: the interpreter test flow builds" "$T/build.log" "error"
-sq_drive() {
-    rm -rf "$T/sqws"; mkdir -p "$T/sqws"
-    (cd "$T/sqws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nAlice\npurple\n2\n/exit\n' "$PORT" |
-        timeout 60 "$T/sq.bot" >"$T/out" 2>&1)
-}
-stub_start --fwl yes
-sq_drive
-check "FWL: ASK shows the question" "$T/out" "What is your name\\?"
-check "FWL: RETURN fills in values, a prose decision, .length, a choice and a tool's own output" "$T/out" "Hi Alice, mood happy, 3 items, green, tool-ran"
-check "FWL: decisions get the history as text, no tool calls (Gemini answers those with a call)" "$T/rec/decide_hist.txt" "tool messages: 0, tools offered: 0"
-check "FWL: STEP headings are shown" "$T/out" "Step 2 · WORK"
-check "FWL: a sentence that names a tool runs it" "$T/out" "Running a command"
-check "FWL: the model is told which tool \$name means" "$T/rec/user_all.txt" 'shell_exec means your tool shell_exec: use exactly that tool'
-check "FWL: and which value the step produces" "$T/rec/user_all.txt" '\{out\} is what this step produces'
-check "FWL: RETRY repeats a failing step" "$T/out" "Retrying \\(2 of 2\\)"
-check "FWL: ASK with choices lists them" "$T/out" "1\\) red"
-check "FWL: an answer that is no choice is asked again" "$T/out" "Please pick one of the choices"
-check "FWL: FOR EACH + IF run the sentence for the matching item" "$T/rec/fwl.txt" "line 12\\] Mention the letter"
-check_not "FWL: a comparison of values is decided without the LLM" "$T/rec/fwl.txt" 'Decide whether this condition is true right now: \{it\}'
-check "FWL: a condition that needs judgement is decided by the LLM" "$T/rec/fwl.txt" 'Decide whether this condition is true right now: the user \{name\} seems happy'
-check "FWL: a decision shows the values it names in full" "$T/rec/decide.txt" '^\{name\} = Alice'
-stub_start --fwl no
-sq_drive
-check "FWL: the LLM's 'no' takes the ELSE branch" "$T/out" "Hi Alice, mood sad"
-
-# Sub-agents: agents/<name>/agent.md, DELEGATE TO in FWL, the delegate tool for the model
+# Sub-agents: agents/<name>/agent.md, reached by the model's delegate tool or a function's bot.agent
 mkagent "$T/team"
-mkdir -p "$T/team/agents/helper"
+mkdir -p "$T/team/agents/helper" "$T/team/functions"
 printf -- '---\ndescription: Answers pings.\n---\nYou are ZETA, the helper.\n' >"$T/team/agents/helper/agent.md"
-cp -r "$T/team" "$T/team2"
-printf 'Ask @helper this: "ping". Keep its answer as {got}.\nRETURN "Got: {got}"\n' >"$T/team/FLOW.fwl"
+printf -- '--- Ask the helper.\n---@param task string  what to ask\nfunction ask_helper(task)\n  return "helper said: " .. bot.agent("helper", task)\nend\n' >"$T/team/functions/team.lua"
 build "$T/team" "$T/team.bot"
-check_not "sub-agents: a flow that delegates builds" "$T/build.log" "error"
-echo "pong-from-sub" >"$T/pong"
-stub_start --fwl yes --text "$T/pong"
-drive "$T/team.bot" "$T/ws"
-check "sub-agents: a sentence that names @agent gets the sub-agent's own reply" "$T/out" "Got: pong-from-sub"
-check "sub-agents: the sub-agent runs on its own persona" "$T/rec/subsystem.txt" "You are ZETA, the helper"
-check_not "sub-agents: the frontmatter is not part of the persona" "$T/rec/subsystem.txt" "description: Answers"
-check "sub-agents: it sees only the context it was given" "$T/rec/subuser.txt" "^ping"
-check_not "sub-agents: a sub-agent cannot delegate further" "$T/rec/subtools.txt" "delegate"
-check "sub-agents: the main agent is told about them" "$T/rec/system.txt" "helper: Answers pings"
-check "sub-agents: the main agent gets the delegate tool" "$T/rec/tools.txt" "delegate"
-build "$T/team2" "$T/team2.bot"
+check "sub-agents: a function that delegates is reported as such" "$T/build.log" "ask_helper \(other agents\)"
 tool_call delegate '{"agent": "helper", "task": "ping2"}'
-drive "$T/team2.bot" "$T/ws"
+drive "$T/team.bot" "$T/ws"
 check "sub-agents: the model can delegate by itself" "$T/out" "Handing work to another agent"
 check "sub-agents: the task reaches the sub-agent" "$T/rec/subuser.txt" "^ping2"
 check "sub-agents: its result comes back as the tool result" "$T/rec/tool.txt" "^done"
-sed -i 's/@helper/@nobody/' "$T/team/FLOW.fwl"
+check "sub-agents: the sub-agent runs on its own persona" "$T/rec/subsystem.txt" "You are ZETA, the helper"
+check_not "sub-agents: the frontmatter is not part of the persona" "$T/rec/subsystem.txt" "description: Answers"
+check_not "sub-agents: a sub-agent cannot delegate further" "$T/rec/subtools.txt" "delegate"
+check "sub-agents: the main agent is told about them" "$T/rec/system.txt" "helper: Answers pings"
+check "sub-agents: the main agent gets the delegate tool" "$T/rec/tools.txt" "delegate"
+tool_call ask_helper '{"task": "ping3"}'
+drive "$T/team.bot" "$T/ws"
+check "sub-agents: bot.agent hands a function's task to a sub-agent" "$T/rec/subuser.txt" "^ping3"
+check "sub-agents: and the function gets its answer" "$T/rec/tool.txt" "^helper said: done"
+echo "You are a helper." >"$T/team/agents/helper/agent.md"
 build "$T/team" "$T/team_bad.bot"
-check "sub-agents: delegating to a missing one is an error" "$T/build.log" '@nobody: no such agent \(a sub-agent agents/nobody/agent.md'
-echo "You are a helper." >"$T/team2/agents/helper/agent.md"
-build "$T/team2" "$T/team_bad.bot"
 check "sub-agents: one without a description is an error" "$T/build.log" 'agents/helper/agent.md: start it with a frontmatter'
 
 # MCP and A2A (calling out): servers and remote agents from config.json, one HTTPS request per call
@@ -412,15 +314,16 @@ mkagent "$T/net" "{\"name\": \"net\", \"version\": \"1.0.0\", \"description\": \
   \"mcp\": {\"new\": {\"url\": \"http://127.0.0.1:$RPORT/mcp-new\", \"token\": \"MCP_TOKEN\"},
             \"old\": {\"url\": \"http://127.0.0.1:$RPORT/mcp-old\", \"token\": \"MCP_TOKEN\"}},
   \"agents\": {\"peer\": {\"url\": \"http://127.0.0.1:$RPORT/peer\", \"token\": \"PEER_TOKEN\", \"description\": \"Says things back.\"}}}"
-printf 'Echo with $new_echo, passing {"text": "hi"}, and keep its answer as {a}.\nEcho with $old_echo, passing {"text": "yo"}, and keep its answer as {b}.\nAsk @peer this: "ping". Keep its answer as {c}.\nRETURN "{a} | {b} | {c}"\n' >"$T/net/FLOW.fwl"
+mkdir -p "$T/net/functions"
+printf -- '--- Use every remote thing once.\nfunction use_all()\n  return bot.mcp("new", "echo", { text = "hi" }) .. " | " .. bot.mcp("old", "echo", { text = "yo" }) .. " | " .. bot.agent("peer", "ping")\nend\n' >"$T/net/functions/net.lua"
 build "$T/net" "$T/net.bot"
-check_not "MCP/A2A: a flow that uses an MCP tool and a remote agent builds" "$T/build.log" "error"
+check "MCP/A2A: a function that uses MCP servers and a remote agent builds" "$T/build.log" "use_all \\(MCP servers, other agents\\)"
 rm -rf "$T/netws"; mkdir -p "$T/netws"
 printf 'MCP_TOKEN=tok-mcp\nexport PEER_TOKEN="tok-a2a"\n' >"$T/netws/.env"
-stub_start --fwl yes
+tool_call use_all '{}'
 drive "$T/net.bot" "$T/netws"
 check "MCP: the servers' tools are listed at start" "$T/out" "MCP new: 1 tool"
-check "MCP + A2A: tools on both kinds of server and the remote agent answer" "$T/out" "echo:hi \\| echo:yo \\| remote says: ping"
+check "MCP + A2A: bot.mcp on both kinds of server and bot.agent to the remote agent answer" "$T/rec/tool.txt" "echo:hi \\| echo:yo \\| remote says: ping"
 check "MCP: a stateless server gets no handshake, the headers say what is asked" "$T/rrec/mcp-new.txt" "^tools/call version=2026-07-28 method=tools/call name=echo session=None meta=yes"
 check_not "MCP: a stateless server is never sent initialize" "$T/rrec/mcp-new.txt" "^initialize"
 check "MCP: an older server gets its session handshake" "$T/rrec/mcp-old.txt" "^notifications/initialized version=2025-06-18 .* session=sid-1"
@@ -442,21 +345,20 @@ cp "$TESTS/mcp_stdio_server.py" "$T/" # inside the sandbox the server sees what 
 mkagent "$T/local" "{\"name\": \"local\", \"version\": \"1.0.0\", \"description\": \"Starts an MCP server.\", \"requires\": [\"python3\"],
   \"mcp\": {\"loud\": {\"command\": [\"python3\", \"$T/mcp_stdio_server.py\"], \"env\": [\"LOUD_SUFFIX\"]},
             \"gone\": {\"command\": [\"definitely-not-an-mcp-server\"]}}}"
-printf 'Shout with $loud_shout, passing {"text": "hi"}, and keep its answer as {a}.\nRETURN "{a}"\n' >"$T/local/FLOW.fwl"
 build "$T/local" "$T/local.bot"
-check_not "MCP command: a flow that uses a started server's tool builds" "$T/build.log" "error"
+check_not "MCP command: an agent with a started server builds" "$T/build.log" "error:"
 check "MCP command: a program that is not in requires is a warning" "$T/build.log" 'mcp "gone" starts "definitely-not-an-mcp-server": list it in "requires"'
 rm -rf "$T/localws"; mkdir -p "$T/localws"
 echo 'LOUD_SUFFIX=!!' >"$T/localws/.env"
-stub_start --fwl yes
+tool_call loud_shout '{"text": "hi"}'
 drive "$T/local.bot" "$T/localws"
 check "MCP command: the server is started and its tools listed" "$T/out" "MCP loud: 1 tool"
-check "MCP command: its tool runs, with the secret it was given by name" "$T/out" "HI!! home-"
+check "MCP command: its tool runs, with the secret it was given by name" "$T/rec/tool.txt" "HI!! home-"
 check "MCP command: a server that is not installed is reported, the agent still starts" "$T/out" 'MCP gone is not available: "definitely-not-an-mcp-server" did not start'
 if grep -q "Landlock unavailable" "$T/out"; then
     skip "MCP command: the server runs inside the sandbox (no Landlock here)"
 else
-    check "MCP command: the server runs inside the tools' sandbox" "$T/out" "HI!! home-denied"
+    check "MCP command: the server runs inside the tools' sandbox" "$T/rec/tool.txt" "HI!! home-denied"
 fi
 sed -i 's|"command": \["python3", |"url": "https://x.invalid/mcp", "command": ["python3", |' "$T/local/config.json"
 build "$T/local" "$T/local_bad.bot"
@@ -502,7 +404,7 @@ send({"method": "session/cancel", "params": {"sessionId": sid}})
 print(json.dumps(until(2)), "after %.1fs" % (time.time() - t))
 PY
 check "ACP: session/cancel stops a running turn" "$T/acp.log" '"stopReason": "cancelled".* after [0-2]\.'
-stub_start --fwl yes --text "$T/said"
+stub_start --text "$T/said"
 printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\nA2A_TOKEN=open-sesame\n' "$PORT" >"$T/sws/.env"
 APORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 (cd "$T/sws" && exec "$T/served.bot" --a2a "$APORT" >"$T/a2a.out" 2>&1) &
@@ -540,12 +442,16 @@ check "A2A: there are no tasks to get" "$T/a2a.log" '^task .*"code": -32001'
 # one Botter agent calling another
 mkagent "$T/caller" "{\"name\": \"caller\", \"version\": \"1.0.0\", \"description\": \"Calls the served agent.\",
   \"agents\": {\"served\": {\"url\": \"http://127.0.0.1:$APORT\", \"token\": \"SERVED_TOKEN\"}}}"
-printf 'Ask @served this: "are you there?". Keep its answer as {reply}.\nRETURN "Served said: {reply}"\n' >"$T/caller/FLOW.fwl"
 build "$T/caller" "$T/caller.bot"
 rm -rf "$T/cws"; mkdir -p "$T/cws"
 echo "SERVED_TOKEN=open-sesame" >"$T/cws/.env"
-drive "$T/caller.bot" "$T/cws"
-check "A2A: one Botter agent delegates to another over the network" "$T/out" "Served said: reply-from-the-model"
+# the caller's own model is a second stub: it asks to delegate; the served agent answers from the first
+python3 "$TESTS/stub_llm.py" --portfile "$T/port2" --record "$T/rec2" --tool delegate --args '{"agent": "served", "task": "are you there?"}' &
+STUB2=$!
+i=0; while [ ! -s "$T/port2" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+(cd "$T/cws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\n/exit\n' "$(cat "$T/port2")" | timeout 60 "$T/caller.bot" >"$T/out" 2>&1)
+kill "$STUB2" 2>/dev/null
+check "A2A: one Botter agent delegates to another over the network" "$T/rec2/tool.txt" "reply-from-the-model"
 kill "$A2A" 2>/dev/null
 printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/sws/.env"
 (cd "$T/sws" && timeout 10 "$T/served.bot" --a2a "0.0.0.0:$APORT" >"$T/a2a.out" 2>&1)
@@ -598,21 +504,6 @@ check "MCP server over HTTP: tools/list without a handshake" "$T/mcp.log" '^list
 check "MCP server over HTTP: a caller without the token is refused" "$T/mcp.log" "^noauth 401"
 check "MCP server over HTTP: a notification is accepted" "$T/mcp.log" "^note 202"
 check "MCP server over HTTP: a tool call returns the agent.s reply" "$T/mcp.log" '^call 200 .*"text": ?"reply-from-the-model'
-
-# fwl_review: the LLM's logic check of a project's FLOW.fwl (builder agents only)
-mkagent "$T/builder" '{"builder": true}'
-build "$T/builder" "$T/builder.bot"
-mkdir -p "$T/revws"
-cp "$TESTS/run.fwl" "$T/revws/FLOW.fwl"
-echo "An agent that greets people." >"$T/revws/agent.md"
-tool_call fwl_review '{}'
-drive "$T/builder.bot" "$T/revws"
-check "fwl_review: the verdict reaches the agent" "$T/rec/tool.txt" '"makes_sense":false'
-check "fwl_review: the report says why and what to do instead" "$T/rec/tool.txt" "why: reads a file that is never written"
-check "fwl_review: the reviewer gets FLOW.fwl with line numbers and agent.md" "$T/rec/review.txt" "An agent that greets people"
-tool_call fwl_review '{}'
-drive "$T/on.bot" "$T/revws"
-check "fwl_review: not available to ordinary agents" "$T/rec/tool.txt" "unknown tool 'fwl_review'"
 
 shell_call "echo no-curl-needed"
 drive "$T/on.bot" "$T/ws" PATH=/nonexistent
@@ -671,6 +562,181 @@ check "vault: the sealed LLM key is the one used" "$T/rec/auth.txt" "Bearer sk-s
 check "vault: three wrong passwords and it gives up" "$T/out" "Giving up"
 (cd "$T/sealws" && timeout 20 "$T/sealed.bot" --a2a 18999 >"$T/out" 2>&1)
 check "vault: served without a terminal, it says how to unlock first" "$T/out" "run it once in a terminal first"
+
+# ---------------------------------------------------------------------------
+section "Functions (Lua), batch mode, images, usage"
+
+mkagent "$T/fn" '{"name": "fn", "version": "1.0.0", "description": "Lua test agent.", "temperature": 0, "seed": 7}'
+mkdir -p "$T/fn/functions/tests"
+cat >"$T/fn/functions/money.lua" <<'EOF'
+--- Add up amounts.
+---@param amounts number[]  the amounts
+---@param label string?  what they are
+---@return table  {total, count, label}
+function total(amounts, label)
+  local sum = 0
+  for _, a in ipairs(amounts) do
+    sum = sum + a
+  end
+  return { total = sum, count = #amounts, label = label or "amounts" }
+end
+
+--- Read a file in the working folder.
+---@param path string  the file
+function read_file(path)
+  return bot.fs.read(path)
+end
+
+--- Write a CSV of totals.
+---@param path string  where
+function write_totals(path)
+  bot.fs.write(path, bot.csv.encode({ { name = "a, b", total = 3 } }, { "name", "total" }))
+  return "written"
+end
+
+--- Fails on purpose.
+---@param why string  the reason
+function fail_now(why)
+  error("cannot: " .. why)
+end
+
+local function helper() return 1 end
+EOF
+cat >"$T/fn/functions/tests/money_test.lua" <<'EOF'
+function test_total()
+  assert(total({1, 2, 3.5}).total == 6.5)
+end
+function test_dates()
+  assert(bot.date.add_days("2026-02-28", 1) == "2026-03-01")
+  assert(bot.date.add_months("2026-01-31", 1) == "2026-02-28")
+  assert(bot.date.diff_days("2026-09-07", "2026-12-06") == 90)
+end
+function test_csv_keeps_blank_fields()
+  local rows = bot.csv.parse('id,amount\ne1,\ne2,"1,5"\n')
+  assert(#rows == 2 and rows[1].amount == "" and rows[2].amount == "1,5")
+end
+EOF
+"$PACK" build "$T/fn" "$CORE" "$T/fn.bot" >"$T/build.log" 2>&1
+check "functions: packer lists each function, pure or what it reaches" "$T/build.log" "functions: total \(pure\), read_file \(reads files\), write_totals \(writes files\), fail_now \(pure\)"
+check "functions: tests in functions/tests run at build time" "$T/build.log" "function tests: 3 passed, 0 failed"
+"$PACK" list "$T/fn.bot" >"$T/list.log" 2>&1
+check "functions: the .lua files are embedded" "$T/list.log" "functions/money.lua"
+check_not "functions: their tests are not" "$T/list.log" "money_test"
+# fn_bad NAME OLD NEW PATTERN: money.lua with OLD replaced by NEW must not build and must report PATTERN
+fn_bad() {
+    rm -rf "$T/fnb" "$T/fnb.bot"
+    cp -r "$T/fn" "$T/fnb"
+    python3 -c 'import sys;p=sys.argv[1];s=open(p).read();assert sys.argv[2] in s;open(p,"w").write(s.replace(sys.argv[2],sys.argv[3],1))' \
+        "$T/fnb/${5:-functions/money.lua}" "$2" "$3"
+    "$PACK" build "$T/fnb" "$CORE" "$T/fnb.bot" >"$T/lint.log" 2>&1
+    if [ -e "$T/fnb.bot" ]; then fail "functions: $1 (it was built)"; else check "functions: $1" "$T/lint.log" "$4"; fi
+}
+fn_bad "a syntax error stops the build, with its line" 'sum = sum + a' 'sum = sum +' 'functions/money.lua:[0-9]+: error: .*unexpected symbol'
+fn_bad "every parameter needs a @param" '---@param path string  where' '--- (where)' 'write_totals: parameter path has no ---@param line'
+fn_bad "an unknown type is an error" '---@param why string' '---@param why text' '@param why: unknown type text'
+fn_bad "a function cannot take a tool's name" 'function read_file(path)' 'function fs_read(path)' 'fs_read is already a tool.s name'
+fn_bad "a failing test stops the build" '== 6.5' '== 7' 'test test_total FAILED' functions/tests/money_test.lua
+
+# runtime: the model calls a function; arguments as the model sends them ("3.5" for a number)
+mkdir -p "$T/fnws"
+tool_call total '{"amounts":[1,2,"3.5"],"label":"fees"}'
+drive "$T/fn.bot" "$T/fnws"
+check "functions: the model's call runs the Lua function" "$T/rec/tool.txt" '"total":6.5'
+check "functions: a documented function is offered as a tool" "$T/rec/tools.txt" "total read_file write_totals fail_now"
+check_not "functions: a local helper is not a tool" "$T/rec/tools.txt" "helper"
+check "config.json temperature and seed reach every request" "$T/rec/sampling.txt" "temperature=0 seed=7"
+tool_call fail_now '{"why":"no data"}'
+drive "$T/fn.bot" "$T/fnws"
+check "functions: an error comes back with its file and line" "$T/rec/tool.txt" "ERROR: functions/money.lua:[0-9]+: cannot: no data"
+echo "inside" >"$T/fnws/in.txt"
+tool_call read_file '{"path":"in.txt"}'
+drive "$T/fn.bot" "$T/fnws"
+check "functions: bot.fs reads inside the working directory" "$T/rec/tool.txt" "^inside"
+tool_call read_file '{"path":"/etc/hostname"}'
+drive "$T/fn.bot" "$T/fnws"
+check "functions: bot.fs refuses paths outside it" "$T/rec/tool.txt" "outside the working directory"
+tool_call write_totals '{"path":"out.csv"}'
+drive "$T/fn.bot" "$T/fnws"
+check "functions: bot.fs.write and bot.csv.encode (quoted field)" "$T/fnws/out.csv" '^"a, b",3$'
+
+# bot.http and bot.shell: the network and commands, under the same rules as the model's own tools
+mkdir -p "$T/fnio/functions"
+echo "You are a test agent." >"$T/fnio/agent.md"
+cat >"$T/fnio/functions/outside.lua" <<'EOF'
+--- Fetch the address in TEST_URL and say what came back.
+function fetch()
+  local r = bot.http.get(bot.secret("TEST_URL"), { ["X-Test"] = "yes" })
+  return { status = r.status, model = r.json.data[1].id }
+end
+
+--- Fetch any address.
+---@param url string  the address
+function fetch_url(url)
+  return bot.http.get(url).status
+end
+
+--- Run a command.
+---@param cmd string  the command
+function run(cmd)
+  local out, code = bot.shell(cmd)
+  return { out = out, code = code }
+end
+EOF
+build "$T/fnio" "$T/fnio.bot"
+check "functions: what reaches the network, commands and secrets is reported" "$T/build.log" "fetch \(the network, secrets\), fetch_url \(the network\), run \(commands\)"
+mkdir -p "$T/fnio/off" && cp -r "$T/fnio/agent.md" "$T/fnio/functions" "$T/fnio/off/"
+echo '{"internet": false}' >"$T/fnio/off/config.json"
+build "$T/fnio/off" "$T/fnio_off.bot"
+tool_call fetch '{}'
+echo "TEST_URL=http://127.0.0.1:$PORT/v1/models" >"$T/fnws/.env"
+drive "$T/fnio.bot" "$T/fnws"
+check "bot.http: a GET with headers, its JSON decoded, a secret from .env" "$T/rec/tool.txt" '"status":200'
+check "bot.http: the decoded JSON is a table" "$T/rec/tool.txt" '"model":"stub"'
+drive "$T/fnio_off.bot" "$T/fnws"
+check "bot.http: an offline agent's functions have no network" "$T/rec/tool.txt" "this agent is offline"
+tool_call fetch_url '{"url": "http://example.com/"}'
+drive "$T/fnio.bot" "$T/fnws"
+check "bot.http: plain http only to this machine" "$T/rec/tool.txt" "must start with https://"
+tool_call run '{"cmd": "echo from-shell; exit 3"}'
+drive "$T/fnio.bot" "$T/fnws"
+check "bot.shell: the output and the exit code" "$T/rec/tool.txt" '"out":"from-shell".*"code":3|"code":3.*"out":"from-shell"'
+tool_call run '{"cmd": "rm -rf ./nothing-here"}'
+drive "$T/fnio.bot" "$T/fnws"
+check "bot.shell: a risky command needs a yes, which nobody gave" "$T/rec/tool.txt" "ERROR: bot.shell: .*denied"
+rm -f "$T/fnws/.env"
+
+# batch mode: one task (reply alone on stdout), or one task per line (JSON lines), each in a fresh conversation
+stub_start
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/fnws/.env"
+(cd "$T/fnws" && timeout 60 "$T/fn.bot" --run "say hi" >"$T/out" 2>"$T/err")
+check "--run TASK: stdout is the reply only" "$T/out" "^done$"
+check "--run TASK: the model is told nobody is there" "$T/rec/system.txt" "running unattended"
+check "--run TASK: token usage on stderr" "$T/err" 'usage: \{"model":"stub","calls":1,"input_tokens":11,"output_tokens":7\}'
+check "--run: streaming asks for usage" "$T/rec/sampling.txt" "usage=True"
+(cd "$T/fnws" && printf 'first task\n\nsecond task\n' | timeout 60 "$T/fn.bot" --run >"$T/out" 2>"$T/err")
+check "--run: one JSON line per task" "$T/out" '^\{"input":"second task","reply":"done"\}$'
+if [ "$(wc -l <"$T/out")" -eq 2 ]; then pass "--run: blank lines are not tasks"; else fail "--run: blank lines are not tasks" "$(cat "$T/out")"; fi
+check "--run: each task starts a fresh conversation" "$T/rec/user.txt" "^second task$"
+check_not "--run: nothing else on stdout" "$T/out" "Connected|Using"
+rm -f "$T/fnws/.env"
+(cd "$T/fnws" && timeout 30 "$T/fn.bot" --run "say hi" >"$T/out" 2>"$T/err"; echo "exit $?" >>"$T/err")
+check "--run without a model connection says how to give one" "$T/err" "No saved model connection, and nobody to ask here"
+check "--run without a model connection fails (exit 1)" "$T/err" "^exit 1$"
+check_not "--run without a model connection shows no provider menu" "$T/err" "Select an OpenAI-compatible provider"
+
+# image_view: the picture goes to the model for the turn, then leaves the conversation
+python3 -c 'import zlib,struct
+def ch(t,d): return struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)&0xffffffff)
+open("'"$T/fnws/pic.png"'","wb").write(b"\x89PNG\r\n\x1a\n"+ch(b"IHDR",struct.pack(">IIBBBBB",1,1,8,2,0,0,0))+ch(b"IDAT",zlib.compress(b"\0\0\0\0"))+ch(b"IEND",b""))'
+tool_call image_view '{"path":"pic.png"}'
+(cd "$T/fnws" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nlook\nagain\n/exit\n' "$PORT" | timeout 60 "$T/fn.bot" >"$T/out" 2>&1)
+check "image_view: the image reaches the model after the tool call" "$T/rec/parts_all.txt" "^text image_url$"
+check "image_view: the next turn has a note instead of the image" "$T/rec/parts_all.txt" "^text text( |$)"
+check "image_view: the tool says the image is attached" "$T/rec/tool_all.txt" "pic.png \(image/png, [0-9]+ bytes\) is attached"
+echo "not an image" >"$T/fnws/fake.png"
+tool_call image_view '{"path":"fake.png"}'
+drive "$T/fn.bot" "$T/fnws"
+check "image_view: a file that is not an image is refused" "$T/rec/tool.txt" "is not a PNG, JPEG, GIF or WEBP image"
 
 # ---------------------------------------------------------------------------
 section "Pack integrity"
@@ -765,8 +831,8 @@ if command -v tmux >/dev/null 2>&1; then
     tmux kill-server 2>/dev/null
     check "Ctrl-C cancels an in-flight LLM request within a second" "$T/tmux.txt" "\\(interrupted\\)"
 
-    # Botter's TUI: its flow asks first; the first message answers it, later ones are chat tagged [N]
-    stub_start --fwl yes
+    # Botter's TUI: messages are chat tagged [N]; the header goes with the first one
+    stub_start
     tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "env BOTTER_THEME=dark $BOTTER"
     sleep 0.8
     for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
@@ -783,11 +849,10 @@ if command -v tmux >/dev/null 2>&1; then
     check "TUI: messages reach the model tagged with their number" "$T/rec/user.txt" "^\\[2\\] second message"
     check "TUI: the model is told what the numbers mean" "$T/rec/system.txt" "numbers each user message and your reply"
     check_not "TUI: header is gone after the first message" "$T/tui.txt" "the agent that builds agents"
-    if head -4 "$T/tui.txt" | grep -q "What agent should I build"; then pass "TUI: the flow's question stays at the top when the header goes"; else fail "TUI: the flow's question stays at the top when the header goes"; fi
-    check "TUI: the first message answered the flow" "$T/rec/fwl.txt" "Answer the question"
+    check "TUI: the first message is number 1" "$T/rec/user_all.txt" "^\\[1\\] first message"
 
     # TUI after a tool call: streamed reply shown once, tool internals hidden
-    stub_start --fwl yes --tool shell_exec --args '{"command":"echo hi"}'
+    stub_start --tool shell_exec --args '{"command":"echo hi"}'
     tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "env BOTTER_THEME=dark $BOTTER"
     sleep 0.8
     for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
@@ -795,8 +860,6 @@ if command -v tmux >/dev/null 2>&1; then
         sleep 0.3
     done
     sleep 0.8
-    tmux send-keys -t botter-test "hello" Enter
-    sleep 1
     tmux send-keys -t botter-test "run it" Enter
     sleep 1.5
     tmux capture-pane -t botter-test -p >"$T/tui.txt"

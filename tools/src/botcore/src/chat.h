@@ -18,6 +18,7 @@ typedef struct {
     int    thoughts; /* ask Gemini for its thoughts (cleared if the endpoint refuses) */
     int    want_thoughts; /* the UI shows reasoning (chat_set_events) */
     int    no_stream;     /* endpoint refused "stream": true; plain responses from now on */
+    cJSON *images;        /* content parts image_view attached during this turn, sent before the next request */
 } chat_t;
 
 /* Events (only when an event callback is set; reasoning is then also kept out of the reply). */
@@ -66,13 +67,6 @@ void chat_clear(chat_t *c);
 /* Set (or, with NULL/"", clear) the system prompt. Never trimmed from history. */
 int  chat_set_system(chat_t *c, const char *text);
 
-/*
- * A side question: with_history = the whole conversation plus `question` (as a
- * user message), else just `system` + `question`. No tools, not streamed, and
- * the history is not changed. *reply has reasoning (<think> blocks) removed.
- */
-int  chat_ask(chat_t *c, const char *system, const char *question, int with_history, char **reply, char **err);
-
 /* GET {base}/models. On failure *err is a malloc'd message. */
 int  chat_validate(chat_t *c, char **err);
 
@@ -84,5 +78,25 @@ int  chat_validate(chat_t *c, char **err);
  * user/assistant pairs are dropped first when over CHAT_HIST_MAX_BYTES.
  */
 int  chat_send(chat_t *c, const char *user, char **reply, char **err);
+
+/*
+ * Sampling for every request from now on (config.json "temperature", "seed"): temperature < 0 = the
+ * provider's default; has_seed = 0 sends none. A seed the endpoint refuses is dropped.
+ */
+void chat_set_sampling(double temperature, int has_seed, long long seed);
+
+/*
+ * Show an image to the model: attached to the conversation that is running a tool right now, as a
+ * user message after the tool results, and replaced by a note when the turn ends. 0 ok, -1 nothing is running.
+ */
+int  chat_attach_image(const char *label, const char *mime, const unsigned char *data, size_t len);
+
+/* Tokens used so far, per model (from the endpoints' "usage"; calls without it count as calls only). */
+typedef struct {
+    char      model[128];
+    long      calls;
+    long long input_tokens, output_tokens;
+} chat_usage_t;
+int  chat_usage(const chat_usage_t **u); /* number of models */
 
 #endif

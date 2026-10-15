@@ -19,19 +19,23 @@ How you behave
 - <tone, language, length of answers>
 - <how you decide when to ask a question vs. act>
 
+How a session goes (only for an agent with several steps)
+1. <first step, naming the function, tool or skill it uses>
+2. <next step; say what to check before going on>
+
 Rules
 - <hard limits: things you must never do>
 - <what to do when you do not know: say so, do not guess>
 
 Working with files and tools
 - Your skills and tools are listed in your system prompt and tool definitions.
-- Do not tell the agent to read or follow FLOW.fwl: botcore runs it by itself and hands the agent one [FWL ...] step at a time. agent.md says who the agent is and its rules; FLOW.fwl is the order of steps.
 - Before doing a task a skill covers, read that skill with vfs_read.
 - <which tools to prefer for which job, if the agent has custom tools>
 ```
 
 Guidance
 - One role. If the user describes two jobs, make two agents or make one a skill.
+- The model follows "How a session goes" itself. Keep each step one line; a longer procedure goes in a skill. Rules that must hold exactly (limits, sums, dates) belong in a function, and the step names that function.
 - State what the agent cannot do: it keeps no memory between runs (unless it saves files in its working directory), and, for an offline agent only, it has no internet (or only through its "network" tools, named). Do not let it promise otherwise.
 - Never put secrets in agent.md. It is embedded in the binary in readable form.
 - Do not copy this template blindly; fill it with the user's real requirements and delete empty sections.

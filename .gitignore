@@ -23,3 +23,4 @@ tui/botter-tui-dev
 *.swp
 *.o
 /pitch/
+__pycache__/

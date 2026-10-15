@@ -1,6 +1,6 @@
 agent_build packs a project folder into <folder name>.bot.
 
-Embedded: agent.md, config.json, FLOW.fwl, skills/**, tools/doc/**, tools/bin/* (flat); when config.json lists "skills" / "tools", only those.
+Embedded: agent.md, config.json, functions/*.lua, skills/**, tools/doc/**, tools/bin/* (flat); when config.json lists "skills" / "tools", only those. functions/tests/*.lua run at build time and are not embedded.
 Not embedded: tools/src, artifacts, hidden files, symlinks, anything else.
 
 Examples

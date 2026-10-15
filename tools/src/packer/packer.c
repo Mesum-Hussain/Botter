@@ -6,10 +6,12 @@
  *   packer list  <file.bot>
  *
  * Embeds (read-only) from <agent-dir>:
- *   agent.md, config.json, FLOW.fwl, skills/, agents/, tools/doc/ (recursive)   plain files
- *       (FLOW.fwl is optional: the session flow in FWL, checked by botcore/src/fwl.c; errors stop the build)
+ *   agent.md, config.json, skills/, agents/, tools/doc/ (recursive)   plain files
  *       (config.json: how to build and run the agent, read by load_config/check_config:
- *        name, display_name, version, description, internet, skills, tools, requires, builder)
+ *        name, display_name, version, description, internet, skills, tools, requires, builder,
+ *        mcp, agents, temperature, seed)
+ *   functions/<name>.lua                             the agent's Lua functions (botcore/src/botlua.c checks
+ *       them; functions/tests/<name>.lua run here and are never embedded; any error stops the build)
  *   tools/bin/<name>                                 tool executables: either a
  *       native ELF x86-64 binary (any language that compiles to one) or a script
  *       starting with "#!" (interpreter must exist on the machine running the agent).
@@ -33,6 +35,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cJSON.h"
@@ -317,32 +320,20 @@ static int has_item(const char *path)
     return 0;
 }
 
-#include "../botcore/src/fwl.c"
+#include "../botcore/src/botlua.c"
 
-/* FWL diagnostics in compiler form: FLOW.fwl:LINE: error|warning: message */
-static void fwl_diag(void *ud, int line, int error, const char *msg)
+/* A name some tool of this agent already has: botcore's built-ins, tools/bin, MCP servers' tools. */
+static int known_tool(const char *name)
 {
-    (void)ud;
-    fprintf(stderr, "FLOW.fwl:%d: %s: %s\n", line, error ? "error" : "warning", msg);
-    if (error) {
-        errors++;
-    } else {
-        warnings++;
-    }
-}
-
-/* Names FWL's EXECUTE tool may use: botcore's built-ins and this agent's tools/bin. */
-static int fwl_has_tool(const char *name)
-{
-    static const char *const builtin[] = {"fs_list",  "fs_read",   "fs_write",  "shell_exec", "vfs_list", "vfs_read",
-                                          "get_time", "cron_set",  "cron_list", "cron_delete", NULL};
+    static const char *const builtin[] = {"fs_list",  "fs_read",   "fs_write",  "shell_exec", "vfs_list",   "vfs_read",
+                                          "get_time", "cron_set",  "cron_list", "cron_delete", "image_view", NULL};
     for (int i = 0; builtin[i]; i++) {
         if (strcmp(builtin[i], name) == 0) {
             return 1;
         }
     }
-    if (strcmp(name, "fwl_review") == 0 || strcmp(name, "vault_seal") == 0) { /* only for agents that build agents: config.json "builder" */
-        return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(g_cfg, "builder"));
+    if (strcmp(name, "vault_seal") == 0 || strcmp(name, "delegate") == 0) { /* builders' sealing; sub-agents */
+        return 1;
     }
     const cJSON *srv; /* a tool of an MCP server: <server>_<tool>; which tools it has is known only at run time */
     cJSON_ArrayForEach(srv, cJSON_GetObjectItemCaseSensitive(g_cfg, "mcp"))
@@ -357,18 +348,194 @@ static int fwl_has_tool(const char *name)
     return has_item(p);
 }
 
-static int fwl_has_skill(const char *name)
+/* ---- functions/<name>.lua (botlua.c): checked, and functions/tests/<name>.lua run, at build time ---- */
+
+static const char *g_dir; /* the project folder: what tests read files relative to */
+
+/* functions/<name>.lua: embedded; functions/tests/ is not (it only runs here). */
+static void add_functions(const char *dir)
 {
-    char p[300];
-    snprintf(p, sizeof(p), "skills/%s/SKILL.md", name);
-    return has_item(p);
+    char *f = join(dir, "functions");
+    DIR  *d = opendir(f);
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        struct stat st;
+        char *full = join(f, e->d_name), rel[300];
+        size_t l = strlen(e->d_name);
+        snprintf(rel, sizeof(rel), "functions/%s", e->d_name);
+        if (e->d_name[0] != '.' && lstat(full, &st) == 0) {
+            if (S_ISREG(st.st_mode) && l > 4 && !strcmp(e->d_name + l - 4, ".lua") && !bad_name(e->d_name)) {
+                add_item(rel, full, K_DATA);
+            } else if (!(S_ISDIR(st.st_mode) && !strcmp(e->d_name, "tests"))) {
+                warn("%s is not embedded (functions/ holds .lua files, and tests/ for their tests)", rel);
+            }
+        }
+        free(full);
+    }
+    if (d) {
+        closedir(d);
+    }
+    free(f);
 }
 
-static int fwl_has_agent(const char *name)
+static char *t_read(void *ud, const char *path, size_t *len, char *e, size_t el)
 {
-    char p[300];
-    snprintf(p, sizeof(p), "agents/%s/agent.md", name);
-    return has_item(p) || cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(g_cfg, "agents"), name);
+    (void)ud;
+    if (path[0] == '/' || strstr(path, "..")) {
+        snprintf(e, el, "tests read files inside the project folder only");
+        return NULL;
+    }
+    char *full = join(g_dir, path);
+    FILE *f = fopen(full, "rb");
+    free(full);
+    if (!f) {
+        snprintf(e, el, "%s", strerror(errno));
+        return NULL;
+    }
+    size_t cap = 65536, n = 0, r;
+    char *buf = malloc(cap + 1);
+    while (buf && (r = fread(buf + n, 1, cap - n, f)) > 0) {
+        n += r;
+        if (n == cap) {
+            buf = realloc(buf, (cap *= 2) + 1);
+        }
+    }
+    fclose(f);
+    if (!buf) {
+        die("out of memory");
+    }
+    buf[n] = '\0';
+    *len = n;
+    return buf;
+}
+
+static int t_exists(void *ud, const char *path)
+{
+    (void)ud;
+    if (path[0] == '/' || strstr(path, "..")) {
+        return 0;
+    }
+    char *full = join(g_dir, path);
+    int ok = access(full, F_OK) == 0;
+    free(full);
+    return ok;
+}
+
+static int t_today(void *ud, char out[11])
+{
+    (void)ud;
+    const char *pin = getenv("BOTTER_TODAY");
+    time_t t = time(NULL);
+    struct tm tm;
+    if (pin && strlen(pin) == 10) {
+        memcpy(out, pin, 11);
+        return 0;
+    }
+    localtime_r(&t, &tm);
+    return strftime(out, 11, "%Y-%m-%d", &tm) == 10 ? 0 : -1;
+}
+
+static void lua_diag(void *ud, const char *file, int line, int error, const char *msg)
+{
+    (void)ud;
+    if (line) {
+        fprintf(stderr, "%s:%d: %s: %s\n", file, line, error ? "error" : "warning", msg);
+    } else {
+        fprintf(stderr, "%s: %s: %s\n", file, error ? "error" : "warning", msg);
+    }
+    if (error) {
+        errors++;
+    } else {
+        warnings++;
+    }
+}
+
+static bl_state *load_functions(int collect_fns)
+{
+    static const bl_io io = {.fs_read = t_read, .fs_exists = t_exists, .today = t_today}; /* tests: no writes, no network */
+    bl_state *s = bl_open(&io);
+    if (!s) {
+        die("out of memory starting Lua");
+    }
+    for (size_t i = 0; i < n_items; i++) {
+        if (!strncmp(items[i].path, "functions/", 10) && items[i].data) {
+            bl_load(s, items[i].path, items[i].data, items[i].len, collect_fns, collect_fns ? lua_diag : NULL, NULL);
+        }
+    }
+    return s;
+}
+
+/* Every function: a name no other tool has; then each test file, on its own copy of the functions. */
+static void check_functions(void)
+{
+    int any = 0;
+    for (size_t i = 0; i < n_items; i++) {
+        any |= !strncmp(items[i].path, "functions/", 10);
+    }
+    if (!any) {
+        return;
+    }
+    bl_state *s = load_functions(1);
+    char line[1000] = "";
+    for (int i = 0; i < bl_count(s); i++) {
+        const bl_fn *f = bl_get(s, i);
+        if (known_tool(f->name)) {
+            fprintf(stderr, "%s:%d: error: %s is already a tool's name; call the function something else\n", f->file,
+                    f->line, f->name);
+            errors++;
+        }
+        size_t l = strlen(line);
+        snprintf(line + l, sizeof(line) - l, "%s%s (%s)", l ? ", " : "", f->name, f->uses[0] ? f->uses : "pure");
+    }
+    if (line[0]) {
+        fprintf(stderr, "packer: functions: %s\n", line);
+    }
+    bl_close(s);
+    if (errors) {
+        return;
+    }
+    char *tdir = join(g_dir, "functions/tests");
+    DIR *d = opendir(tdir);
+    struct dirent *e;
+    int passed = 0, failed = 0;
+    while (d && (e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (e->d_name[0] == '.' || l < 5 || strcmp(e->d_name + l - 4, ".lua") != 0) {
+            continue;
+        }
+        char rel[300], *full = join(tdir, e->d_name);
+        size_t len = 0;
+        snprintf(rel, sizeof(rel), "functions/tests/%s", e->d_name);
+        char *src = slurp(full, &len);
+        free(full);
+        bl_state *t = load_functions(0);
+        if (src && bl_load(t, rel, src, len, 0, lua_diag, NULL) == 0) {
+            int n = 0;
+            char **names = bl_globals(t, "test_", &n);
+            for (int k = 0; k < n; k++) {
+                char *why = bl_call_plain(t, names[k]);
+                if (why) {
+                    fprintf(stderr, "%s: test %s FAILED: %s\n", rel, names[k], why);
+                    failed++;
+                    errors++;
+                } else {
+                    passed++;
+                }
+                free(why);
+                free(names[k]);
+            }
+            free(names);
+        }
+        free(src);
+        bl_close(t);
+    }
+    if (d) {
+        closedir(d);
+    }
+    free(tdir);
+    if (passed || failed) {
+        fprintf(stderr, "packer: function tests: %d passed, %d failed\n", passed, failed);
+    }
 }
 
 static char g_core_version[32]; /* the runtime's BOTCORE_VERSION tag, "" if unknown */
@@ -527,6 +694,18 @@ static void load_config(const char *dir)
         for (int k = 0; lists[k]; k++) {
             known |= !strcmp(x->string, lists[k]);
         }
+        if (!strcmp(x->string, "temperature")) { /* sent with every model request */
+            known = 1;
+            if (!cJSON_IsNumber(x) || x->valuedouble < 0 || x->valuedouble > 2) {
+                cfg_err("\"temperature\" must be a number from 0 to 2 (0 = the most repeatable answers)%s", "");
+            }
+        }
+        if (!strcmp(x->string, "seed")) {
+            known = 1;
+            if (!cJSON_IsNumber(x) || x->valuedouble != (double)(long long)x->valuedouble) {
+                cfg_err("\"seed\" must be a whole number%s", "");
+            }
+        }
         if (!strcmp(x->string, "mcp") || !strcmp(x->string, "agents")) { /* remote: {"name": {"url": ..., "token": ...}} */
             known = 1;
             const cJSON *e = cJSON_IsObject(x) ? x->child : NULL;
@@ -573,7 +752,7 @@ static void load_config(const char *dir)
         }
         if (!known) {
             cfg_warn("unknown key \"%.60s\" (known: name, display_name, version, description, internet, skills, tools, "
-                     "requires, builder, mcp, agents)", x->string);
+                     "requires, builder, mcp, agents, temperature, seed)", x->string);
         }
     }
     const cJSON *nm = cJSON_GetObjectItemCaseSensitive(g_cfg, "name");
@@ -990,12 +1169,13 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     load_config(dir);
     add_root_file(dir, "agent.md");
     add_root_file(dir, "config.json");
-    add_root_file(dir, "FLOW.fwl");
     add_root_file(dir, "secrets.vault"); /* opt-in: the agent's keys, encrypted with a password (vault_seal) */
     add_tree(dir, "skills", K_DATA, 0);
     add_tree(dir, "agents", K_DATA, 0);
     add_tree(dir, "tools/doc", K_DATA, 0);
     add_tree(dir, "tools/bin", K_DATA, 1);
+    add_functions(dir);
+    g_dir = dir;
     select_from_config();
     if (errors) {
         return 1;
@@ -1015,28 +1195,21 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
         warn("%s is no longer used (botcore lists skills and tools itself); it is not embedded, delete it", mf);
     }
     free(mf);
-    char *oldflow = join(dir, "SQNC.md");
-    if (access(oldflow, F_OK) == 0) {
-        err("%s: the flow is now FLOW.fwl, plain FWL (see the write-flow skill)%s", oldflow, NULL);
-    }
-    free(oldflow);
-    oldflow = join(dir, "FLOW" ".md");
-    if (access(oldflow, F_OK) == 0) {
-        err("%s: the flow is now FLOW.fwl, plain FWL without the ``` fence (see the write-flow skill)%s", oldflow, NULL);
-    }
-    free(oldflow);
-    for (size_t i = 0; i < n_items; i++) {
-        if (strcmp(items[i].path, "FLOW.fwl") == 0 && items[i].data) {
-            sq_prog prog;
-            memset(&prog, 0, sizeof(prog));
-            prog.diag = fwl_diag;
-            sq_parse(items[i].data, items[i].len, &prog);
-            sq_check(&prog, fwl_has_tool, fwl_has_skill, fwl_has_agent); /* every mistake in one go */
-            sq_free(&prog);
+    static const char *const flows[] = {"FLOW.fwl", "FLOW.md", "SQNC.md", NULL};
+    for (int i = 0; flows[i]; i++) { /* the flow languages are gone: the model drives, functions do exact work */
+        char *old = join(dir, flows[i]);
+        if (access(old, F_OK) == 0) {
+            err("%s is no longer used: write how the agent works in agent.md (or a skill it reads), and exact, "
+                "repeatable steps as Lua in functions/ (see the write-functions skill)%s", old, "");
         }
+        free(old);
     }
-    if (errors) { /* a FLOW.fwl that does not compile is not built */
-        fprintf(stderr, "packer: FLOW.fwl has %d error(s); nothing was built\n", errors);
+    if (errors) {
+        return 1;
+    }
+    check_functions();
+    if (errors) { /* functions that do not load, or whose tests fail, are not built */
+        fprintf(stderr, "packer: functions have %d error(s); nothing was built\n", errors);
         return 1;
     }
 

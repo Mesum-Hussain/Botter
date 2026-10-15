@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "tools.h"
+#include "functions.h"
 #include "remote.h"
 #include "vfs.h"
 
@@ -12,13 +13,6 @@ typedef struct {
     size_t        n;
 } table_t;
 
-static int g_review;
-
-void tools_enable_review(int on)
-{
-    g_review = on;
-}
-
 static table_t tables(int i)
 {
     switch (i) {
@@ -26,7 +20,6 @@ static table_t tables(int i)
     case 1: return (table_t){TOOLS_SHELL, TOOLS_SHELL_N};
     case 2: return (table_t){TOOLS_CRON, TOOLS_CRON_N};
     case 3: return (table_t){TOOLS_VFS, vfs_count() ? TOOLS_VFS_N : 0};
-    case 4: return (table_t){TOOLS_REVIEW, g_review ? TOOLS_REVIEW_N : 0};
     default: return (table_t){NULL, 0};
     }
 }
@@ -71,6 +64,7 @@ cJSON *tools_schema(void)
         }
     }
     ext_schema_append(arr);
+    fn_schema_append(arr);
     mcp_schema_append(arr);
     return arr;
 }
@@ -123,6 +117,12 @@ char *tools_call(const char *name, const char *args_json)
     }
     const tool_t *t = find_tool(name);
     const ext_tool_t *x = t ? NULL : ext_find(name);
+    char *lua = t || x ? NULL : fn_call(name, args_json); /* one of the agent's functions */
+    if (lua) {
+        free(res);
+        tools_sanitize_utf8(lua);
+        return lua;
+    }
     char *remote = t || x ? NULL : mcp_call(name, args_json); /* an MCP server's tool */
     if (remote) {
         free(res);
