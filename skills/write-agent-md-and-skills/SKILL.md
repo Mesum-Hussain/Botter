@@ -1,11 +1,11 @@
 ---
 name: write-agent-md-and-skills
-description: How to write a good agent.md (persona = system prompt) and SKILL.md playbooks, with templates. Read before writing or editing either.
+description: How to write a good AGENT.md (persona = system prompt) and SKILL.md playbooks, with templates. Read before writing or editing either.
 ---
 
-# Writing agent.md
+# Writing AGENT.md
 
-agent.md becomes the agent's system prompt. The agent reads it on every request, so make it short and firm. Write to the agent in the second person, in plain text (the terminal does not render markdown).
+AGENT.md becomes the agent's system prompt. The agent reads it on every request, so make it short and firm. Write to the agent in the second person, in plain text (the terminal does not render markdown).
 
 Template:
 
@@ -29,7 +29,7 @@ Rules
 
 Working with files and tools
 - Your skills and tools are listed in your system prompt and tool definitions.
-- Before doing a task a skill covers, read that skill with vfs_read.
+- Before doing a task a skill covers, load that skill with the skill tool.
 - <which tools to prefer for which job, if the agent has custom tools>
 ```
 
@@ -37,7 +37,7 @@ Guidance
 - One role. If the user describes two jobs, make two agents or make one a skill.
 - The model follows "How a session goes" itself. Keep each step one line; a longer procedure goes in a skill. Rules that must hold exactly (limits, sums, dates) belong in a function, and the step names that function.
 - State what the agent cannot do: it keeps no memory between runs (unless it saves files in its working directory), and, for an offline agent only, it has no internet (or only through its "network" tools, named). Do not let it promise otherwise.
-- Never put secrets in agent.md. It is embedded in the binary in readable form.
+- Never put secrets in AGENT.md. It is embedded in the binary in readable form.
 - Do not copy this template blindly; fill it with the user's real requirements and delete empty sections.
 
 # Writing a skill
@@ -64,8 +64,8 @@ Notes
 ```
 
 Guidance
-- Put procedures and examples in a skill, not in agent.md. agent.md stays small.
+- Put procedures and examples in a skill, not in AGENT.md. AGENT.md stays small.
 - Name the tools exactly as they appear (fs_read, shell_exec, or the custom tool name) and say what to pass.
 - Keep each skill under about 60 lines. Split if longer.
-- A skill may refer to other embedded files, e.g. tools/doc/<name>.md.
+- A skill may bring files: references/ (documents SKILL.md tells the agent to read, by path), scripts/ (programs), assets/ (templates). Name each one in SKILL.md with when to use it; the build checks that links resolve and that every references/ file is named.
 - Every SKILL.md starts with frontmatter (--- name: ... description: ... ---): without a description the agent cannot tell when to read it.

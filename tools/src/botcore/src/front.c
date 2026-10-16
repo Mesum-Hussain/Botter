@@ -300,7 +300,7 @@ static void remote_event(const cJSON *o)
             cJSON *in = cJSON_Parse(jstr(o, "args"));
             cJSON_AddStringToObject(f, "title", *jstr(o, "status") ? jstr(o, "status") : nm);
             cJSON_AddStringToObject(f, "kind", !strcmp(nm, "fs_write") ? "edit" : !strcmp(nm, "shell_exec") ? "execute"
-                                               : !strncmp(nm, "fs_", 3) || !strncmp(nm, "vfs_", 4) ? "read" : "other");
+                                               : !strncmp(nm, "fs_", 3) || !strcmp(nm, "skill") ? "read" : "other");
             cJSON_AddStringToObject(f, "status", "in_progress");
             cJSON_AddItemToObject(f, "rawInput", in ? in : cJSON_CreateObject());
             g_streamed = 0;

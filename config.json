@@ -8,16 +8,11 @@
     "create-agent",
     "project-layout",
     "write-agent-md-and-skills",
-    "write-tool",
     "write-functions",
     "wrap-existing-project",
     "review-agent",
-    "build-agent"
-  ],
-  "tools": [
-    "agent_build",
-    "agent_inspect",
-    "tool_test"
+    "build-agent",
+    "write-scripts"
   ],
   "requires": [
     "git"

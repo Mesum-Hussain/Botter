@@ -19,6 +19,9 @@ typedef struct {
     int    want_thoughts; /* the UI shows reasoning (chat_set_events) */
     int    no_stream;     /* endpoint refused "stream": true; plain responses from now on */
     cJSON *images;        /* content parts image_view attached during this turn, sent before the next request */
+    cJSON *notes;         /* working memory: the model's notes (note tool), shown every request */
+    cJSON *archive;       /* archived tool results / arguments; recall(id) = archive[id - 1] (memory.h) */
+    int    max_rounds;    /* model<->tool round trips per turn; 0 = CHAT_MAX_TOOL_ROUNDS */
 } chat_t;
 
 /* Events (only when an event callback is set; reasoning is then also kept out of the reply). */
@@ -61,7 +64,7 @@ void chat_set_tools(chat_t *c, cJSON *tools, char *(*cb)(void *, const char *, c
  */
 void chat_set_events(chat_t *c, void (*cb)(void *, int, const char *), void *ud, int thoughts);
 
-/* Forget the conversation (the system prompt stays). */
+/* Forget the conversation, notes and archive (the system prompt stays). */
 void chat_clear(chat_t *c);
 
 /* Set (or, with NULL/"", clear) the system prompt. Never trimmed from history. */
@@ -74,8 +77,9 @@ int  chat_validate(chat_t *c, char **err);
  * Send one user turn; on success *reply is malloc'd assistant text and the
  * whole turn (user, tool calls/results, final answer) is kept in history.
  * On failure before any tool ran, history is unchanged; after tools ran the
- * turn is kept and closed with an assistant note so side effects stay visible. Oldest
- * user/assistant pairs are dropped first when over CHAT_HIST_MAX_BYTES.
+ * turn is kept and closed with an assistant note so side effects stay visible. Old tool traffic is
+ * archived to stubs (memory.h); past CHAT_HIST_MAX_BYTES the oldest whole turns are dropped, but never
+ * the first user message (the task).
  */
 int  chat_send(chat_t *c, const char *user, char **reply, char **err);
 
@@ -85,11 +89,22 @@ int  chat_send(chat_t *c, const char *user, char **reply, char **err);
  */
 void chat_set_sampling(double temperature, int has_seed, long long seed);
 
+/* config.json "reasoning": "low" | "medium" | "high" -> reasoning_effort on every request (NULL = the
+ * provider's default). Dropped if the endpoint refuses it. */
+void chat_set_reasoning(const char *effort);
+
 /*
  * Show an image to the model: attached to the conversation that is running a tool right now, as a
  * user message after the tool results, and replaced by a note when the turn ends. 0 ok, -1 nothing is running.
  */
 int  chat_attach_image(const char *label, const char *mime, const unsigned char *data, size_t len);
+/* Add an image to c's next user message (bot.llm with images). 0 ok, -1 out of memory. */
+int  chat_add_image(chat_t *c, const char *label, const char *mime, const unsigned char *data, size_t len);
+
+/* The conversation whose tool calls are running now (innermost), or NULL. */
+chat_t *chat_current(void);
+/* 1 when name is in c's tools. */
+int     chat_has_tool(const chat_t *c, const char *name);
 
 /* Tokens used so far, per model (from the endpoints' "usage"; calls without it count as calls only). */
 typedef struct {

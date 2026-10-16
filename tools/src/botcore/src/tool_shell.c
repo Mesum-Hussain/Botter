@@ -473,6 +473,13 @@ double tool_now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+static int g_pass_runtime;
+
+void tool_shell_pass_runtime(int on)
+{
+    g_pass_runtime = on;
+}
+
 static bool shell_exec(const cJSON *in, char *result, size_t rl)
 {
     const cJSON *cj = cJSON_GetObjectItemCaseSensitive(in, "command");
@@ -542,6 +549,16 @@ static bool shell_exec(const cJSON *in, char *result, size_t rl)
         signal(SIGINT, SIG_DFL);
         if (chdir(guard_ctx()) != 0) {
             _exit(126);
+        }
+        if (g_pass_runtime) { /* opened before Landlock hides the folder the agent lives in */
+            int rt = open("/proc/self/exe", O_RDONLY);
+            if (rt >= 0 && rt != 3) {
+                dup2(rt, 3);
+                close(rt);
+            }
+            if (rt >= 0) {
+                setenv("BOTCORE_RUNTIME_FD", "3", 1);
+            }
         }
         if (tool_sandbox_apply(timeout + 5, !guard_offline()) != 0) {
             _exit(126);

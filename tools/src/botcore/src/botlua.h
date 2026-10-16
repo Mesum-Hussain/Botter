@@ -31,6 +31,16 @@
  *   bot.shell(command [, timeout_s]) -> output, exit code    (the shell_exec tool: same rules, same asking)
  *   bot.mcp(server, tool, args) -> text      bot.agent(name, task) -> text      bot.secret(name) -> value
  *   bot.tool(name, args) -> text: any of the agent's tools, as the model would call it (same rules)
+ *   bot.skill_dir(name) -> the real folder of skills/<name> (its scripts/ and assets/ are there), or nil
+ * Orchestration (FLOW.lua, progress.md §12.3; any function may use them):
+ *   bot.worker{task, system?, context?, skills?, tools?, writes?, max_rounds?} -> the worker's reply: one task
+ *       in a fresh conversation with the agent's model, narrowed to those skills, tools and writable paths
+ *   bot.test(path?) -> {passed, failed, report, scores}: the project's Lua in the working folder, loaded fresh,
+ *       and the test_/score_ functions of path (a test file or folder, default functions/tests) run
+ *   bot.ask(question) -> the person's answer, or nil when nobody is there (batch, remote)
+ *   bot.say(text): a progress line for the person
+ *   bot.llm(prompt) / bot.llm{prompt, system?, schema?, images?} -> text, or a table when a schema is given: one
+ *       request to the agent's own model, for judgement inside code (reading text or images, wording)
  */
 
 typedef struct {
@@ -47,6 +57,14 @@ typedef struct {
     /* GET (body NULL) or POST (JSON body); headers: "Name: value\r\n" lines. malloc'd body, NULL + err on failure. */
     char *(*http)(void *ud, const char *url, const char *body, const char *headers, int *status, char *err, size_t el);
     const char *(*secret)(void *ud, const char *name); /* a line of .env or the sealed vault, or NULL */
+    const char *(*skill_dir)(void *ud, const char *name); /* real folder of skills/<name>, or NULL */
+    /* bot.worker: one task in a fresh conversation (spec = JSON object); malloc'd reply, or NULL + err */
+    char *(*worker)(void *ud, const char *spec_json, char *err, size_t el);
+    /* bot.ask: the person's answer (malloc'd), or NULL when nobody can answer here */
+    char *(*ask)(void *ud, const char *question);
+    void  (*say)(void *ud, const char *text);           /* bot.say: a progress line for the person */
+    /* bot.llm: one request to the agent's own model (spec = JSON object); malloc'd reply, or NULL + err */
+    char *(*llm)(void *ud, const char *spec_json, char *err, size_t el);
     void  *ud;
 } bl_io;
 
@@ -75,10 +93,14 @@ int          bl_check_syntax(const char *file, const char *src, size_t len, bl_d
 int          bl_count(const bl_state *s);
 const bl_fn *bl_get(const bl_state *s, int i);
 const bl_fn *bl_find(const bl_state *s, const char *name);
-/* Append an OpenAI "function" tool for every documented function. */
-void         bl_schema_append(const bl_state *s, cJSON *arr);
+/* Append an OpenAI "function" tool for every documented function whose file starts with prefix (NULL = all). */
+void         bl_schema_append(const bl_state *s, cJSON *arr, const char *prefix);
 /* Call a documented function with a JSON object of arguments: malloc'd text ("ERROR: ..." on failure). */
 char        *bl_call(bl_state *s, const char *name, const char *args_json);
+/* FLOW.lua: call flow(input) with no time limit (Ctrl-C still stops it). *reply = what it returned (malloc'd,
+ * NULL for nil); returns NULL, or a malloc'd error message. */
+char        *bl_call_flow(bl_state *s, const char *input, char **reply);
+int          bl_has_global(bl_state *s, const char *name);
 /* Call a global function with no arguments (tests): NULL = it returned, else a malloc'd error message. */
 char        *bl_call_plain(bl_state *s, const char *name);
 /* Call a score_ function (tests): it returns passed, total [, details]. NULL ok (*details may be set,

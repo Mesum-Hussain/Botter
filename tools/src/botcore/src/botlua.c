@@ -745,6 +745,314 @@ static int l_tool(lua_State *L)
     return 1;
 }
 
+/* bot.worker{task = ..., system?, context?, skills?, tools?, writes?, max_rounds?} -> the worker's reply */
+static int l_worker(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getfield(L, 1, "task");
+    if (lua_type(L, -1) != LUA_TSTRING || !*lua_tostring(L, -1)) {
+        return luaL_error(L, "bot.worker: give it a task (bot.worker{task = \"...\"})");
+    }
+    lua_pop(L, 1);
+    if (!s->io.worker) {
+        return luaL_error(L, "bot.worker is not available here");
+    }
+    cJSON *spec = to_json(L, 1, 0);
+    char *j = spec ? cJSON_PrintUnformatted(spec) : NULL, err[600] = "";
+    cJSON_Delete(spec);
+    char *r = j ? s->io.worker(s->io.ud, j, err, sizeof(err)) : NULL;
+    free(j);
+    if (!r) {
+        return luaL_error(L, "bot.worker: %s", err[0] ? err : "the worker failed");
+    }
+    lua_pushstring(L, r);
+    free(r);
+    return 1;
+}
+
+/* bot.llm(prompt) or bot.llm{prompt, system?, schema?, images?} -> text, or a table when there is a schema */
+static int l_llm(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    cJSON *spec;
+    if (lua_type(L, 1) == LUA_TSTRING) {
+        spec = cJSON_CreateObject();
+        cJSON_AddStringToObject(spec, "prompt", lua_tostring(L, 1));
+    } else {
+        luaL_checktype(L, 1, LUA_TTABLE);
+        spec = to_json(L, 1, 0);
+    }
+    const cJSON *p = cJSON_GetObjectItemCaseSensitive(spec, "prompt");
+    if (!cJSON_IsString(p) || !*p->valuestring) {
+        cJSON_Delete(spec);
+        return luaL_error(L, "bot.llm: give it a prompt");
+    }
+    int structured = cJSON_GetObjectItemCaseSensitive(spec, "schema") != NULL;
+    char *j = cJSON_PrintUnformatted(spec), err[600] = "";
+    cJSON_Delete(spec);
+    char *r = s->io.llm && j ? s->io.llm(s->io.ud, j, err, sizeof(err)) : NULL;
+    free(j);
+    if (!r) {
+        return luaL_error(L, "bot.llm: %s", err[0] ? err : "not available here");
+    }
+    cJSON *v = structured ? cJSON_Parse(r) : NULL;
+    if (v) {
+        push_json(L, v);
+        cJSON_Delete(v);
+    } else {
+        lua_pushstring(L, r);
+    }
+    free(r);
+    return 1;
+}
+
+/* bot.ask(question) -> the person's answer, or nil when nobody is there */
+static int l_ask(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    const char *q = luaL_checkstring(L, 1);
+    char *a = s->io.ask ? s->io.ask(s->io.ud, q) : NULL;
+    if (a) {
+        lua_pushstring(L, a);
+        free(a);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+/* bot.say(text): a progress line for the person (never part of any conversation) */
+static int l_say(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    const char *t = luaL_checkstring(L, 1);
+    if (s->io.say) {
+        s->io.say(s->io.ud, t);
+    }
+    return 0;
+}
+
+/* ---- bot.test: the project's Lua, loaded fresh from the working folder, and its tests run ---- */
+
+static int bl_cmp_str(const void *a, const void *b);
+
+typedef struct {
+    char  *p;
+    size_t n;
+    int    errors;
+} test_rep_t;
+
+static void rep_add(test_rep_t *r, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void rep_add(test_rep_t *r, const char *fmt, ...)
+{
+    char *t = NULL;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vasprintf(&t, fmt, ap);
+    va_end(ap);
+    char *np = w > 0 ? realloc(r->p, r->n + (size_t)w + 1) : NULL;
+    if (np) {
+        memcpy(np + r->n, t, (size_t)w + 1);
+        r->p = np;
+        r->n += (size_t)w;
+    }
+    free(t);
+}
+
+static void test_diag(void *ud, const char *file, int line, int error, const char *msg)
+{
+    test_rep_t *r = ud;
+    if (line) {
+        rep_add(r, "%s:%d: %s: %s\n", file, line, error ? "error" : "warning", msg);
+    } else {
+        rep_add(r, "%s: %s: %s\n", file, error ? "error" : "warning", msg);
+    }
+    r->errors += error;
+}
+
+/* Files ending in .lua in a folder (io.fs_list: one name per line), as dir/name, sorted. */
+static int list_lua(bl_state *s, const char *dir, char ***out)
+{
+    char err[200] = "", *names = s->io.fs_list ? s->io.fs_list(s->io.ud, dir, err, sizeof(err)) : NULL;
+    int n = 0;
+    *out = NULL;
+    for (char *save = NULL, *l = names ? strtok_r(names, "\n", &save) : NULL; l; l = strtok_r(NULL, "\n", &save)) {
+        size_t k = strlen(l);
+        char *full = NULL;
+        if (k > 4 && !strcmp(l + k - 4, ".lua") && asprintf(&full, "%s/%s", dir, l) >= 0) {
+            char **nv = realloc(*out, sizeof(char *) * (size_t)(n + 1));
+            if (!nv) {
+                free(full);
+                break;
+            }
+            *out = nv;
+            (*out)[n++] = full;
+        }
+    }
+    free(names);
+    if (n) {
+        qsort(*out, (size_t)n, sizeof(char *), bl_cmp_str);
+    }
+    return n;
+}
+
+static void add_name(char ***v, int *n, char *name)
+{
+    char **nv = realloc(*v, sizeof(char *) * (size_t)(*n + 1));
+    if (nv) {
+        *v = nv;
+        nv[(*n)++] = name;
+    } else {
+        free(name);
+    }
+}
+
+/* Load the project's Lua (functions/, skills/<n>/functions/, FLOW.lua) into t. */
+static void load_project(bl_state *s, bl_state *t, test_rep_t *r)
+{
+    char **files = NULL, **sk = NULL, err[200] = "";
+    int n = list_lua(s, "functions", &files);
+    char *skills = s->io.fs_list(s->io.ud, "skills", err, sizeof(err));
+    for (char *save = NULL, *l = skills ? strtok_r(skills, "\n", &save) : NULL; l; l = strtok_r(NULL, "\n", &save)) {
+        size_t k = strlen(l);
+        char d[300];
+        if (k > 1 && l[k - 1] == '/' && snprintf(d, sizeof(d), "skills/%sfunctions", l) < (int)sizeof(d)) {
+            int m = list_lua(s, d, &sk);
+            for (int i = 0; i < m; i++) {
+                add_name(&files, &n, sk[i]);
+            }
+            free(sk);
+        }
+    }
+    free(skills);
+    if (s->io.fs_exists && s->io.fs_exists(s->io.ud, "FLOW.lua")) {
+        add_name(&files, &n, strdup("FLOW.lua"));
+    }
+    for (int i = 0; i < n; i++) {
+        size_t len = 0;
+        char *src = s->io.fs_read(s->io.ud, files[i], &len, err, sizeof(err));
+        if (src) {
+            bl_load(t, files[i], src, len, strcmp(files[i], "FLOW.lua") != 0, test_diag, r);
+        }
+        free(src);
+        free(files[i]);
+    }
+    free(files);
+}
+
+static int l_test(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    const char *path = luaL_optstring(L, 1, "functions/tests");
+    if (!s->io.fs_read || !s->io.fs_list) {
+        return luaL_error(L, "bot.test is not available here");
+    }
+    char **tests = NULL;
+    size_t pl = strlen(path);
+    int nt = 0;
+    if (pl > 4 && !strcmp(path + pl - 4, ".lua")) {
+        add_name(&tests, &nt, strdup(path));
+    } else {
+        nt = list_lua(s, path, &tests);
+    }
+    bl_io io = {.fs_read = s->io.fs_read, .fs_list = s->io.fs_list, .fs_exists = s->io.fs_exists, .today = s->io.today,
+                .interrupted = s->io.interrupted, .skill_dir = s->io.skill_dir, .ud = s->io.ud}; /* no writes, no network */
+    test_rep_t r = {NULL, 0, 0};
+    int passed = 0, failed = 0;
+    lua_newtable(L); /* the result */
+    int res = lua_gettop(L);
+    lua_newtable(L); /* its scores */
+    int scores = lua_gettop(L), nscore = 0;
+    if (!nt) {
+        rep_add(&r, "%s: no test files\n", path);
+    }
+    for (int i = 0; i < nt; i++) {
+        bl_state *t = bl_open(&io);
+        char err[200] = "";
+        size_t len = 0;
+        char *src = t ? s->io.fs_read(s->io.ud, tests[i], &len, err, sizeof(err)) : NULL;
+        int before = r.errors;
+        if (t) {
+            load_project(s, t, &r);
+        }
+        if (!src) {
+            rep_add(&r, "%s: cannot read: %s\n", tests[i], err);
+            failed++;
+        } else if (r.errors != before || bl_load(t, tests[i], src, len, 0, test_diag, &r) != 0) {
+            failed++; /* the project or the test file does not load: the report says why */
+        } else {
+            int n = 0;
+            char **names = bl_globals(t, "score_", &n);
+            for (int k = 0; k < n; k++) {
+                double got = 0, total = 0;
+                char *details = NULL, *why = bl_call_score(t, names[k], &got, &total, &details);
+                if (why) {
+                    rep_add(&r, "%s: %s FAILED: %s\n", tests[i], names[k], why);
+                    failed++;
+                } else {
+                    lua_newtable(L);
+                    lua_pushstring(L, names[k] + 6);
+                    lua_setfield(L, -2, "name");
+                    lua_pushnumber(L, got);
+                    lua_setfield(L, -2, "passed");
+                    lua_pushnumber(L, total);
+                    lua_setfield(L, -2, "total");
+                    lua_pushstring(L, details ? details : "");
+                    lua_setfield(L, -2, "details");
+                    lua_rawseti(L, scores, ++nscore);
+                    rep_add(&r, "score %s: %g/%g\n%s%s", names[k] + 6, got, total, details ? details : "",
+                            details && *details && details[strlen(details) - 1] != '\n' ? "\n" : "");
+                }
+                free(why);
+                free(details);
+                free(names[k]);
+            }
+            free(names);
+            names = bl_globals(t, "test_", &n);
+            for (int k = 0; k < n; k++) {
+                char *why = bl_call_plain(t, names[k]);
+                if (why) {
+                    rep_add(&r, "%s: test %s FAILED: %s\n", tests[i], names[k], why);
+                    failed++;
+                } else {
+                    passed++;
+                }
+                free(why);
+                free(names[k]);
+            }
+            free(names);
+        }
+        free(src);
+        bl_close(t);
+        free(tests[i]);
+    }
+    free(tests);
+    lua_setfield(L, res, "scores");
+    rep_add(&r, "tests: %d passed, %d failed\n", passed, failed);
+    lua_pushstring(L, r.p ? r.p : "");
+    lua_setfield(L, res, "report");
+    free(r.p);
+    lua_pushinteger(L, passed);
+    lua_setfield(L, res, "passed");
+    lua_pushinteger(L, failed);
+    lua_setfield(L, res, "failed");
+    return 1;
+}
+
+/* bot.skill_dir(name): the real folder of skills/<name> (scripts/, assets/ ...), or nil */
+static int l_skill_dir(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    const char *v = s->io.skill_dir ? s->io.skill_dir(s->io.ud, luaL_checkstring(L, 1)) : NULL;
+    if (v) {
+        lua_pushstring(L, v);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
 /* bot.secret(name): a key from .env or the sealed vault (never return it to the model) */
 static int l_secret(lua_State *L)
 {
@@ -844,7 +1152,9 @@ bl_state *bl_open(const bl_io *io)
     set_funcs(L, "fs", fs);
     set_funcs(L, "http", http);
     static const luaL_Reg top[] = {{"today", l_today}, {"shell", l_shell},   {"mcp", l_mcp},  {"agent", l_agent},
-                                   {"secret", l_secret}, {"tool", l_tool}, {NULL, NULL}};
+                                   {"secret", l_secret}, {"tool", l_tool}, {"skill_dir", l_skill_dir},
+                                   {"worker", l_worker}, {"ask", l_ask}, {"say", l_say}, {"test", l_test},
+                                   {"llm", l_llm}, {NULL, NULL}};
     luaL_setfuncs(L, top, 0);
     lua_setglobal(L, "bot");
     lua_sethook(L, bl_hook, LUA_MASKCOUNT, 10000);
@@ -1278,8 +1588,8 @@ static int msgh(lua_State *L)
     return 1;
 }
 
-/* A call with a time limit. Calls can nest (a function asks a sub-agent, whose model calls a function):
- * the inner call gets its own limit, and the outer one's is back when it returns. */
+/* A call with a time limit (0 = none). Calls can nest (a function asks a sub-agent, whose model calls a
+ * function): the inner call gets its own limit, and the outer one's is back when it returns. */
 static int pcall_limited(bl_state *s, int nargs, int nres, int seconds)
 {
     int base = lua_gettop(s->L) - nargs;
@@ -1288,7 +1598,7 @@ static int pcall_limited(bl_state *s, int nargs, int nres, int seconds)
     lua_pushcfunction(s->L, msgh);
     lua_insert(s->L, base);
     s->limit_s = seconds;
-    s->deadline = now_s() + seconds;
+    s->deadline = seconds ? now_s() + seconds : 0;
     int rc = lua_pcall(s->L, nargs, nres, base);
     s->deadline = outer;
     s->limit_s = outer_s;
@@ -1343,9 +1653,12 @@ int bl_check_syntax(const char *file, const char *src, size_t len, bl_diag diag,
     return r.errors ? -1 : 0;
 }
 
-void bl_schema_append(const bl_state *s, cJSON *arr)
+void bl_schema_append(const bl_state *s, cJSON *arr, const char *prefix)
 {
     for (int i = 0; s && i < s->nfn; i++) {
+        if (prefix && strncmp(s->fn[i].file, prefix, strlen(prefix)) != 0) {
+            continue;
+        }
         cJSON *t = cJSON_CreateObject(), *fn = cJSON_AddObjectToObject(t, "function");
         cJSON_AddStringToObject(t, "type", "function");
         cJSON_AddStringToObject(fn, "name", s->fn[i].name);
@@ -1474,6 +1787,39 @@ char *bl_call_score(bl_state *s, const char *name, double *passed, double *total
         if (lua_type(s->L, top + 3) == LUA_TSTRING) {
             *details = strdup(lua_tostring(s->L, top + 3));
         }
+    }
+    lua_settop(s->L, top);
+    return err;
+}
+
+int bl_has_global(bl_state *s, const char *name)
+{
+    if (!s) {
+        return 0;
+    }
+    int top = lua_gettop(s->L), f = lua_getglobal(s->L, name) == LUA_TFUNCTION;
+    lua_settop(s->L, top);
+    return f;
+}
+
+char *bl_call_flow(bl_state *s, const char *input, char **reply)
+{
+    int top = lua_gettop(s->L);
+    char *err = NULL;
+    *reply = NULL;
+    if (lua_getglobal(s->L, "flow") != LUA_TFUNCTION) {
+        lua_settop(s->L, top);
+        return strdup("FLOW.lua has no function flow(input)");
+    }
+    lua_pushstring(s->L, input ? input : "");
+    if (pcall_limited(s, 1, 1, 0) != LUA_OK) {
+        err = strdup(lua_tostring(s->L, -1) ? lua_tostring(s->L, -1) : "failed");
+    } else if (lua_type(s->L, -1) == LUA_TSTRING || lua_type(s->L, -1) == LUA_TNUMBER) {
+        *reply = strdup(lua_tostring(s->L, -1));
+    } else if (lua_type(s->L, -1) == LUA_TTABLE) {
+        cJSON *j = to_json(s->L, -1, 0);
+        *reply = j ? cJSON_Print(j) : NULL;
+        cJSON_Delete(j);
     }
     lua_settop(s->L, top);
     return err;

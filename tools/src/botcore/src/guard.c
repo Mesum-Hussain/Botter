@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "guard.h"
+#include "skills.h"
 #include "front.h"
 #include "term.h"
 
@@ -107,6 +108,54 @@ int guard_resolve(const char *path, char out[PATH_MAX], int *inside)
     *inside = is_inside(out);
     return 0;
 }
+
+/* ---------------- write scope ---------------- */
+
+static char g_writes[2048]; /* "a\0b/\0\0"; empty = no scope */
+static char g_writes_text[1024];
+
+void guard_set_writes(const char *const *paths, int n)
+{
+    size_t used = 0;
+    g_writes[0] = g_writes[1] = '\0';
+    g_writes_text[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        const char *p = paths[i];
+        while (p[0] == '.' && p[1] == '/') {
+            p += 2;
+        }
+        size_t l = strlen(p);
+        if (!l || used + l + 2 >= sizeof(g_writes)) {
+            continue;
+        }
+        memcpy(g_writes + used, p, l + 1);
+        used += l + 1;
+        g_writes[used] = '\0';
+        size_t tl = strlen(g_writes_text);
+        snprintf(g_writes_text + tl, sizeof(g_writes_text) - tl, "%s%s", tl ? ", " : "", p);
+    }
+}
+
+int guard_write_ok(const char *abs)
+{
+    if (!g_writes[0]) {
+        return 1;
+    }
+    size_t cl = strlen(g_ctx);
+    if (strncmp(abs, g_ctx, cl) != 0 || abs[cl] != '/') {
+        return 0;
+    }
+    const char *rel = abs + cl + 1;
+    for (const char *p = g_writes; *p; p += strlen(p) + 1) {
+        size_t l = strlen(p);
+        if (p[l - 1] == '/' ? !strncmp(rel, p, l) : !strncmp(rel, p, l) && (rel[l] == '\0' || rel[l] == '/')) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+const char *guard_writes_text(void) { return g_writes_text; }
 
 /* ---------------- confirmation ---------------- */
 
@@ -412,7 +461,7 @@ static void check_path_word(const char *w, reasons_t *r)
     }
     if (guard_resolve(w, res, &inside) != 0) {
         add_why(r, "cannot verify path: %.80s", w);
-    } else if (!inside) {
+    } else if (!inside && !sk_inside(res)) { /* the agent's own skill files are read-only: no question */
         add_why(r, "path outside working dir: %.80s", res);
         add_grant(res);
     }

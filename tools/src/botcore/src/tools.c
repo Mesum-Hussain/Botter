@@ -2,7 +2,7 @@
 #include "tools.h"
 #include "functions.h"
 #include "remote.h"
-#include "vfs.h"
+#include "skills.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +19,8 @@ static table_t tables(int i)
     case 0: return (table_t){TOOLS_FS, TOOLS_FS_N};
     case 1: return (table_t){TOOLS_SHELL, TOOLS_SHELL_N};
     case 2: return (table_t){TOOLS_CRON, TOOLS_CRON_N};
-    case 3: return (table_t){TOOLS_VFS, vfs_count() ? TOOLS_VFS_N : 0};
+    case 3: return (table_t){TOOLS_MEM, TOOLS_MEM_N};
+    case 4: return (table_t){TOOLS_SKILL, sk_count() ? TOOLS_SKILL_N : 0};
     default: return (table_t){NULL, 0};
     }
 }
@@ -63,7 +64,6 @@ cJSON *tools_schema(void)
             cJSON_AddItemToArray(arr, e);
         }
     }
-    ext_schema_append(arr);
     fn_schema_append(arr);
     mcp_schema_append(arr);
     return arr;
@@ -116,19 +116,18 @@ char *tools_call(const char *name, const char *args_json)
         return NULL;
     }
     const tool_t *t = find_tool(name);
-    const ext_tool_t *x = t ? NULL : ext_find(name);
-    char *lua = t || x ? NULL : fn_call(name, args_json); /* one of the agent's functions */
+    char *lua = t ? NULL : fn_call(name, args_json); /* one of the agent's functions */
     if (lua) {
         free(res);
         tools_sanitize_utf8(lua);
         return lua;
     }
-    char *remote = t || x ? NULL : mcp_call(name, args_json); /* an MCP server's tool */
+    char *remote = t ? NULL : mcp_call(name, args_json); /* an MCP server's tool */
     if (remote) {
         free(res);
         return remote;
     }
-    if (!t && !x) {
+    if (!t) {
         snprintf(res, TOOL_RESULT_MAX, "ERROR: unknown tool '%.100s'", name);
         goto out;
     }
@@ -140,8 +139,7 @@ char *tools_call(const char *name, const char *args_json)
     }
     /* Handlers write at res + 7 so a failure can be marked without a copy. */
     static const char ERR[] = "ERROR: ";
-    bool ok = t ? t->fn(in, res + sizeof(ERR) - 1, TOOL_RESULT_MAX - (sizeof(ERR) - 1))
-                : ext_run(x, in, res + sizeof(ERR) - 1, TOOL_RESULT_MAX - (sizeof(ERR) - 1));
+    bool ok = t->fn(in, res + sizeof(ERR) - 1, TOOL_RESULT_MAX - (sizeof(ERR) - 1));
     cJSON_Delete(in);
     if (ok) {
         memmove(res, res + sizeof(ERR) - 1, strlen(res + sizeof(ERR) - 1) + 1);

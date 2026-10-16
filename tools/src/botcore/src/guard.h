@@ -43,6 +43,15 @@ int         guard_plan(void);
  */
 int  guard_resolve(const char *path, char out[PATH_MAX], int *inside);
 
+/*
+ * Write scope (bot.worker's "writes"): while set, fs_write, fs_edit and bot.fs may change only these paths
+ * (relative to the context dir; "dir/" = everything under dir). NULL/0 = no scope (everything inside ctx).
+ * Shell commands are not narrowed (yet).
+ */
+void        guard_set_writes(const char *const *paths, int n);
+int         guard_write_ok(const char *abs);   /* resolved absolute path */
+const char *guard_writes_text(void);           /* the scope, for messages */
+
 /* Ask a y/N question on the tty. Returns 1 only on an explicit yes; EOF/Ctrl-C/non-tty => 0. */
 int  guard_confirm(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

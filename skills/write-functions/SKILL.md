@@ -9,8 +9,8 @@ The agent's model talks to the user and decides what to do. A function does one 
 
 ## Which kind of tool (in this order)
 1. Lua function in functions/: runs inside the agent, needs nothing installed. The default.
-2. Shell script in tools/bin (see write-tool): when the job needs a program on the machine (sqlite3, psql, ffmpeg, git). List each program in config.json "requires".
-3. Python or Node script in tools/bin: last resort, only for a library with no other way (PDF parsing, a vendor SDK). The interpreter goes in "requires".
+2. Shell script in a skill's scripts/ (see write-scripts): when the job needs a program on the machine (sqlite3, psql, ffmpeg, git). List each program in config.json "requires".
+3. Python or Node script in a skill's scripts/: last resort, only for a library with no other way (PDF parsing, a vendor SDK). The interpreter goes in "requires".
 
 ## A function file
 ```
@@ -43,10 +43,15 @@ Clear names (`balance_after`, not `b2`), short functions, plain loops and ifs, a
 - bot.shell(command) -> output, exit code: the same rules as shell_exec (risky commands ask the user, or are refused when nobody is there)
 - bot.mcp(server, tool, args) -> text: a tool of an MCP server in config.json
 - bot.agent(name, task) -> text: hand a task to a sub-agent or a remote agent
+- bot.llm(prompt) -> text, or bot.llm{prompt = ..., schema = {amount = "number", essential = "boolean"}, images = {"scan.png"}} -> a table with those fields: one request to the agent's own model, for judgement inside code (reading a message or an image, choosing words). Code decides; the model only reads and words.
+- bot.skill_dir(name) -> the real folder of one of the agent's skills (to run its scripts/ with bot.shell)
+
+## Code-driven agents: FLOW.lua
+When the agent's job is a fixed procedure (one record in, one row out), it can be driven by code instead of by the model: FLOW.lua at the project's top level defines flow(input), which gets every job (a --run line, a message) and returns the reply. It calls functions for the exact steps and bot.llm for the judgement steps, so the order and the rules are guaranteed. bot.worker{task = ..., tools = {...}, writes = {...}} hands an open-ended part to a fresh model conversation with tools; bot.ask(question) asks the person (nil in batch mode); bot.say(text) shows progress; bot.test() runs the project's tests. Functions in FLOW.lua are never tools.
 
 ## Rules
 - Never parse what a person wrote (intent, names, keywords): that is the model's job. The model passes clean arguments.
-- Never call an LLM, never return mock or hard-coded results.
+- Never call another LLM service and never return mock or hard-coded results. The agent's own model is reached with bot.llm, and only for judgement.
 - Keep results small (over 100 KB is cut): return what the model needs, write the rest to a file and return its name.
 - A call may run 60 seconds at most.
 

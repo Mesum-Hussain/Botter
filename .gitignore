@@ -1,6 +1,6 @@
 /botter
 /artifacts/
-/tools/bin/
+/skills/build-agent/scripts/agent_tools
 /tools/src/agent_tools/agent_tools
 /graphify-out/
 tui/botter-tui

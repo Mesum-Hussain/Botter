@@ -1,23 +1,19 @@
 /*
- * agent_tools: the botter agent's own tools, one source, one executable that
- * behaves according to the name it is started under (the botcore tool runner
- * passes the tool name as argv[0]):
+ * agent_tools: Botter's build program (skills/build-agent/scripts/agent_tools), run by the Lua
+ * functions agent_build and agent_inspect (functions/botter.lua) through bot.shell:
  *
- *   agent_build     validate (dry_run) or build <dir> into a <name>.bot
- *   agent_inspect   list what is embedded in a .bot
- *   tool_test       run a project's tools with the "example" input of their descriptors
+ *   agent_tools build [--dry-run] [--output FILE.bot] [DIR]   validate, or build DIR into <name>.bot
+ *   agent_tools inspect FILE.bot                               list what is embedded in a .bot
  *
- * Tool protocol: arguments = one JSON object on stdin, result = stdout,
- * exit 0 = ok. Everything (including packer warnings) goes to stdout.
+ * Result on stdout (packer warnings included), exit 0 = ok.
  *
- * Safety: there is no confirmation channel for external tools, so every path
- * the model supplies must resolve inside the working directory (symlink-safe).
+ * Safety: every path must resolve inside the working directory (symlink-safe).
  *
  * agent_build needs a botcore runtime to put the agent on. It uses the running
  * agent itself: the botter process is "botcore + pack", and everything in
- * front of its pack is the pristine runtime (see packer.c). botcore hands
- * tools a read-only fd of its own executable (BOTCORE_RUNTIME_FD, fd 3): a
- * sandboxed tool cannot open /proc/<parent>/exe itself.
+ * front of its pack is the pristine runtime (see packer.c). botcore hands the
+ * shell commands of builder agents a read-only fd of its own executable
+ * (BOTCORE_RUNTIME_FD, fd 3): a sandboxed child cannot open /proc/<parent>/exe itself.
  * Build:  see ../../../Makefile  (static musl, links ../pack and cJSON)
  */
 #define _GNU_SOURCE
@@ -32,31 +28,6 @@
 #include "cJSON.h"
 
 /* ---------- small helpers ---------- */
-
-static char *read_stdin(void)
-{
-    size_t cap = 4096, n = 0;
-    char  *b = malloc(cap + 1);
-    if (!b) {
-        die("out of memory");
-    }
-    ssize_t r;
-    while ((r = read(0, b + n, cap - n)) > 0) {
-        n += (size_t)r;
-        if (n == cap) {
-            if (cap >= (1u << 20)) {
-                die("arguments too large");
-            }
-            cap *= 2;
-            b = realloc(b, cap + 1);
-            if (!b) {
-                die("out of memory");
-            }
-        }
-    }
-    b[n] = '\0';
-    return b;
-}
 
 static const char *arg_str(const cJSON *a, const char *key, const char *def)
 {
@@ -286,228 +257,38 @@ static int cmd_inspect(const cJSON *args)
     return cmd_list(p);
 }
 
-/* ---------- tool_test ---------- */
-
-#include <signal.h>
-#include <sys/wait.h>
-#include <time.h>
-
-static double mono_s(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-/* First `max` bytes of an open file, as text for the report. */
-static void sb_file(sb_t *s, const char *label, FILE *f, size_t max)
-{
-    char  *buf = malloc(max + 1);
-    size_t n = 0;
-    long   total = ftell(f);
-    rewind(f);
-    if (buf) {
-        n = fread(buf, 1, max, f);
-        buf[n] = '\0';
-        while (n && (buf[n - 1] == '\n' || buf[n - 1] == ' ')) {
-            buf[--n] = '\0';
-        }
-        sb_add(s, "  %s: %s%s\n", label, n ? buf : "(nothing)", total > (long)max ? " ...(cut)" : "");
-    }
-    free(buf);
-}
-
-/* Run tools/bin/<name> like botcore does: JSON on stdin, cwd = project. */
-static void test_one(sb_t *s, const char *dir, const char *name, int *failed, double budget)
-{
-    char bin[PATH_MAX], doc[PATH_MAX];
-    snprintf(bin, sizeof(bin), "%s/tools/bin/%s", dir, name);
-    snprintf(doc, sizeof(doc), "%s/tools/doc/%s.json", dir, name);
-    size_t dl = 0;
-    int    saved = errors;
-    char  *dj = slurp(doc, &dl);
-    errors = saved;
-    cJSON *d = dj ? cJSON_Parse(dj) : NULL;
-    free(dj);
-    const cJSON *ex = cJSON_GetObjectItemCaseSensitive(d, "example");
-    const cJSON *to = cJSON_GetObjectItemCaseSensitive(d, "timeout_s");
-    if (!cJSON_IsObject(ex)) {
-        sb_add(s, "%s: NOT TESTED: add \"example\" to tools/doc/%s.json: a realistic, harmless input object "
-                  "(a search or a check, never a real send or delete)\n",
-               name, name);
-        (*failed)++;
-        cJSON_Delete(d);
-        return;
-    }
-    double limit = cJSON_IsNumber(to) && to->valuedouble >= 1 ? to->valuedouble : 60;
-    if (limit > budget) {
-        limit = budget;
-    }
-    char *input = cJSON_PrintUnformatted(ex);
-    cJSON_Delete(d);
-    FILE *in = tmpfile(), *out = tmpfile(), *err = tmpfile();
-    if (!input || !in || !out || !err) {
-        die("out of memory");
-    }
-    fputs(input, in);
-    fflush(in);
-    rewind(in);
-
-    /* a script runs through its #! line (no executable bit needed), an ELF directly */
-    char line[512] = "";
-    FILE *bf = fopen(bin, "rb");
-    if (bf) {
-        if (!fgets(line, sizeof(line), bf)) {
-            line[0] = '\0';
-        }
-        fclose(bf);
-    }
-    char *argv[4] = {bin, NULL, NULL, NULL};
-    if (!strncmp(line, "#!", 2)) {
-        line[strcspn(line, "\r\n")] = '\0';
-        char *p = line + 2 + strspn(line + 2, " \t");
-        char *a = p + strcspn(p, " \t");
-        if (*a) {
-            *a++ = '\0';
-            a += strspn(a, " \t");
-        }
-        argv[0] = p;
-        argv[1] = *a ? a : bin;
-        argv[2] = *a ? bin : NULL;
-    }
-    double t0 = mono_s();
-    pid_t  pid = fork();
-    if (pid == 0) {
-        setpgid(0, 0);
-        dup2(fileno(in), 0);
-        dup2(fileno(out), 1);
-        dup2(fileno(err), 2);
-        if (chdir(dir) != 0) {
-            _exit(126);
-        }
-        execv(argv[0], argv);
-        fprintf(stderr, "cannot run %s: %s\n", argv[0], strerror(errno));
-        _exit(127);
-    }
-    int st = 0, timed_out = 0;
-    while (pid > 0 && waitpid(pid, &st, WNOHANG) == 0) {
-        if (mono_s() - t0 > limit) {
-            kill(-pid, SIGKILL);
-            waitpid(pid, &st, 0);
-            timed_out = 1;
-            break;
-        }
-        struct timespec ts = {0, 100 * 1000000L};
-        nanosleep(&ts, NULL);
-    }
-    double took = mono_s() - t0;
-    int    code = pid < 0 ? -1 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-    long   olen = ftell(out);
-    int    ok = !timed_out && code == 0 && olen > 0;
-    /* "Missing GMAIL_USER in .env": the tool works, the user has not configured it yet */
-    char tail[400] = "";
-    long elen = ftell(err);
-    fseek(err, 0, SEEK_SET);
-    size_t tn = fread(tail, 1, sizeof(tail) - 1, err);
-    tail[tn] = '\0';
-    fseek(err, elen, SEEK_SET);
-    int setup = !ok && !timed_out && code != 0 && strcasestr(tail, "missing") && strstr(tail, ".env");
-    if (!ok && !setup) {
-        (*failed)++;
-    }
-    sb_add(s, "%s: %s (input %s; %.1f s)\n", name,
-           timed_out ? "FAILED: timed out (raise \"timeout_s\", or make the tool faster)"
-           : setup   ? "NEEDS SETUP: the user must fill in .env first (fine for now; tell them which keys)"
-           : code != 0 ? "FAILED: exit code non-zero"
-           : olen == 0 ? "FAILED: printed nothing"
-                       : "ok",
-           input, took);
-    if (code != 0 && !timed_out) {
-        sb_add(s, "  exit code: %d\n", code);
-    }
-    sb_file(s, "stdout", out, 1500);
-    if (ftell(err) > 0 || !ok) {
-        fseek(err, 0, SEEK_END);
-        sb_file(s, "stderr", err, 800);
-    }
-    free(input);
-    fclose(in);
-    fclose(out);
-    fclose(err);
-}
-
-static int cmd_test(const cJSON *args)
-{
-    const char *dirarg = arg_str(args, "dir", ".");
-    const char *only = arg_str(args, "tool", NULL);
-    char       *dir = resolve_inside(dirarg);
-    char        bp[PATH_MAX];
-    if (!dir) {
-        fprintf(stderr, "error: '%s' is not inside the working directory\n", dirarg);
-        return 1;
-    }
-    snprintf(bp, sizeof(bp), "%s/tools/bin", dir);
-    size_t n = 0;
-    char **names = list_dir(bp, &n);
-    sb_t   s = {0};
-    int    failed = 0, ran = 0;
-    double t0 = mono_s();
-    for (size_t i = 0; i < n; i++) {
-        if (only && strcmp(only, names[i]) != 0) {
-            continue;
-        }
-        double left = 570 - (mono_s() - t0);
-        if (left < 5) {
-            sb_add(&s, "%s: NOT TESTED: no time left in this call; test it alone with {\"tool\": \"%s\"}\n", names[i], names[i]);
-            failed++;
-            continue;
-        }
-        test_one(&s, dir, names[i], &failed, left);
-        ran++;
-    }
-    if (!ran && !failed) {
-        sb_add(&s, "%s\n", only ? "no such tool in tools/bin" : "this project has no tools in tools/bin");
-    }
-    if (failed) {
-        sb_add(&s, "%d tool(s) tested, %d FAILED or not tested (NEEDS SETUP is not a failure)\n", ran, failed);
-    } else {
-        sb_add(&s, "%d tool(s) tested: all ok (NEEDS SETUP only waits for the user's .env)\n", ran);
-    }
-    fputs(s.p ? s.p : "", stdout);
-    return 0;
-}
-
 /* ---------- dispatch ---------- */
 
 int main(int argc, char **argv)
 {
-    (void)argc;
     /* packer warnings/errors are part of the result */
     dup2(1, 2);
     setvbuf(stdout, NULL, _IOLBF, 0);
-
-    char *b = xstrdup(argv[0] ? argv[0] : "");
-    const char *name = basename(b);
-
     if (!getcwd(g_cwd, sizeof(g_cwd))) {
         fprintf(stderr, "error: cannot determine working directory\n");
         return 1;
     }
-    char *in = read_stdin();
-    cJSON *args = cJSON_Parse(in[0] ? in : "{}");
-    if (!cJSON_IsObject(args)) {
-        fprintf(stderr, "error: arguments must be a JSON object\n");
-        return 1;
+    cJSON *args = cJSON_CreateObject();
+    const char *cmd = argc > 1 ? argv[1] : "";
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--dry-run")) {
+            cJSON_AddTrueToObject(args, "dry_run");
+        } else if (!strcmp(argv[i], "--output") && i + 1 < argc) {
+            cJSON_AddStringToObject(args, "output", argv[++i]);
+        } else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "error: unknown option %s\n", argv[i]);
+            return 2;
+        } else {
+            cJSON_AddStringToObject(args, !strcmp(cmd, "inspect") ? "file" : "dir", argv[i]);
+        }
     }
-    if (strcmp(name, "agent_build") == 0) {
+    if (!strcmp(cmd, "build")) {
         return cmd_build_tool(args);
     }
-    if (strcmp(name, "agent_inspect") == 0) {
+    if (!strcmp(cmd, "inspect")) {
         return cmd_inspect(args);
     }
-    if (strcmp(name, "tool_test") == 0) {
-        return cmd_test(args);
-    }
-    fprintf(stderr, "error: unknown tool name '%s' (expected agent_build, agent_inspect or tool_test)\n", name);
+    fprintf(stderr, "usage: agent_tools build [--dry-run] [--output FILE.bot] [DIR]\n"
+                    "       agent_tools inspect FILE.bot\n");
     return 2;
 }

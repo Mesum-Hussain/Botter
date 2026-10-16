@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "vfs.h"
 #include "blob.h"
-#include "tools.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -175,94 +174,3 @@ const vfs_entry_t *vfs_find(const char *path)
     }
     return bsearch(path, g_tab, g_n, sizeof(*g_tab), cmp_path);
 }
-
-/* ---- tools ---- */
-
-static bool vfs_list_tool(const cJSON *in, char *result, size_t rl)
-{
-    const cJSON *p = cJSON_GetObjectItemCaseSensitive(in, "prefix");
-    const char *prefix = cJSON_IsString(p) && p->valuestring ? p->valuestring : "";
-    while (prefix[0] == '/') {
-        prefix++;
-    }
-    size_t n = 0;
-    const vfs_entry_t *t = vfs_table(&n);
-    size_t pl = strlen(prefix), off = 0, shown = 0;
-    result[0] = '\0';
-    for (size_t i = 0; i < n; i++) {
-        if (t[i].kind != VFS_DATA || strncmp(t[i].path, prefix, pl) != 0) {
-            continue;
-        }
-        int w = snprintf(result + off, rl - off, "%s (%zu bytes)\n", t[i].path, t[i].len);
-        if (w < 0 || (size_t)w >= rl - off) {
-            snprintf(result + off, rl - off, "...(truncated)\n");
-            return true;
-        }
-        off += (size_t)w;
-        shown++;
-    }
-    if (shown == 0) {
-        snprintf(result, rl, "no embedded files match '%s'", prefix);
-    }
-    return true;
-}
-
-static bool vfs_read_tool(const cJSON *in, char *result, size_t rl)
-{
-    const cJSON *p = cJSON_GetObjectItemCaseSensitive(in, "path");
-    if (!cJSON_IsString(p) || !p->valuestring || !p->valuestring[0]) {
-        snprintf(result, rl, "missing 'path'");
-        return false;
-    }
-    const vfs_entry_t *e = vfs_find(p->valuestring);
-    if (!e) {
-        snprintf(result, rl, "no embedded file '%.200s' (use vfs_list)", p->valuestring);
-        return false;
-    }
-    if (e->kind != VFS_DATA) {
-        snprintf(result, rl, "'%.200s' is a tool executable, not a readable file; call it as a tool", p->valuestring);
-        return false;
-    }
-    const cJSON *o = cJSON_GetObjectItemCaseSensitive(in, "offset");
-    size_t off = 0;
-    if (cJSON_IsNumber(o) && o->valuedouble > 0) {
-        off = (size_t)o->valuedouble;
-    }
-    if (off >= e->len) {
-        snprintf(result, rl, e->len == 0 ? "(empty file)" : "(offset past end of file, %zu bytes)", e->len);
-        return true;
-    }
-    const size_t NOTE = 64;
-    size_t cap = rl > NOTE + 1 ? rl - NOTE - 1 : 0;
-    size_t n = e->len - off;
-    int more = 0;
-    if (n > cap) {
-        n = cap;
-        /* do not cut inside a UTF-8 sequence */
-        while (n > 0 && ((unsigned char)e->data[off + n] & 0xC0) == 0x80) {
-            n--;
-        }
-        more = 1;
-    }
-    memcpy(result, e->data + off, n);
-    result[n] = '\0';
-    if (more) {
-        snprintf(result + n, rl - n, "\n[truncated: continue with offset=%zu]", off + n);
-    }
-    return true;
-}
-
-const tool_t TOOLS_VFS[] = {
-    {"vfs_list",
-     "List the agent's built-in read-only files (skills, tool docs, functions). Optional 'prefix' filters "
-     "by path prefix, e.g. 'skills/'.",
-     "{\"type\":\"object\",\"properties\":{\"prefix\":{\"type\":\"string\"}}}",
-     vfs_list_tool},
-    {"vfs_read",
-     "Read one built-in file by its path as shown by vfs_list. Output is capped (~32KB); use 'offset' to "
-     "continue.",
-     "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
-     "\"offset\":{\"type\":\"integer\",\"description\":\"Byte offset, default 0\"}},\"required\":[\"path\"]}",
-     vfs_read_tool},
-};
-const size_t TOOLS_VFS_N = sizeof(TOOLS_VFS) / sizeof(TOOLS_VFS[0]);

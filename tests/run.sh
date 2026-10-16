@@ -66,7 +66,7 @@ drive() {
 # mkagent DIR [config.json content]: a minimal agent project
 mkagent() {
     mkdir -p "$1"
-    echo "You are a test agent." >"$1/agent.md"
+    echo "You are a test agent." >"$1/AGENT.md"
     [ $# -gt 1 ] && printf '%s\n' "$2" >"$1/config.json"
     return 0
 }
@@ -84,7 +84,7 @@ for old in FLOW.fwl FLOW.md SQNC.md; do
     rm -f "$T/flow_old/"*.fwl "$T/flow_old/"FLOW.md "$T/flow_old/"SQNC.md "$T/flow_old.bot"
     echo 'RETURN "x"' >"$T/flow_old/$old"
     build "$T/flow_old" "$T/flow_old.bot"
-    check "an old $old is reported" "$T/build.log" "$old is no longer used: write how the agent works in agent.md"
+    check "an old $old is reported" "$T/build.log" "$old is no longer used: write how the agent works in AGENT.md"
     [ -e "$T/flow_old.bot" ] && fail "an old $old stops the build"
 done
 
@@ -108,6 +108,7 @@ if [ -e "$T/cfg_bad.bot" ]; then fail "config.json: an invalid config is not bui
 cfg_bad "a bad name is an error" '{"name": "My Agent", "version": "1.0.0"}' 'name "My Agent" must be'
 cfg_bad "invalid JSON is an error" '{"name": "a", "version": }' 'not a valid JSON object'
 cfg_bad "a wrong type is an error" '{"name": "a", "version": "1.0.0", "internet": "yes"}' '"internet" must be true or false'
+cfg_bad "reasoning must be low, medium or high" '{"name": "a", "version": "1.0.0", "reasoning": "max"}' '"reasoning" must be "low", "medium" or "high"'
 cfg_bad "an unknown key is a warning" '{"name": "a", "version": "1.0.0", "author": "x"}' 'warning: config.json: unknown key "author"'
 cfg_bad "missing name, version, description are warnings" '{"internet": true}' 'warning: config.json: no "name"'
 cfg_bad "requires takes command names" '{"name": "a", "version": "1.0.0", "requires": ["rm -rf"]}' '"requires" must be a list of names'
@@ -116,48 +117,67 @@ mkagent "$T/cfg_old"
 echo '{}' >"$T/cfg_old/agent.json"
 "$PACK" check "$T/cfg_old" "$CORE" >"$T/build.log" 2>&1
 check "config.json: an old agent.json is reported" "$T/build.log" "agent.json is now config.json"
-# skills / tools lists choose what is compiled in
-mkagent "$T/pick" '{"name": "pick", "version": "1.0.0", "description": "d", "skills": ["keep"], "tools": ["tkeep"], "requires": ["python3"]}'
-mkdir -p "$T/pick/skills/keep" "$T/pick/skills/drop" "$T/pick/tools/bin" "$T/pick/tools/doc"
-for k in keep drop; do printf -- '---\nname: %s\ndescription: d\n---\n' $k >"$T/pick/skills/$k/SKILL.md"; done
-for t in tkeep tdrop; do printf '#!/usr/bin/env python3\nimport sys; print(sys.stdin.read())\n' >"$T/pick/tools/bin/$t"; chmod +x "$T/pick/tools/bin/$t"; echo '{"description": "d", "parameters": {"type": "object", "properties": {}}}' >"$T/pick/tools/doc/$t.json"; done
+# the skills list chooses what is compiled in; a skill brings its scripts (runnable) and functions
+mkagent "$T/pick" '{"name": "pick", "version": "1.0.0", "description": "d", "skills": ["keep"], "requires": ["python3"]}'
+mkdir -p "$T/pick/skills/keep/scripts" "$T/pick/skills/keep/functions/tests" "$T/pick/skills/drop"
+for k in keep drop; do printf -- '---\nname: %s\ndescription: d\n---\nRun scripts/run.py.\n' $k >"$T/pick/skills/$k/SKILL.md"; done
+printf '#!/usr/bin/env python3\nprint("hi")\n' >"$T/pick/skills/keep/scripts/run.py"
+printf -- '--- Say hi.\nfunction keep_hi()\n  return "hi"\nend\n' >"$T/pick/skills/keep/functions/hi.lua"
+printf 'function test_hi()\n  assert(keep_hi() == "hi")\nend\n' >"$T/pick/skills/keep/functions/tests/hi.lua"
 build "$T/pick" "$T/pick.bot"
 "$PACK" list "$T/pick.bot" >"$T/list.log" 2>&1
 check "config.json skills: a listed skill is compiled in" "$T/list.log" "skills/keep/SKILL.md"
 check_not "config.json skills: an unlisted skill is left out" "$T/list.log" "skills/drop/"
-check "config.json tools: a listed tool is compiled in" "$T/list.log" "tools/bin/tkeep$"
-check_not "config.json tools: an unlisted tool and its doc are left out" "$T/list.log" "tdrop"
-check "config.json: leaving one out is a warning" "$T/build.log" 'skills "drop" is not listed in config.json "skills"'
+check "skills: a script is embedded as a runnable file" "$T/list.log" "script +[0-9]+  skills/keep/scripts/run.py"
+check "skills: a skill's functions are embedded" "$T/list.log" "skills/keep/functions/hi.lua"
+check_not "skills: a skill's function tests are not embedded" "$T/list.log" "functions/tests"
+check "skills: a skill's function tests run at build time" "$T/build.log" "function tests: 1 passed, 0 failed"
+check "config.json: leaving a skill out is a warning" "$T/build.log" 'skill "drop" is not listed in config.json "skills"'
 mkagent "$T/needpy" '{"name": "needpy", "version": "1.0.0", "description": "d"}'
-mkdir -p "$T/needpy/tools/bin" "$T/needpy/tools/doc"
-printf '#!/usr/bin/env python3\nimport sys; print(sys.stdin.read())\n' >"$T/needpy/tools/bin/pyt"; chmod +x "$T/needpy/tools/bin/pyt"
-echo '{"description": "d", "parameters": {"type": "object", "properties": {}}}' >"$T/needpy/tools/doc/pyt.json"
+mkdir -p "$T/needpy/skills/py/scripts"
+printf -- '---\nname: py\ndescription: d\n---\nRun scripts/pyt.\n' >"$T/needpy/skills/py/SKILL.md"
+printf '#!/usr/bin/env python3\nprint(1)\n' >"$T/needpy/skills/py/scripts/pyt"
 "$PACK" check "$T/needpy" "$CORE" >"$T/build.log" 2>&1
-check "config.json: a script tool's interpreter missing from requires is a warning" "$T/build.log" 'runs with python3: add "python3" to "requires"'
-# contracts the build checks: descriptors, skill frontmatter, tool scripts
+check "config.json: a script's interpreter missing from requires is a warning" "$T/build.log" 'runs with python3: add "python3" to "requires"'
+# the old layout is an error that says where things go
+mkagent "$T/oldl" '{"name": "oldl", "version": "1.0.0", "description": "d", "tools": ["x"]}'
+mv "$T/oldl/AGENT.md" "$T/oldl/agent.md"
+mkdir -p "$T/oldl/tools/bin" "$T/oldl/tools/doc" "$T/oldl/agents/helper"
+echo x >"$T/oldl/agents/helper/agent.md"
+"$PACK" check "$T/oldl" "$CORE" >"$T/build.log" 2>&1
+check "old layout: agent.md is now AGENT.md" "$T/build.log" "agent.md is now AGENT.md: rename it"
+check "old layout: tools/bin says where programs go" "$T/build.log" "tools/bin is gone: put each program in the scripts/ folder"
+check "old layout: tools/doc too" "$T/build.log" "tools/doc is gone"
+check "old layout: config.json tools" "$T/build.log" '"tools" is gone'
+check "old layout: a sub-agent's agent.md" "$T/build.log" "sub-agents use AGENT.md too"
+# the skill validator
 mkagent "$T/ctr" '{"name": "ctr", "version": "1.0.0", "description": "d", "requires": ["python3"]}'
-mkdir -p "$T/ctr/tools/bin" "$T/ctr/tools/doc" "$T/ctr/skills/bare"
+mkdir -p "$T/ctr/skills/bare" "$T/ctr/skills/named" "$T/ctr/skills/good/references" "$T/ctr/skills/good/scripts"
 echo "# Bare skill" >"$T/ctr/skills/bare/SKILL.md"
-printf '#!/usr/bin/env python3\nimport sys\nprint("mock leads for " + sys.argv[1])\n' >"$T/ctr/tools/bin/argv"; chmod +x "$T/ctr/tools/bin/argv"
-echo '{"name": "argv", "description": "d", "input": "keyword"}' >"$T/ctr/tools/doc/argv.json"
+printf -- '---\nname: other\ndescription: %s\n---\nSee [the guide](references/missing.md).\nTODO: write the rest\n' "$(printf 'x%.0s' $(seq 1 1100))" >"$T/ctr/skills/named/SKILL.md"
+printf -- '---\nname: good\ndescription: >\n  Writes reports. Use it when\n  the user asks for one.\n---\nRead [the style](references/style.md) first; run scripts/make.py; keep "TODO" items out.\n' >"$T/ctr/skills/good/SKILL.md"
+echo "# Style" >"$T/ctr/skills/good/references/style.md"
+echo "# Lost" >"$T/ctr/skills/good/references/lost.md"
+printf 'import sys\nprint("mock leads for " + sys.argv[1])\n' >"$T/ctr/skills/good/scripts/make.py"
 "$PACK" check "$T/ctr" "$CORE" >"$T/build.log" 2>&1
-check "contracts: a descriptor without parameters is an error" "$T/build.log" 'error: tools/doc/argv.json: no "parameters"'
-check "contracts: unknown descriptor keys are a warning" "$T/build.log" 'warning: tools/doc/argv.json: unknown key "input"'
-check "contracts: a skill without frontmatter is an error" "$T/build.log" 'error: skills/bare/SKILL.md has no frontmatter'
-check "contracts: a tool that reads argv is a warning" "$T/build.log" 'tools/bin/argv reads command-line arguments'
-check "contracts: a tool that does not read stdin is a warning" "$T/build.log" 'tools/bin/argv does not seem to read stdin'
-check "contracts: mock output in a tool is a warning" "$T/build.log" 'tools/bin/argv mentions "mock"'
-printf '#!/bin/sh\n# adapted from artifacts/kit/scrape.py (MIT)\ncat >/dev/null\npython3 artifacts/kit/scrape.py\n' >"$T/ctr/tools/bin/uses_art"
-echo '{"description": "d", "parameters": {"type": "object", "properties": {}}}' >"$T/ctr/tools/doc/uses_art.json"
+check "skills: a skill without frontmatter is an error" "$T/build.log" 'error: skills/bare/SKILL.md has no frontmatter'
+check "skills: the name must be the folder's" "$T/build.log" 'error: skills/named/SKILL.md: "name: other" must be the folder.s name, named'
+check "skills: a description over 1024 characters is an error" "$T/build.log" 'the description has 1100 characters'
+check "skills: a link that does not resolve is an error" "$T/build.log" 'skills/named/SKILL.md links to references/missing.md, which is not in the skill'
+check "skills: placeholder words are an error" "$T/build.log" 'skills/named/SKILL.md says "TODO"'
+check_not "skills: a quoted placeholder word is a mention" "$T/build.log" 'skills/good/SKILL.md says'
+check_not "skills: a folded description is read" "$T/build.log" 'skills/good/SKILL.md: frontmatter has no'
+check "skills: a reference nothing points to is a warning" "$T/build.log" 'skills/good/references/lost.md: neither SKILL.md nor anything it points to'
+check_not "skills: a linked reference is fine" "$T/build.log" 'references/style.md: neither'
+check "skills: a script without #! is a warning" "$T/build.log" 'skills/good/scripts/make.py has no "#!" line'
+printf '#!/usr/bin/env python3\nimport sys\nprint("mock leads for " + sys.argv[1])\n' >"$T/ctr/skills/good/scripts/make.py"
+printf '#!/bin/sh\n# adapted from artifacts/kit/scrape.py (MIT)\npython3 artifacts/kit/scrape.py\n' >"$T/ctr/skills/good/scripts/uses_art"
 "$PACK" check "$T/ctr" "$CORE" >"$T/build.log" 2>&1
-check "contracts: a tool that runs code from artifacts/ is an error" "$T/build.log" 'error: tools/bin/uses_art uses files under artifacts/'
-printf '#!/bin/sh\n# adapted from artifacts/kit/scrape.py (MIT)\ncat\n' >"$T/ctr/tools/bin/uses_art"
+check "skills: mock output in a script is a warning" "$T/build.log" 'skills/good/scripts/make.py mentions "mock"'
+check "skills: a script that runs code from artifacts/ is an error" "$T/build.log" 'error: skills/good/scripts/uses_art uses files under artifacts/'
+printf '#!/bin/sh\n# adapted from artifacts/kit/scrape.py (MIT)\necho ok\n' >"$T/ctr/skills/good/scripts/uses_art"
 "$PACK" check "$T/ctr" "$CORE" >"$T/build.log" 2>&1
-check_not "contracts: a comment crediting artifacts/ is fine" "$T/build.log" 'uses_art uses files under artifacts/'
-printf '#!/usr/bin/env python3\nimport sys, time\nsys.stdin.read()\ntime.sleep(1)\n' >"$T/ctr/tools/bin/poller"
-echo '{"description": "d", "parameters": {"type": "object", "properties": {}}}' >"$T/ctr/tools/doc/poller.json"
-"$PACK" check "$T/ctr" "$CORE" >"$T/build.log" 2>&1
-check "contracts: a tool that waits with the default timeout is a warning" "$T/build.log" 'tools/bin/poller waits \(sleep\)'
+check_not "skills: a comment crediting artifacts/ is fine" "$T/build.log" 'uses_art uses files under artifacts/'
 
 # ---------------------------------------------------------------------------
 section "Runtime: network modes, sandbox, system prompt (stub LLM)"
@@ -269,7 +289,7 @@ build "$T/skilled" "$T/skilled.bot"
 check "leftover manifest.md is reported and not embedded" "$T/build.log" "manifest.md is no longer used"
 stub_start --text /dev/null
 drive "$T/skilled.bot" "$T/ws"
-check "system prompt lists skills with their frontmatter descriptions" "$T/rec/system.txt" "skills/pitching/SKILL.md: Write one specific idea per lead"
+check "system prompt lists skills with their frontmatter descriptions" "$T/rec/system.txt" "^- pitching: Write one specific idea per lead"
 
 stub_start --text /dev/null
 drive "$T/meta.bot" "$T/ws"
@@ -280,10 +300,10 @@ build "$T/needcmd" "$T/needcmd.bot"
 drive "$T/needcmd.bot" "$T/ws"
 check "config.json requires: missing programs are reported at start" "$T/out" "not installed here: definitely-not-installed-cmd"
 
-# Sub-agents: agents/<name>/agent.md, reached by the model's delegate tool or a function's bot.agent
+# Sub-agents: agents/<name>/AGENT.md, reached by the model's delegate tool or a function's bot.agent
 mkagent "$T/team"
 mkdir -p "$T/team/agents/helper" "$T/team/functions"
-printf -- '---\ndescription: Answers pings.\n---\nYou are ZETA, the helper.\n' >"$T/team/agents/helper/agent.md"
+printf -- '---\ndescription: Answers pings.\n---\nYou are ZETA, the helper.\n' >"$T/team/agents/helper/AGENT.md"
 printf -- '--- Ask the helper.\n---@param task string  what to ask\nfunction ask_helper(task)\n  return "helper said: " .. bot.agent("helper", task)\nend\n' >"$T/team/functions/team.lua"
 build "$T/team" "$T/team.bot"
 check "sub-agents: a function that delegates is reported as such" "$T/build.log" "ask_helper \(other agents\)"
@@ -301,9 +321,9 @@ tool_call ask_helper '{"task": "ping3"}'
 drive "$T/team.bot" "$T/ws"
 check "sub-agents: bot.agent hands a function's task to a sub-agent" "$T/rec/subuser.txt" "^ping3"
 check "sub-agents: and the function gets its answer" "$T/rec/tool.txt" "^helper said: done"
-echo "You are a helper." >"$T/team/agents/helper/agent.md"
+echo "You are a helper." >"$T/team/agents/helper/AGENT.md"
 build "$T/team" "$T/team_bad.bot"
-check "sub-agents: one without a description is an error" "$T/build.log" 'agents/helper/agent.md: start it with a frontmatter'
+check "sub-agents: one without a description is an error" "$T/build.log" 'agents/helper/AGENT.md: start it with a frontmatter'
 
 # MCP and A2A (calling out): servers and remote agents from config.json, one HTTPS request per call
 python3 "$TESTS/remote_servers.py" "$T/rport" "$T/rrec" &
@@ -509,37 +529,17 @@ shell_call "echo no-curl-needed"
 drive "$T/on.bot" "$T/ws" PATH=/nonexistent
 check "runs with no curl (or anything) on PATH" "$T/rec/tool.txt" "no-curl-needed"
 
-mkdir -p "$T/proj" && echo "You are built by the test." >"$T/proj/agent.md"
+mkdir -p "$T/proj" && echo "You are built by the test." >"$T/proj/AGENT.md"
 tool_call agent_build '{}'
 drive "$BOTTER" "$T/proj" BOTTER_TUI=0
 check "botter: agent_build builds a .bot from inside the sandbox" "$T/rec/tool.txt" "wrote .*proj\\.bot"
-mkdir -p "$T/proj2" && echo "You are built by the plain runtime." >"$T/proj2/agent.md"
+mkdir -p "$T/proj2" && echo "You are built by the plain runtime." >"$T/proj2/AGENT.md"
 drive "$ROOT/artifacts/botter.bot" "$T/proj2"
 check "botter: agent_build also works run as a plain .bot from a folder the sandbox hides" "$T/rec/tool.txt" "wrote .*proj2\\.bot"
-# tool_test: runs each tool with its descriptor's example, like botcore does
-mkdir -p "$T/tt/tools/bin" "$T/tt/tools/doc"
-printf '#!/usr/bin/env python3\nimport json, sys\na = json.load(sys.stdin)\nprint("echo:", a["q"])\n' >"$T/tt/tools/bin/good"
-printf '#!/bin/sh\ncat >/dev/null\necho "Missing KEY in .env" >&2\nexit 3\n' >"$T/tt/tools/bin/bad"
-printf '#!/bin/sh\ncat\n' >"$T/tt/tools/bin/noex"
-echo '{"description": "d", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}, "example": {"q": "hi"}}' >"$T/tt/tools/doc/good.json"
-echo '{"description": "d", "parameters": {"type": "object", "properties": {}}, "example": {}}' >"$T/tt/tools/doc/bad.json"
-echo '{"description": "d", "parameters": {"type": "object", "properties": {}}}' >"$T/tt/tools/doc/noex.json"
-tool_call tool_test '{"dir": "tt"}'
-drive "$BOTTER" "$T" BOTTER_TUI=0
-check "tool_test: a working tool runs with its example (stdin JSON, no exec bit)" "$T/rec/tool.txt" "good: ok"
-check "tool_test: its real output is shown" "$T/rec/tool.txt" "stdout: echo: hi"
-check "tool_test: a tool that only lacks .env settings needs setup, not a fix" "$T/rec/tool.txt" "bad: NEEDS SETUP"
-check "tool_test: stderr reaches the model" "$T/rec/tool.txt" "Missing KEY in .env"
-check "tool_test: a tool without example is reported" "$T/rec/tool.txt" 'noex: NOT TESTED: add .example.'
-rm "$T/tt/tools/bin/noex" "$T/tt/tools/doc/noex.json"
-tool_call tool_test '{"dir": "tt"}'
-drive "$BOTTER" "$T" BOTTER_TUI=0
-check "tool_test: all ok says so" "$T/rec/tool.txt" "all ok"
-check_not "tool_test: all ok contains no FAILED (Botter loops while it does)" "$T/rec/tool.txt" "FAILED"
 [ -x "$T/proj/proj.bot" ] && pass "botter: the built agent is executable" || fail "botter: the built agent is executable"
 
 # Sealed vault (opt-in): Botter asks for the keys and a password itself; the built agent asks only for the password
-mkdir -p "$T/sealproj" && echo "You are sealed." >"$T/sealproj/agent.md"
+mkdir -p "$T/sealproj" && echo "You are sealed." >"$T/sealproj/AGENT.md"
 echo '{"name": "sealproj", "version": "1.0.0", "description": "Carries its keys.", "mcp": {"docs": {"url": "https://example.invalid/mcp", "token": "DOCS_TOKEN"}}}' >"$T/sealproj/config.json"
 tool_call vault_seal '{}'
 (cd "$T/sealproj" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nn\n6\nhttp://127.0.0.1:%s/v1\nsk-sealed-123\nstub\ndocs-secret-9\n\nshort\ncorrect horse 1\nsomething else 2\ncorrect horse 1\ncorrect horse 1\n' "$PORT" "$PORT" |
@@ -569,7 +569,7 @@ check "vault: served without a terminal, it says how to unlock first" "$T/out" "
 # ---------------------------------------------------------------------------
 section "Functions (Lua), batch mode, images, usage"
 
-mkagent "$T/fn" '{"name": "fn", "version": "1.0.0", "description": "Lua test agent.", "temperature": 0, "seed": 7}'
+mkagent "$T/fn" '{"name": "fn", "version": "1.0.0", "description": "Lua test agent.", "temperature": 0, "seed": 7, "reasoning": "low"}'
 mkdir -p "$T/fn/functions/tests"
 cat >"$T/fn/functions/money.lua" <<'EOF'
 --- Add up amounts.
@@ -647,7 +647,7 @@ drive "$T/fn.bot" "$T/fnws"
 check "functions: the model's call runs the Lua function" "$T/rec/tool.txt" '"total":6.5'
 check "functions: a documented function is offered as a tool" "$T/rec/tools.txt" "total read_file write_totals fail_now"
 check_not "functions: a local helper is not a tool" "$T/rec/tools.txt" "helper"
-check "config.json temperature and seed reach every request" "$T/rec/sampling.txt" "temperature=0 seed=7"
+check "config.json temperature, seed and reasoning reach every request" "$T/rec/sampling.txt" "temperature=0 seed=7 reasoning=low"
 tool_call fail_now '{"why":"no data"}'
 drive "$T/fn.bot" "$T/fnws"
 check "functions: an error comes back with its file and line" "$T/rec/tool.txt" "ERROR: functions/money.lua:[0-9]+: cannot: no data"
@@ -664,7 +664,7 @@ check "functions: bot.fs.write and bot.csv.encode (quoted field)" "$T/fnws/out.c
 
 # bot.http and bot.shell: the network and commands, under the same rules as the model's own tools
 mkdir -p "$T/fnio/functions"
-echo "You are a test agent." >"$T/fnio/agent.md"
+echo "You are a test agent." >"$T/fnio/AGENT.md"
 cat >"$T/fnio/functions/outside.lua" <<'EOF'
 --- Fetch the address in TEST_URL and say what came back.
 function fetch()
@@ -687,7 +687,7 @@ end
 EOF
 build "$T/fnio" "$T/fnio.bot"
 check "functions: what reaches the network, commands and secrets is reported" "$T/build.log" "fetch \(the network, secrets\), fetch_url \(the network\), run \(commands\)"
-mkdir -p "$T/fnio/off" && cp -r "$T/fnio/agent.md" "$T/fnio/functions" "$T/fnio/off/"
+mkdir -p "$T/fnio/off" && cp -r "$T/fnio/AGENT.md" "$T/fnio/functions" "$T/fnio/off/"
 echo '{"internet": false}' >"$T/fnio/off/config.json"
 build "$T/fnio/off" "$T/fnio_off.bot"
 tool_call fetch '{}'
@@ -732,7 +732,7 @@ grep -q "return a + b + 0" "$T/lw/functions/good.lua" && pass "fs_edit: the file
 tool_call fs_edit '{"path": "functions/good.lua", "old_text": "not in the file", "new_text": "x"}'
 drive "$T/on.bot" "$T/lw"
 check "fs_edit: text that is not there says how to fix the call" "$T/rec/tool.txt" "old_text is not in"
-mkdir -p "$T/teach/functions"; echo "x" >"$T/teach/agent.md"
+mkdir -p "$T/teach/functions"; echo "x" >"$T/teach/AGENT.md"
 printf -- '--- Uses io.\nfunction read_it()\n  return io.open("x")\nend\n--- Uses require.\nfunction need()\n  return require("functions.date")\nend\n' >"$T/teach/functions/t.lua"
 build "$T/teach" "$T/teach.bot"
 tool_call read_it '{}'
@@ -746,7 +746,7 @@ build "$T/teach" "$T/teach.bot"
 check "functions: no documented function at all is a build warning" "$T/build.log" "no function has a --- doc comment directly above it"
 
 # code that only looks done is a warning: a placeholder note, or a loop with nothing in it
-mkdir -p "$T/stub/functions"; echo "x" >"$T/stub/agent.md"
+mkdir -p "$T/stub/functions"; echo "x" >"$T/stub/AGENT.md"
 printf -- '--- Forecast.\n---@param n number  days\nfunction forecast(n)\n  -- Simplified logic for demo\n  for i = 1, n do\n    -- add the events here\n  end\n  return 0\nend\n' >"$T/stub/functions/f.lua"
 "$PACK" check "$T/stub" "$CORE" >"$T/build.log" 2>&1
 check "functions: a placeholder note is a warning" "$T/build.log" 'forecast looks unfinished \("simplified"\)'
@@ -771,7 +771,7 @@ check "bot.tool: the tool's answer comes back to the function" "$T/rec/tool.txt"
 rm "$T/fn/functions/viatool.lua"; build "$T/fn" "$T/fn.bot"
 
 # --eval: cases in evals/*.json against the model, graded by expectations or the agent's own Lua check
-mkdir -p "$T/ev/functions" "$T/ev/evals"; echo "x" >"$T/ev/agent.md"
+mkdir -p "$T/ev/functions" "$T/ev/evals"; echo "x" >"$T/ev/AGENT.md"
 cat >"$T/ev/functions/judge.lua" <<'EOF'
 function says_done(run)
   local r = bot.json.decode(run)
@@ -808,7 +808,7 @@ check "--eval: a failing case fails the run" "$T/err" '^exit 1$'
 rm -f "$T/ev/.env"
 
 # on_turn_end: an agent's hook sends the model back to work, until it says the turn may end
-mkdir -p "$T/hook/functions" "$T/hookws"; echo "x" >"$T/hook/agent.md"
+mkdir -p "$T/hook/functions" "$T/hookws"; echo "x" >"$T/hook/AGENT.md"
 cat >"$T/hook/functions/hook.lua" <<'EOF'
 function on_turn_end(reply)
   if bot.fs.exists("nudged.txt") then
@@ -860,6 +860,296 @@ echo "not an image" >"$T/fnws/fake.png"
 tool_call image_view '{"path":"fake.png"}'
 drive "$T/fn.bot" "$T/fnws"
 check "image_view: a file that is not an image is refused" "$T/rec/tool.txt" "is not a PNG, JPEG, GIF or WEBP image"
+
+# ---------------------------------------------------------------------------
+section "Context + memory engine (stub LLM)"
+mkdir -p "$T/memws"
+python3 -c 'import random
+random.seed(1)
+rows=["id,user,kind,amount,day"]+["e%d,u%d,%s,%.2f,2026-0%d-1%d"%(i,i%7,random.choice(["income","expense"]),random.random()*900,1+i%9,i%10) for i in range(2000)]
+open("'"$T/memws/events.csv"'","w").write("\n".join(rows)+"\n")
+open("'"$T/memws/big.txt"'","w").write(("x"*99+"\n")*300)'
+tool_call fs_read '{"path":"events.csv"}'
+drive "$CORE" "$T/memws"
+check "fs_read of a big CSV returns a profile" "$T/rec/tool.txt" "^events.csv: [0-9.]+ KB, 2000 data rows, 5 columns. This is a profile"
+check "profile: column types and ranges" "$T/rec/tool.txt" "amount: number [0-9.]+ \.\. [0-9.]+"
+check "profile: dates" "$T/rec/tool.txt" "day: date 2026-01-10 \.\. 2026-09-1"
+check "profile: a column with few values lists them" "$T/rec/tool.txt" 'kind: text, one of: "(income|expense)", "(income|expense)"'
+check "profile: the first rows" "$T/rec/tool.txt" "^e0,u0,"
+check "profiled files are kept in memory" "$T/rec/tool.txt" "^- events.csv: [0-9.]+ KB, 2000 rows; columns: id, user, kind, amount, day"
+tool_call fs_read '{"path":"events.csv","offset":0}'
+drive "$CORE" "$T/memws"
+check "fs_read with an offset gives the raw text" "$T/rec/tool.txt" "^id,user,kind,amount,day$"
+stub_start --tool fs_read --args '{"path":"big.txt"}' --repeat 12 --then recall --then-args '{"id": 1}'
+drive "$CORE" "$T/memws"
+if [ "$(sort -n "$T/rec/sizes.txt" | tail -1)" -lt 100000 ]; then pass "old tool results are archived (requests stay small)"; else fail "old tool results are archived (requests stay small)" "$(tr '\n' ' ' <"$T/rec/sizes.txt")"; fi
+check "archived results leave a stub naming the call" "$T/rec/request.json" '\[archived #1: fs_read \{\\"path\\":\\"big.txt\\"\}, 29.3 KB; recall\(1\)\]'
+check "recall(id) brings an archived result back" "$T/rec/tool.txt" "^x{99}$"
+check "the memory block says results are archived" "$T/rec/tool.txt" "are archived \([0-9]+ so far\): recall\(id\)"
+stub_start --tool fs_write --args '{"path":"long.txt","content":"'"$(printf 'y%.0s' $(seq 1 10000))"'"}' --repeat 9
+drive "$CORE" "$T/memws"
+check "long tool-call arguments are archived too" "$T/rec/request.json" 'content\\":\\"\[archived #[0-9]+: 9.8 KB; recall\([0-9]+\)\]'
+tool_call note '{"text": "amounts are in INR"}'
+drive "$CORE" "$T/memws"
+check "note: kept" "$T/rec/tool.txt" "^ok: 1 note in memory"
+check "note: shown in the memory block" "$T/rec/tool.txt" "^1\. amounts are in INR$"
+tool_call note '{"forget": 3}'
+drive "$CORE" "$T/memws"
+check "note: forgetting a note that does not exist says so" "$T/rec/tool.txt" "there is no note 3"
+mkdir -p "$T/memws/functions"
+tool_call fs_write '{"path":"functions/add.lua","content":"--- Add.\n---@param a number\n---@param b number\nfunction add(a, b)\n  return a + b\nend\n"}'
+drive "$CORE" "$T/memws"
+check "file ledger: written files with their Lua check" "$T/rec/tool.txt" "^- functions/add.lua: 85 B, 6 lines; Lua ok; tools: add$"
+tool_call fs_list '{}'
+drive "$CORE" "$T/memws"
+check_not "nothing in memory: no memory block" "$T/rec/tool.txt" "Memory, kept for you"
+
+# ---------------------------------------------------------------------------
+section "Skills at run time (stub LLM)"
+mkagent "$T/sk" '{"name": "sk", "version": "1.0.0", "description": "d"}'
+mkdir -p "$T/sk/skills/report/references" "$T/sk/skills/report/scripts" "$T/sk/skills/report/functions" "$T/sk/functions" "$T/skws" "$T/skrt"
+printf -- '---\nname: report\ndescription: Writes reports. Use it for any report.\n---\nRead references/guide.md, then run scripts/hello.sh NAME.\n' >"$T/sk/skills/report/SKILL.md"
+echo "The guide says hi." >"$T/sk/skills/report/references/guide.md"
+printf '#!/bin/sh\necho "hello $1"\n' >"$T/sk/skills/report/scripts/hello.sh"
+printf -- '--- Count the reports.\nfunction report_count()\n  return 3\nend\n' >"$T/sk/skills/report/functions/count.lua"
+cat >"$T/sk/functions/main.lua" <<'EOF'
+--- Run the report script.
+function run_hello()
+  local out = bot.shell("'" .. bot.skill_dir("report") .. "/scripts/hello.sh' world")
+  return out
+end
+
+--- Read the guide through fs_read.
+function read_guide()
+  return bot.tool("fs_read", { path = bot.skill_dir("report") .. "/references/guide.md" })
+end
+
+--- Try to change the guide.
+function write_guide()
+  return bot.tool("fs_write", { path = bot.skill_dir("report") .. "/references/guide.md", content = "x" })
+end
+EOF
+build "$T/sk" "$T/sk.bot"
+check "skills: the agent with a skill builds" "$T/build.log" "wrote .*sk.bot"
+tool_call skill '{"name": "report"}'
+drive "$T/sk.bot" "$T/skws" XDG_RUNTIME_DIR="$T/skrt"
+check "skill tool: loads the skill and says where its files are" "$T/rec/tool.txt" "^Skill report is loaded. Its files are at $T/skrt/botcore-skills-[0-9]+-[A-Za-z0-9]+/report/"
+check "skill tool: lists the skill's files" "$T/rec/tool.txt" "Files: references/guide.md \([0-9]+ bytes\), scripts/hello.sh \([0-9]+ bytes, runnable\)"
+check "skill tool: returns SKILL.md" "$T/rec/tool.txt" "^Read references/guide.md, then run"
+check "skill tool: the skill's functions become tools" "$T/rec/tool.txt" "New tools from this skill: report_count"
+check "skill tool: offered from the next request on" "$T/rec/tools.txt" "report_count"
+if ls "$T/skrt" | grep -q botcore-skills; then fail "skills: the files are removed when the agent exits" "$(ls "$T/skrt")"; else pass "skills: the files are removed when the agent exits"; fi
+tool_call fs_list '{}'
+drive "$T/sk.bot" "$T/skws" XDG_RUNTIME_DIR="$T/skrt"
+check_not "skills: a skill's functions are not tools before it is loaded" "$T/rec/tools.txt" "report_count"
+check "skills: the skill tool is offered" "$T/rec/tools.txt" "skill"
+tool_call report_count '{}'
+drive "$T/sk.bot" "$T/skws" XDG_RUNTIME_DIR="$T/skrt"
+check "skills: calling a skill's function before loading says to load it" "$T/rec/tool.txt" "report_count belongs to the skill report: load it with the skill tool first"
+tool_call run_hello '{}'
+drive "$T/sk.bot" "$T/skws" XDG_RUNTIME_DIR="$T/skrt"
+check "skills: a function runs a skill script at its real path, without a question" "$T/rec/tool.txt" "^hello world"
+check_not "skills: nothing was asked" "$T/out" "Permission needed"
+tool_call read_guide '{}'
+drive "$T/sk.bot" "$T/skws" XDG_RUNTIME_DIR="$T/skrt"
+check "skills: fs_read reads a skill file without a question" "$T/rec/tool.txt" "The guide says hi"
+tool_call write_guide '{}'
+drive "$T/sk.bot" "$T/skws" XDG_RUNTIME_DIR="$T/skrt"
+check "skills: skill files are read-only" "$T/rec/tool.txt" "one of your skill.s files, which are read-only"
+
+# ---------------------------------------------------------------------------
+section "FLOW.lua: orchestration on botcore primitives (stub LLM)"
+mkflow() { # mkflow NAME FLOW_LUA_TEXT: an agent whose FLOW.lua is that text; built into $T/NAME.bot
+    mkagent "$T/$1" "{\"name\": \"$1\", \"version\": \"1.0.0\", \"description\": \"d\"}"
+    printf '%s\n' "$2" >"$T/$1/FLOW.lua"
+    build "$T/$1" "$T/$1.bot"
+}
+flowrun() { # flowrun NAME TASK: one --run task in $T/flws
+    printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/flws/.env"
+    (cd "$T/flws" && timeout 60 "$T/$1.bot" --run "$2" >"$T/out" 2>"$T/err")
+}
+mkdir -p "$T/flws"
+mkflow flw 'function flow(input)
+  bot.say("starting " .. input)
+  local r = bot.worker{task = "do: " .. input, context = "THE-SPEC-123", tools = {"fs_write", "fs_read"}, writes = {"out/"}}
+  return "flow got: " .. r
+end'
+check "FLOW.lua: the build reports the flow" "$T/build.log" "FLOW.lua: flow"
+tool_call fs_write '{"path": "out/a.txt", "content": "made by a worker"}'
+flowrun flw hello
+check "FLOW.lua: flow(input) answers the job" "$T/out" "^flow got: done$"
+check "FLOW.lua: bot.say shows progress (stderr in batch mode)" "$T/err" "^starting hello$"
+check "bot.worker: the task is the worker's message" "$T/rec/user.txt" "^do: hello$"
+check "bot.worker: the worker is told it is one" "$T/rec/system.txt" "You are a worker: you do one task"
+check "bot.worker: the pinned context reaches it" "$T/rec/system.txt" "THE-SPEC-123"
+check "bot.worker: it is told what it may write" "$T/rec/system.txt" "You may write only: out/"
+check "bot.worker: it gets only the tools it was given" "$T/rec/tools.txt" "^fs_read fs_write$"
+check "bot.worker: it writes inside its scope" "$T/flws/out/a.txt" "made by a worker"
+tool_call fs_write '{"path": "elsewhere.txt", "content": "x"}'
+flowrun flw hello
+check "bot.worker: a write outside its scope is refused" "$T/rec/tool.txt" "this task may write only out/; elsewhere.txt is not one of them"
+[ ! -e "$T/flws/elsewhere.txt" ] && pass "bot.worker: nothing was written there" || fail "bot.worker: nothing was written there"
+tool_call shell_exec '{"command": "echo hi"}'
+flowrun flw hello
+check "bot.worker: a tool it was not given is refused" "$T/rec/tool.txt" "shell_exec is not one of this task.s tools"
+mkflow flask 'function flow(input)
+  return "answer: " .. tostring(bot.ask("Which one?"))
+end'
+stub_start --text /dev/null
+flowrun flask go
+check "bot.ask: nobody to ask in batch mode gives nil" "$T/out" "^answer: nil$"
+(cd "$T/flws" && rm -f .env && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nthe-blue-one\n/exit\n' "$PORT" | timeout 60 "$T/flask.bot" >"$T/out" 2>&1)
+check "bot.ask: in a terminal the person is asked" "$T/out" "Which one\\?"
+check "bot.ask: and the answer comes back to the flow" "$T/out" "answer: the-blue-one"
+mkflow flerr 'function flow(input)
+  error("boom in the flow")
+end'
+flowrun flerr go
+check "FLOW.lua: an error in the flow is reported" "$T/err" "boom in the flow"
+mkflow flnone 'function helper() end'
+check "FLOW.lua: one without flow() is a build error" "$T/build.log" "FLOW.lua: error: it defines no global function flow"
+mkflow fldoc '--- Not a tool.
+---@param x string  x
+function flow(x) return x end'
+check "FLOW.lua: documented functions there are a warning (not tools)" "$T/build.log" "FLOW.lua: its functions are not tools"
+# bot.llm: the agent's own model from code (judgement inside a code-driven procedure)
+mkflow fllm 'function flow(input)
+  if input == "plain" then return "said: " .. bot.llm("Say something.") end
+  if input == "image" then return bot.llm{prompt = "What is in it?", images = {"pic.png"}} end
+  local t = bot.llm{prompt = "Read: " .. input, schema = {amount = "number", essential = "boolean"}}
+  return "amount=" .. t.amount .. " essential=" .. tostring(t.essential)
+end'
+printf '[{"text": "Here it is:\\n```json\\n{\\"amount\\": 42, \\"essential\\": true}\\n```"}]' >"$T/llm1.json"
+stub_start --script "$T/llm1.json"
+flowrun fllm "rent 42"
+check "bot.llm: a schema gives a table (JSON found inside a fenced reply)" "$T/out" "^amount=42 essential=true$"
+check "bot.llm: the schema is asked for" "$T/rec/requests.jsonl" 'Reply with only one JSON object \(no other text\) with these fields: \{\\"amount\\":\\"number\\",\\"essential\\":\\"boolean\\"\}'
+check "bot.llm: its calls are counted in the usage" "$T/err" '"calls":1,'
+printf '[{"text": "{\\"amount\\": 7}"}, {"text": "{\\"amount\\": 7, \\"essential\\": false}"}]' >"$T/llm2.json"
+stub_start --script "$T/llm2.json"
+flowrun fllm "rent 7"
+check "bot.llm: a reply without the JSON is asked again, saying what is missing" "$T/rec/requests.jsonl" 'missing: essential'
+check "bot.llm: and the corrected answer comes back" "$T/out" "^amount=7 essential=false$"
+printf '[{"text": "nope"}, {"text": "still nope"}]' >"$T/llm3.json"
+stub_start --script "$T/llm3.json"
+flowrun fllm "rent 9"
+check "bot.llm: no JSON after the retry is an error the flow sees" "$T/err" "bot.llm: the model did not reply with the JSON asked for"
+printf '[{"text": "hello there"}]' >"$T/llm4.json"
+stub_start --script "$T/llm4.json"
+flowrun fllm plain
+check "bot.llm: a plain prompt gives text" "$T/out" "^said: hello there$"
+cp "$T/fnws/pic.png" "$T/flws/pic.png"
+flowrun fllm image
+check "bot.llm: images go with the prompt" "$T/rec/parts.txt" "^text text image_url$"
+# bot.test: the project in the working folder, loaded fresh, its tests run
+mkflow fltest 'function flow(input)
+  local r = bot.test(input ~= "all" and input or nil)
+  return r.passed .. "/" .. r.failed .. "\n" .. r.report
+end'
+mkdir -p "$T/flws/functions/tests"
+printf -- '--- Add.\n---@param a number  a\n---@param b number  b\nfunction add(a, b)\n  return a + b\nend\n' >"$T/flws/functions/add.lua"
+printf 'function test_good()\n  assert(add(1, 2) == 3)\nend\nfunction test_bad()\n  assert(add(1, 2) == 4, "one and two")\nend\nfunction score_sums()\n  return 1, 2, "one differs"\nend\n' >"$T/flws/functions/tests/add.lua"
+flowrun fltest all
+check "bot.test: counts passed and failed tests" "$T/out" '^1/1$'
+flowrun fltest "functions/tests/add.lua"
+check "bot.test: says which test failed and why" "$T/out" "test test_bad FAILED: .*one and two"
+check "bot.test: reports scores" "$T/out" "score sums: 1/2"
+printf 'function add(a, b\n' >"$T/flws/functions/add.lua"
+flowrun fltest "functions/tests/add.lua"
+check "bot.test: a project that does not load fails, with the reason" "$T/out" "functions/add.lua:[0-9]+: error"
+
+# ---------------------------------------------------------------------------
+section "Botter's build pipeline (FLOW.lua, scripted stub LLM)"
+rm -rf "$T/pipe" && mkdir -p "$T/pipe"
+printf 'Write an agent that adds a and b of each row of data.csv.\n' >"$T/pipe/brief.md"
+printf 'a,b\n1,2\n3,4\n' >"$T/pipe/data.csv"
+python3 - "$T/pipe.json" <<'PY'
+import json, sys
+test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
+wrong = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a - b\nend\n'
+right = wrong.replace("a - b", "a + b")
+steps = [
+  {"tool": "start_build", "args": {"request": "build the adder from brief.md"}},
+  {"text": "Starting."},
+  {"tool": "job_goal", "args": {"text": "Add a and b of each row."}},
+  {"tool": "job_input", "args": {"path": "data.csv", "description": "columns a, b"}},
+  {"tool": "job_input", "args": {"path": "nope.csv", "description": "a file that is not there"}},
+  {"tool": "job_output", "args": {"path": "out.csv", "description": "one sum per row"}},
+  {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md"}},
+  {"tool": "job_success", "args": {"text": "every sum is right"}},
+  {"text": "1 rule recorded"},
+  {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
+  {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number",
+                                        "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
+  {"text": "planned"},
+  {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}},
+  {"text": "tests written"},
+  {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": wrong}},
+  {"text": "written"},
+  {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": right}},
+  {"text": "fixed"},
+  {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You add numbers. For each line, call add_row with a and b and reply with the sum.\n"}},
+  {"text": "AGENT.md written"},
+]
+json.dump(steps, open(sys.argv[1], "w"))
+PY
+stub_start --script "$T/pipe.json"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/pipe/.env"
+(cd "$T/pipe" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the agent described in brief.md" >"$T/out" 2>"$T/err")
+check "pipeline: the lead hands the build over" "$T/err" "^Starting\.$"
+check "pipeline: the job is recorded and readable" "$T/pipe/.botter/job.md" "^R1\. sum = a \+ b \(brief.md\)$"
+check "pipeline: a recording tool checks on the spot" "$T/rec/requests.jsonl" "nope.csv does not exist"
+check "pipeline: the design is recorded" "$T/pipe/.botter/design.md" "^- add_row\(a number, b number\) -> number"
+check "pipeline: the analyst gets its role and only its tools" "$T/rec/requests.jsonl" "\"system\": \"You are Botter.s analyst.*\"tools\": \[[^]]*\"job_rule\""
+check "pipeline: the designer works from the pinned job" "$T/rec/requests.jsonl" "You are Botter.s designer.*What you must follow \(the job\):.*R1\. sum = a"
+check "pipeline: tests are written before the code, by another worker" "$T/pipe/functions/tests/add_row.lua" "add_row\(1, 2\) == 3"
+check "pipeline: a failed check sends the task back with the failure" "$T/rec/requests.jsonl" "did not pass the check.*test_add FAILED"
+check "pipeline: the code passes its tests in the end" "$T/pipe/functions/add_row.lua" "return a \+ b"
+check "pipeline: config.json is written by code" "$T/pipe/config.json" '"temperature": ?0'
+check "pipeline: the agent is built" "$T/out" "^Built .*pipe\.bot"
+check "pipeline: the report quotes what was measured" "$T/out" "^Functions passing their tests: 1/1\.$"
+check "pipeline: a log of every step" "$T/pipe/.botter/log.md" "add_row: done \(attempt 2\)"
+[ -x "$T/pipe/pipe.bot" ] && pass "pipeline: the .bot is executable" || fail "pipeline: the .bot is executable"
+printf '[{"tool": "start_build", "args": {"request": "continue", "resume": true}}, {"text": "Continuing."}, {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You add numbers with add_row.\\n"}}, {"text": "done"}]' >"$T/resume.json"
+stub_start --script "$T/resume.json"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/pipe/.env"
+(cd "$T/pipe" && timeout 120 "$ROOT/artifacts/botter.bot" --run "continue the build" >"$T/out" 2>"$T/err")
+check "pipeline: resume continues the build in .botter/" "$T/pipe/.botter/log.md" "^- resumed: continue the build"
+check "pipeline: finished tasks are not redone" "$T/out" "^Functions passing their tests: 1/1\.$"
+check_not "pipeline: the job is not studied again" "$T/rec/requests.jsonl" "You are Botter.s analyst"
+rm -rf "$T/haiku" && mkdir -p "$T/haiku"
+python3 - "$T/haiku.json" <<'PY'
+import json, sys
+skill = "---\nname: haiku\ndescription: Writes a haiku. Use it when the user asks for a poem.\n---\n1. Read references/form.md.\n2. Write three lines in that form.\n"
+steps = [
+  {"tool": "start_build", "args": {"request": "a haiku agent"}}, {"text": "Starting."},
+  {"tool": "job_goal", "args": {"text": "Write haiku on request."}},
+  {"tool": "job_input", "args": {"path": "", "description": "a topic the user types"}},
+  {"tool": "job_output", "args": {"path": "", "description": "a haiku in the reply"}},
+  {"tool": "job_rule", "args": {"text": "three lines of 5, 7 and 5 syllables", "source": "request"}},
+  {"tool": "job_success", "args": {"text": "the form is right"}}, {"text": "1 rule"},
+  {"tool": "design_kind", "args": {"kind": "chat", "why": "talks with a person"}},
+  {"tool": "design_skill", "args": {"name": "haiku", "description": "Writes a haiku. Use it when the user asks for a poem.",
+                                     "files": "references/form.md: the 5-7-5 form", "rules": "R1"}},
+  {"tool": "design_check", "args": {}}, {"text": "planned"},
+  {"tool": "fs_write", "args": {"path": "skills/haiku/SKILL.md", "content": skill}}, {"text": "SKILL.md written"},
+  {"tool": "fs_write", "args": {"path": "skills/haiku/references/form.md", "content": "# Form\nThree lines: 5, 7, 5 syllables.\n"}},
+  {"text": "reference written"},
+  {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You write haiku. Load the haiku skill for every poem.\n"}},
+  {"text": "AGENT.md written"},
+]
+json.dump(steps, open(sys.argv[1], "w"))
+PY
+stub_start --script "$T/haiku.json"
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/haiku/.env"
+(cd "$T/haiku" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build an agent that writes haiku" >"$T/out" 2>"$T/err")
+check "pipeline: a skill is planned with its files" "$T/haiku/.botter/design.md" "^  - references/form.md: the 5-7-5 form$"
+check "pipeline: design_check says the plan is complete" "$T/rec/requests.jsonl" '"last": "complete"'
+check "pipeline: the skill's files are written, each by its own task" "$T/rec/requests.jsonl" "Write skills/haiku/references/form.md \(the 5-7-5 form\)"
+check "pipeline: config.json lists the skill" "$T/haiku/config.json" '"skills": ?\["haiku"\]'
+check "pipeline: the report says how the skill came out" "$T/out" "^Skills: haiku \(done\)\.$"
+"$PACK" list "$T/haiku/haiku.bot" >"$T/list.log" 2>&1
+check "pipeline: the built agent carries the skill" "$T/list.log" "skills/haiku/references/form.md"
 
 # ---------------------------------------------------------------------------
 section "Pack integrity"

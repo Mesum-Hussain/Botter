@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "functions.h"
 #include "botlua.h"
+#include "chat.h"
+#include "skills.h"
 #include "guard.h"
 #include "http.h"
 #include "remote.h"
@@ -92,6 +94,15 @@ static int io_write(void *ud, const char *path, const char *data, size_t len, in
     if (inside_path(path, p, err, el) != 0) {
         return -1;
     }
+    if (!guard_write_ok(p)) {
+        snprintf(err, el, "this task may write only %s", guard_writes_text());
+        return -1;
+    }
+    for (char *s = strchr(p + 1, '/'); s; s = strchr(s + 1, '/')) { /* parent folders, like fs_write */
+        *s = '\0';
+        mkdir(p, 0755);
+        *s = '/';
+    }
     FILE *f = fopen(p, append ? "ab" : "wb");
     if (!f) {
         snprintf(err, el, "%s", strerror(errno));
@@ -166,6 +177,44 @@ static char *(*g_run_tool)(const char *, const char *);
 
 void fn_set_tool_runner(char *(*run)(const char *name, const char *args_json)) { g_run_tool = run; }
 
+static fn_host_t g_host;
+
+void fn_set_host(const fn_host_t *h) { g_host = *h; }
+
+static char *io_worker(void *ud, const char *spec, char *err, size_t el)
+{
+    (void)ud;
+    if (!g_host.worker) {
+        snprintf(err, el, "not available here");
+        return NULL;
+    }
+    return g_host.worker(spec, err, el);
+}
+
+static char *io_llm(void *ud, const char *spec, char *err, size_t el)
+{
+    (void)ud;
+    if (!g_host.llm) {
+        snprintf(err, el, "not available here");
+        return NULL;
+    }
+    return g_host.llm(spec, err, el);
+}
+
+static char *io_ask(void *ud, const char *q)
+{
+    (void)ud;
+    return g_host.ask ? g_host.ask(q) : NULL;
+}
+
+static void io_say(void *ud, const char *t)
+{
+    (void)ud;
+    if (g_host.say) {
+        g_host.say(t);
+    }
+}
+
 static char *io_tool(void *ud, const char *name, const char *args)
 {
     (void)ud;
@@ -212,6 +261,12 @@ static const char *io_secret(void *ud, const char *name)
     return env_get(name);
 }
 
+static const char *io_skill_dir(void *ud, const char *name)
+{
+    (void)ud;
+    return sk_dir(name);
+}
+
 static int io_interrupted(void *ud)
 {
     (void)ud;
@@ -228,19 +283,31 @@ static void diag(void *ud, const char *file, int line, int error, const char *ms
     }
 }
 
+/* functions/<n>.lua or skills/<skill>/functions/<n>.lua (tests/ below them are never embedded). */
+static int fn_file(const char *path)
+{
+    const char *f = !strncmp(path, "functions/", 10) ? path + 10 : NULL;
+    if (!f && !strncmp(path, "skills/", 7)) {
+        const char *s = strchr(path + 7, '/');
+        f = s && !strncmp(s, "/functions/", 11) ? s + 11 : NULL;
+    }
+    return f && *f && !strchr(f, '/');
+}
+
 void fn_init(void)
 {
     size_t n = 0;
     const vfs_entry_t *t = vfs_table(&n);
     for (size_t i = 0; i < n; i++) {
         size_t pl = strlen(t[i].path);
-        if (t[i].kind != VFS_DATA || strncmp(t[i].path, "functions/", 10) != 0 || pl < 15 ||
-            strcmp(t[i].path + pl - 4, ".lua") != 0 || strchr(t[i].path + 10, '/')) {
+        int flow = !strcmp(t[i].path, "FLOW.lua");
+        if (t[i].kind != VFS_DATA || (!flow && (!fn_file(t[i].path) || pl < 5 || strcmp(t[i].path + pl - 4, ".lua") != 0))) {
             continue;
         }
         if (!g_bl) {
-            static const bl_io io = {io_read,        io_write, io_list, io_exists, io_today,
-                                     io_interrupted, io_tool,  io_http, io_secret, NULL};
+            static const bl_io io = {io_read,        io_write, io_list,   io_exists,    io_today,
+                                     io_interrupted, io_tool,  io_http,   io_secret,    io_skill_dir,
+                                     io_worker,      io_ask,   io_say,    io_llm,       NULL};
             g_bl = bl_open(&io);
             if (!g_bl) {
                 fprintf(stderr, ANSI_BOLD_RED "Error:" ANSI_RESET " out of memory starting Lua\n");
@@ -248,13 +315,17 @@ void fn_init(void)
             }
         }
         /* the packer refused anything with errors, so this only fails on a hand-made pack */
-        bl_load(g_bl, t[i].path, t[i].data, t[i].len, 1, diag, NULL);
+        bl_load(g_bl, t[i].path, t[i].data, t[i].len, !flow, diag, NULL); /* FLOW.lua orchestrates: no tools */
     }
 }
 
 int fn_count(void) { return bl_count(g_bl); }
 
 char *fn_turn_end(const char *reply) { return bl_call_hook(g_bl, "on_turn_end", reply); }
+
+int fn_has_flow(void) { return vfs_find("FLOW.lua") && bl_has_global(g_bl, "flow"); }
+
+char *fn_flow(const char *input, char **reply) { return bl_call_flow(g_bl, input, reply); }
 
 char *fn_check(const char *name, const char *run_json)
 {
@@ -264,14 +335,27 @@ char *fn_check(const char *name, const char *run_json)
     return bl_call_hook(g_bl, name, run_json);
 }
 
-void fn_schema_append(cJSON *arr) { bl_schema_append(g_bl, arr); }
+void fn_schema_append(cJSON *arr) { bl_schema_append(g_bl, arr, "functions/"); }
+
+void fn_skill_schema_append(const char *skill, cJSON *arr)
+{
+    char prefix[200];
+    snprintf(prefix, sizeof(prefix), "skills/%s/", skill);
+    bl_schema_append(g_bl, arr, prefix);
+}
 
 int fn_is(const char *name) { return bl_find(g_bl, name) != NULL; }
 
 char *fn_call(const char *name, const char *args_json)
 {
-    if (!fn_is(name)) {
+    const bl_fn *f = bl_find(g_bl, name);
+    if (!f) {
         return NULL;
+    }
+    if (!strncmp(f->file, "skills/", 7) && !chat_has_tool(chat_current(), name)) { /* a skill's function */
+        char *m = NULL;
+        return asprintf(&m, "ERROR: %s belongs to the skill %.*s: load it with the skill tool first", name,
+                        (int)strcspn(f->file + 7, "/"), f->file + 7) < 0 ? NULL : m;
     }
     char *r = bl_call(g_bl, name, args_json);
     size_t n = r ? strlen(r) : 0;

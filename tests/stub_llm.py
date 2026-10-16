@@ -2,6 +2,10 @@
 """Minimal OpenAI-compatible LLM stub for botcore tests (stdlib only).
 
   stub_llm.py --portfile F --record DIR --tool NAME --args JSON   first reply: one tool call, then "done"
+                                          [--repeat N]              N tool calls in a row, then "done"
+                                          [--then NAME --then-args JSON]  then one call of another tool
+  stub_llm.py --portfile F --record DIR --script FILE                one scripted step per request ("done" after);
+                                                                     every request is logged to DIR/requests.jsonl
   stub_llm.py --portfile F --record DIR --text FILE               reply with FILE's content
   stub_llm.py --portfile F --record DIR --slow                    POST hangs 60 s (for Ctrl-C tests)
 
@@ -21,8 +25,13 @@ ap.add_argument("--text")
 ap.add_argument("--slow", action="store_true")
 ap.add_argument("--nostream", action="store_true", help='answer 400 to "stream": true')
 ap.add_argument("--busy", type=int, default=0, help="answer 503 (high demand) to the first N requests")
+ap.add_argument("--repeat", type=int, default=1, help="call --tool this many times in one turn")
+ap.add_argument("--then", help="after the --tool calls, one call of this tool")
+ap.add_argument("--then-args", default="{}")
+ap.add_argument("--script", help="JSON list, one step per request: {\"tool\": name, \"args\": {...}} or {\"text\": ...}")
 ap.add_argument("--think", action="store_true", help="start the text answer with a <think> block")
 a = ap.parse_args()
+script = json.load(open(a.script)) if a.script else None
 os.makedirs(a.record, exist_ok=True)
 
 
@@ -57,6 +66,9 @@ class H(BaseHTTPRequestHandler):
             self.send({"error": {"code": 503, "message": "This model is currently experiencing high demand."}}, 503)
             return
         msgs = req["messages"]
+        with open(os.path.join(a.record, "sizes.txt"), "a") as f:  # request size, for the memory engine tests
+            f.write("%d\n" % sum(len(m.get("content") or "") if isinstance(m.get("content"), str) else 0 for m in msgs))
+        save("request.json", json.dumps(msgs))
         save("auth.txt", self.headers.get("Authorization", ""))
         if msgs and msgs[0]["role"] == "system":
             save("system.txt", msgs[0]["content"])
@@ -80,9 +92,11 @@ class H(BaseHTTPRequestHandler):
         # the tool result being answered: the last message, or the one before image_view's pictures
         after_tool = msgs[-1] if msgs[-1]["role"] == "tool" else \
             msgs[-2] if msgs[-1].get("parts") and len(msgs) > 1 and msgs[-2]["role"] == "tool" else None
+        last_user = max([i for i, m in enumerate(msgs) if m["role"] == "user" and not m.get("parts")] or [0])
+        turn_tools = sum(1 for m in msgs[last_user:] if m["role"] == "tool")
         stream = bool(req.get("stream"))
         save("stream.txt", "stream" if stream else "plain")
-        save("sampling.txt", "temperature=%s seed=%s usage=%s" % (req.get("temperature"), req.get("seed"),
+        save("sampling.txt", "temperature=%s seed=%s reasoning=%s usage=%s" % (req.get("temperature"), req.get("seed"), req.get("reasoning_effort"),
                                                                  (req.get("stream_options") or {}).get("include_usage")))
         parts = [p for m in msgs for p in m.get("parts", [])]
         if parts:
@@ -130,10 +144,25 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
-        if a.text:
+        if script is not None:
+            with open(os.path.join(a.record, "requests.jsonl"), "a") as f:
+                f.write(json.dumps({"system": msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else "",
+                                    "user": users[0]["content"] if users else "", "tools": names.split(),
+                                    "last": msgs[-1].get("content") if msgs else ""}) + "\n")
+            step = script.pop(0) if script else {"text": "done"}
+            if "tool" in step:
+                call = {"id": "s%d" % len(msgs), "type": "function",
+                        "function": {"name": step["tool"], "arguments": json.dumps(step.get("args", {}))}}
+                reply({"content": None, "tool_calls": [call]})
+            else:
+                reply({"content": step.get("text", "done")})
+        elif a.text:
             reply({"content": open(a.text).read()})
-        elif a.tool and not after_tool:
-            call = {"id": "c1", "type": "function", "function": {"name": a.tool, "arguments": a.args}}
+        elif a.tool and (not after_tool or turn_tools < a.repeat):
+            call = {"id": "c%d" % (turn_tools + 1), "type": "function", "function": {"name": a.tool, "arguments": a.args}}
+            reply({"content": None, "tool_calls": [call]})
+        elif a.then and turn_tools == a.repeat:
+            call = {"id": "t1", "type": "function", "function": {"name": a.then, "arguments": a.then_args}}
             reply({"content": None, "tool_calls": [call]})
         else:
             if after_tool:

@@ -8,32 +8,32 @@ description: End-to-end workflow for creating a new agent from the user's idea t
 Follow these steps in order, on your own, without stopping for approval.
 
 1. Understand the idea from the request and every brief and data file in the folder. Decide what is unclear with sensible defaults and list those decisions in your final report; do not stop to ask unless you cannot start at all.
-   - network: agents are ONLINE by default. Only if the user explicitly wants an offline agent, set "internet": false in config.json (see write-tool, section Network).
+   - network: agents are ONLINE by default. Only if the user explicitly wants an offline agent, set "internet": false in config.json (see write-scripts, section Network).
    - existing code (a repo or scripts the user has): read skills/wrap-existing-project/SKILL.md.
 
-2. Check the working directory with fs_list. If agent.md or skills already exist, this is an existing project: read what is there and change it, do not start over. Never overwrite existing files without telling the user.
+2. Check the working directory with fs_list. If AGENT.md or skills already exist, this is an existing project: read what is there and change it, do not start over. Never overwrite existing files without telling the user.
 
-3. Write agent.md (read skills/write-agent-md-and-skills/SKILL.md first).
+3. Write AGENT.md (read skills/write-agent-md-and-skills/SKILL.md first).
 
 4. Write one SKILL.md per recurring task the agent should do well (same skill file explains how). Skip skills for trivial agents.
-   Only when a job needs its own persona and a fresh conversation (a researcher, a critic, a writer whose work the main agent then uses), add a sub-agent in agents/<name>/agent.md (see project-layout). Most agents need none.
+   Only when a job needs its own persona and a fresh conversation (a researcher, a critic, a writer whose work the main agent then uses), add a sub-agent in agents/<name>/AGENT.md (see project-layout). Most agents need none.
 
-5. Exact work the model is bad at (calculations, dates, joining or checking data, reading and writing CSV/JSON, fixed HTTP calls) goes in Lua functions with tests: read skills/write-functions/SKILL.md. Only when Lua cannot do it, add a tool (skills/write-tool/SKILL.md): a shell script when it needs a program on the machine, Python or Node only for a library with no other way. The agent's own LLM does the thinking (analysing, writing, deciding, replying); functions and tools only do exact work and I/O. Do not write one that calls an LLM or does the whole job in code: the steps of the job go in agent.md or a skill, and the model runs them, calling functions where they must be exact.
+5. Exact work the model is bad at (calculations, dates, joining or checking data, reading and writing CSV/JSON, fixed HTTP calls) goes in Lua functions with tests: read skills/write-functions/SKILL.md. Only when Lua cannot do it, add a tool (skills/write-scripts/SKILL.md): a shell script when it needs a program on the machine, Python or Node only for a library with no other way. The agent's own LLM does the thinking (analysing, writing, deciding, replying); functions and tools only do exact work and I/O. Do not write one that calls an LLM or does the whole job in code: the steps of the job go in AGENT.md or a skill, and the model runs them, calling functions where they must be exact.
 
-6. If the agent has more than one step, write them in agent.md (a short "How a session goes" list) or in a skill, naming the functions and tools exactly.
+6. If the agent has more than one step, write them in AGENT.md (a short "How a session goes" list) or in a skill, naming the functions and tools exactly.
 
 7. Build: read skills/build-agent/SKILL.md. Run agent_build with dry_run=true, fix all errors, then agent_build, then agent_inspect.
 
-8. Tell the user: the file name, its size, how to run it (./<name>.bot), what it asks at startup (provider, API key, model; only an OFFLINE agent with a "network" tool also asks to allow internet, an online agent never does), what tools it contains, and what must be installed or running on the machine (interpreters, services). Mention any warnings from the build in plain words.
+8. Tell the user: the file name, its size, how to run it (./<name>.bot), what it asks at startup (provider, API key, model), what tools it contains, and what must be installed or running on the machine (interpreters, services). Mention any warnings from the build in plain words.
 
 ## Quality bar
-- agent.md describes ONE clear role. A paragraph or two plus a few firm rules is better than a long essay.
+- AGENT.md describes ONE clear role. A paragraph or two plus a few firm rules is better than a long essay.
 - Every skill has a precise description line, because the agent decides what to read from it.
 - Do not invent tools that you did not create. Do not mention capabilities the agent does not have (memory between runs; internet in an offline agent).
 - No mocks, placeholders or hard-coded responses anywhere. If a real integration needs something you do not have (an API key, a running service), make the tool fail with a clear message saying what is missing.
 - Always write config.json: name, display_name, version "0.1.0", a one-sentence description, the skills and tools to compile in, and the programs they need in "requires" (see project-layout, section config.json).
-- Offline agent (only when asked): "internet": false in config.json; agent.md says it works offline. If a tool there has "network": true, agent.md names it and says the user is asked to allow it at startup.
-- Test every tool with tool_test before building (see write-tool), and give every function tests in functions/tests (see write-functions): the build runs them.
+- Offline agent (only when asked): "internet": false in config.json; AGENT.md says it works offline (no network for its shell, scripts or bot.http).
+- Run every skill script by hand before building (see write-scripts), and give every function tests in functions/tests (see write-functions): the build runs them.
 
 ## Iterating
 After the first build, the user usually wants changes. Read each file before changing it and edit it in place: change only what the request needs and never drop an action, parameter, step or rule that still belongs (rewriting a tool from memory loses working features). Edit the files, bump "version" in config.json (PATCH for fixes, MINOR for new abilities, MAJOR for changed behaviour), then dry_run and build again. The new build overwrites the old .bot of the same name.

@@ -2,6 +2,8 @@
 #include "botlua.h"
 #include "chat.h"
 #include "guard.h"
+#include "memory.h"
+#include "skills.h"
 #include "tools.h"
 
 #include <dirent.h>
@@ -25,6 +27,13 @@ static int access_path(const char *tool, const char *path, const char *verb, cha
     if (guard_resolve(path, out, &inside) != 0) {
         snprintf(result, rl, "invalid path '%.200s'", path);
         return -1;
+    }
+    if (!inside && sk_inside(out)) { /* the agent's own skill files: readable, never changed */
+        if (strcmp(verb, "read") != 0 && strcmp(verb, "list") != 0) {
+            snprintf(result, rl, "%s is one of your skill's files, which are read-only: write in the working directory", out);
+            return -1;
+        }
+        return 0;
     }
     if (!inside && !guard_confirm("%s wants to %s a path OUTSIDE the working dir (%s):\n  %s", tool, verb,
                                   guard_ctx(), out)) {
@@ -132,6 +141,10 @@ static bool fs_read(const cJSON *in, char *result, size_t rl)
         snprintf(result, rl, "'%s' is not a regular file", path);
         return false;
     }
+    if (!oj && mem_profile(res, path, (long long)st.st_size, result, rl)) { /* a big data file: its profile */
+        close(fd);
+        return true;
+    }
     size_t cap = rl > 300 ? rl - 300 : rl / 2; /* leave room for the trailer note */
     ssize_t got = pread(fd, result, cap, (off_t)off);
     close(fd);
@@ -234,7 +247,7 @@ static void lua_diag(void *ud, const char *file, int line, int error, const char
 
 /* After a write to functions/<name>.lua: check it as the build will, so a mistake shows at once
  * (like an editor's diagnostics). The note goes after the write's own result. */
-static void lua_check(const char *res, const char *content, size_t n, char *result, size_t rl)
+static void lua_check(const char *res, const char *content, size_t n, char *result, size_t rl, char *sum, size_t sl)
 {
     const char *f = strstr(res, "/functions/");
     size_t pl = strlen(res);
@@ -251,6 +264,7 @@ static void lua_check(const char *res, const char *content, size_t n, char *resu
     if (test) {
         if (bl_check_syntax(file, content, n, lua_diag, &diags) == 0) {
             snprintf(note, sizeof(note), "\nLua check of %s: the syntax is fine (the build runs its test_ functions).", file);
+            snprintf(sum, sl, "test file, syntax ok");
         }
     } else {
         bl_state *s = bl_open(NULL); /* no files and no network while checking: only the code itself */
@@ -265,12 +279,14 @@ static void lua_check(const char *res, const char *content, size_t n, char *resu
                               : "\nLua check of %s: ok, but no function here has a --- doc comment directly above it, so "
                                 "the model cannot call any of them%s (fine for helpers that another file's tools use).",
                      file, names);
+            snprintf(sum, sl, names[0] ? "Lua ok; tools: %.200s" : "Lua ok; helpers only (no tools)", names);
         }
         bl_close(s);
     }
     size_t used = strlen(result);
     if (diags.len) {
         snprintf(result + used, rl - used, "\nLua check of %s found problems; fix them before building:\n%s", file, diags.p);
+        snprintf(sum, sl, "Lua check FAILED (see the last write's result)");
     } else {
         snprintf(result + used, rl - used, "%s", note);
     }
@@ -282,6 +298,10 @@ static void lua_check(const char *res, const char *content, size_t n, char *resu
 static bool write_file(const char *tool, const char *path, const char *res, const char *content, int append, int ask,
                        char *result, size_t rl)
 {
+    if (!guard_write_ok(res)) {
+        snprintf(result, rl, "this task may write only %s; %s is not one of them", guard_writes_text(), path);
+        return false;
+    }
     struct stat st;
     int exists = stat(res, &st) == 0;
     if (exists && !S_ISREG(st.st_mode)) {
@@ -344,9 +364,11 @@ static bool fs_write(const cJSON *in, char *result, size_t rl)
         !write_file("fs_write", path, res, content, append, 1, result, rl)) {
         return false;
     }
+    char sum[240] = "";
     if (!append) {
-        lua_check(res, content, strlen(content), result, rl);
+        lua_check(res, content, strlen(content), result, rl, sum, sizeof(sum));
     }
+    mem_file_written(res, sum[0] ? sum : NULL);
     return true;
 }
 
@@ -416,8 +438,10 @@ static bool fs_edit(const cJSON *in, char *result, size_t rl)
     free(text);
     bool ok = write_file("fs_edit", path, res, out, 0, 0, result, rl); /* a quoted, exact change: no question */
     if (ok) {
+        char sum[240] = "";
         snprintf(result, rl, "replaced %zu place%s in %s", count, count == 1 ? "" : "s", res);
-        lua_check(res, out, strlen(out), result, rl);
+        lua_check(res, out, strlen(out), result, rl, sum, sizeof(sum));
+        mem_file_written(res, sum[0] ? sum : NULL);
     }
     free(out);
     return ok;
@@ -425,17 +449,13 @@ static bool fs_edit(const cJSON *in, char *result, size_t rl)
 
 #define IMAGE_MAX (20u * 1024 * 1024)
 
-/* Show a picture to the model: the bytes go into the conversation for this turn (chat_attach_image). */
-static bool image_view(const cJSON *in, char *result, size_t rl)
+/* An image file, read whole: its bytes (malloc'd) and type. 0 ok, -1 with result = why. */
+int fs_load_image(const char *path, unsigned char **data, size_t *len, const char **mime, char *result, size_t rl)
 {
-    const char *path = str_arg(in, "path");
     char res[PATH_MAX];
-    if (!path) {
-        snprintf(result, rl, "'path' (string) is required");
-        return false;
-    }
+    *data = NULL;
     if (access_path("image_view", path, "read", res, result, rl) != 0) {
-        return false;
+        return -1;
     }
     FILE *f = fopen(res, "rb");
     struct stat st;
@@ -444,24 +464,42 @@ static bool image_view(const cJSON *in, char *result, size_t rl)
         if (f) {
             fclose(f);
         }
-        return false;
+        return -1;
     }
     if ((size_t)st.st_size > IMAGE_MAX) {
         fclose(f);
         snprintf(result, rl, "'%s' is larger than %u MB", path, IMAGE_MAX >> 20);
-        return false;
+        return -1;
     }
     unsigned char *d = malloc((size_t)st.st_size + 1);
     size_t n = d ? fread(d, 1, (size_t)st.st_size, f) : 0;
     fclose(f);
-    const char *mime = n >= 8 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8)                ? "image/png"
-                       : n >= 3 && !memcmp(d, "\xff\xd8\xff", 3)                      ? "image/jpeg"
-                       : n >= 6 && (!memcmp(d, "GIF87a", 6) || !memcmp(d, "GIF89a", 6)) ? "image/gif"
-                       : n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)  ? "image/webp"
-                                                                                       : NULL;
-    if (!mime) {
+    *mime = n >= 8 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8)                ? "image/png"
+            : n >= 3 && !memcmp(d, "\xff\xd8\xff", 3)                      ? "image/jpeg"
+            : n >= 6 && (!memcmp(d, "GIF87a", 6) || !memcmp(d, "GIF89a", 6)) ? "image/gif"
+            : n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)  ? "image/webp"
+                                                                            : NULL;
+    if (!*mime) {
         free(d);
         snprintf(result, rl, "'%s' is not a PNG, JPEG, GIF or WEBP image", path);
+        return -1;
+    }
+    *data = d;
+    *len = n;
+    return 0;
+}
+
+/* Show a picture to the model: the bytes go into the conversation for this turn (chat_attach_image). */
+static bool image_view(const cJSON *in, char *result, size_t rl)
+{
+    const char *path = str_arg(in, "path"), *mime = NULL;
+    unsigned char *d = NULL;
+    size_t n = 0;
+    if (!path) {
+        snprintf(result, rl, "'path' (string) is required");
+        return false;
+    }
+    if (fs_load_image(path, &d, &n, &mime, result, rl) != 0) {
         return false;
     }
     int ok = chat_attach_image(path, mime, d, n) == 0;
@@ -482,7 +520,8 @@ const tool_t TOOLS_FS[] = {
      fs_list},
     {"fs_read",
      "Read a text file. Output is capped (~32KB); for larger files use 'offset' to continue where the "
-     "previous call stopped. Binary files are not shown.",
+     "previous call stopped. A .csv/.tsv file over 16 KB returns a profile instead (rows, columns with types "
+     "and ranges, first rows); give offset (0 = start) for its raw text. Binary files are not shown.",
      "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
      "\"offset\":{\"type\":\"integer\",\"description\":\"Byte offset to start from, default 0\"}},"
      "\"required\":[\"path\"]}",

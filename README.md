@@ -32,10 +32,10 @@ You don't write a `.bot` by hand. You write an agent as a folder of plain text:
 
 ```
 lead-outreach/
-  agent.md       who it is and how it works
-  skills/        playbooks for its tasks
+  AGENT.md       who it is and how it works
   functions/     the exact part, in Lua: sums, dates, data files, checks
-  tools/         programs it runs, when Lua is not enough
+  skills/        what it can do on demand: playbooks, with the references,
+                 scripts and templates they need
 ```
 
 and Botter turns the folder into the file. Botter is the Markdown-first agent framework that writes `.bot` files: you describe an agent in Markdown and plain English, and it packs that into a single statically linked executable with the whole runtime inside.
@@ -48,7 +48,7 @@ Markdown is where you start, not where the agent's power stops. The same single 
 |---|---|
 | Exact work that comes out the same every time | **Functions** in Lua: documented in plain English, tested at build time, run inside the agent |
 | A team, not one agent | **Sub-agents**, each with its own persona, handed work by the main agent or by a function |
-| Real capabilities | **Tools** in any language, plus file, shell, image and scheduling tools built in |
+| Real capabilities | **Skills** that bring their own scripts in any language, plus file, shell, image, memory and scheduling tools built in |
 | One job over thousands of records | **Batch mode**: one task per line, a fresh conversation for each, JSON lines out, tokens counted |
 | Other people's tools | **MCP** servers, unmodified: by URL, or started by command the way Claude Code and opencode run them |
 | Other people's agents | **A2A**, both calling out and being called |
@@ -79,9 +79,9 @@ Every compiler you've ever used has the same personality. You hand it code, and 
 
 Botter talks back.
 
-Run it in an empty folder and tell it what you want: *"an agent that finds local businesses without a website and pitches them my web design service."* It asks the two or three questions that matter. It proposes a plan. Then it writes the persona and the playbooks, writes the exact parts as Lua functions with their tests, writes any tools and tests them, checks its work against what you asked for, and builds the binary. If you want to grab the wheel at any point, every file is plain text sitting right there in your folder.
+Run it in an empty folder and tell it what you want: *"an agent that finds local businesses without a website and pitches them my web design service."* It asks the two or three questions that matter. It proposes a plan. Then it writes the persona and the playbooks, writes the exact parts as Lua functions with their tests, writes any scripts and runs them, checks its work against what you asked for, and builds the binary. If you want to grab the wheel at any point, every file is plain text sitting right there in your folder.
 
-How does a compiler do all that? **Botter is itself an agent.** Its persona and its skills are plain-text files in this repo (`agent.md`, `skills/`), compiled by Botter and running on the same runtime as every agent it builds.
+How does a compiler do all that? **Botter is itself an agent.** Its persona and its skills are plain-text files in this repo (`AGENT.md`, `skills/`), compiled by Botter and running on the same runtime as every agent it builds.
 
 We use Botter to build Botter.
 
@@ -104,20 +104,19 @@ Bring your own model: **Gemini, OpenAI, OpenRouter, Groq, Ollama** for local mod
 
 | File | What it is |
 |---|---|
-| `agent.md` | Persona, rules and how a session goes: who the agent is, what it does, what it must never do |
-| `functions/<name>.lua` | Exact work in **Lua**, each documented function a tool; `functions/tests/` runs at build time |
-| `skills/<name>/SKILL.md` | Playbooks for specific tasks |
-| `agents/<name>/agent.md` | Sub-agents: a persona of their own for one kind of job |
-| `tools/` | Executables plus a JSON description of each |
+| `AGENT.md` | Persona, rules and how a session goes: who the agent is, what it does, what it must never do |
+| `functions/<name>.lua` | Exact work in **Lua**, always loaded, each documented function a tool; `functions/tests/` runs at build time |
+| `skills/<name>/` | A capability loaded on demand: `SKILL.md` (the playbook), and whatever it needs: `references/`, `scripts/`, `assets/`, and Lua `functions/` that become tools while the skill is loaded |
+| `agents/<name>/AGENT.md` | Sub-agents: a persona of their own for one kind of job |
 | `config.json` | Name, version, internet on/off, what gets compiled in, MCP servers and remote agents |
 
-**Skills** follow the `SKILL.md` convention. The agent sees a one-line summary of each and opens the full playbook only when the task calls for it, so it can carry dozens without stuffing its context window.
+**Skills** follow the Agent Skills convention, and standard skills run unmodified. The agent sees a one-line summary of each and loads the full playbook only when the task calls for it, so it can carry dozens without stuffing its context window. A loaded skill's files appear at a real, read-only path, so its scripts run and its references can be read exactly as their author wrote them. The build checks every skill: links that resolve, references something points to, no unfinished text.
 
 **Sub-agents** live in the same file as the agent. Each gets its own persona and a fresh conversation, does one job with the agent's tools, and hands back only its result. The agent delegates on its own, and a function can hand one a task with `bot.agent("researcher", task)`. No second process, no second binary.
 
-**What it needs.** If an agent relies on programs being installed, say `sqlite3` for a database or `python3` for a tool, they are listed under `requires` in `config.json`. The build warns when a tool needs something that isn't listed, and when the agent starts it checks the machine: the user is told what is missing, and so is the model, so it says "install sqlite3 first" instead of failing one command at a time.
+**What it needs.** If an agent relies on programs being installed, say `sqlite3` for a database or `python3` for a script, they are listed under `requires` in `config.json`. The build warns when a script needs something that isn't listed, and when the agent starts it checks the machine: the user is told what is missing, and so is the model, so it says "install sqlite3 first" instead of failing one command at a time.
 
-**Tools** are any executable at all: bash, Python, Go, Rust, C. A tool gets one JSON object on stdin and prints its answer. That's the whole protocol. A tool brings its own needs with it, so a Python tool needs Python on the box and a static binary needs nothing. Users never see tool names or JSON. They see *"Searching for leads…"*.
+**Scripts** are any executable at all: bash, Python, Go, Rust, C, kept in the `scripts/` folder of the skill that uses them. The model runs one as the skill says, or a documented Lua function wraps it so the model calls it like any other tool. A script brings its own needs with it, so a Python script needs Python on the box and a static binary needs nothing.
 
 Botter picks in this order: a **Lua function** first (it needs nothing on the machine), a **shell script** when the job needs a program such as `sqlite3` or `ffmpeg`, and **Python or Node** only for a library there is no other way to get.
 
@@ -154,7 +153,7 @@ With `--acp`, `--a2a` and `--mcp` there is nobody at a keyboard, so the agent ne
 
 A model is good at reading a messy email and bad at adding up thirty numbers. Ask it for both and you get a confident answer that is off by a few hundred.
 
-So a Botter agent splits the work. The **model** runs the conversation, from `agent.md` and the skills: it reads, decides, writes and talks. **Functions** do the exact part, in plain Lua, the same way every time:
+So a Botter agent splits the work. The **model** runs the conversation, from `AGENT.md` and the skills: it reads, decides, writes and talks. **Functions** do the exact part, in plain Lua, the same way every time:
 
 ```lua
 --- What the balance will be on each of the next days, from today's
@@ -208,7 +207,7 @@ lead-outreach.bot
 ┌───────────────┐
 │ botcore       │  the runtime: a static x86-64 Linux executable, the same in every agent
 ├───────────────┤
-│ your agent    │  agent.md, skills, functions, sub-agents, tools, config.json, read-only
+│ your agent    │  AGENT.md, functions, skills, sub-agents, config.json, read-only
 ├───────────────┤
 │ footer        │  32 bytes: where the agent's files begin, how long they are, their checksum
 └───────────────┘
@@ -278,12 +277,12 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 246 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
+make test                     # 282 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```
 
-`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` holds Botter's build tools, and `tui/` is Botter's full-screen UI. `agent.md`, `config.json` and `skills/` in the repo root are Botter itself.
+`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` is Botter's build program (it lands in `skills/build-agent/scripts/`), and `tui/` is Botter's full-screen UI. `AGENT.md`, `config.json`, `functions/` and `skills/` in the repo root are Botter itself.
 
 ## License
 

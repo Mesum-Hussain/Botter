@@ -1,8 +1,9 @@
-# Build the botter agent (this project is itself an agent project: agent.md, config.json, skills/, tools/).
+# Build the botter agent (this project is itself an agent project: AGENT.md, config.json, functions/, skills/;
+# the C sources of the runtime, packer and TUI live in tools/src and tui/, never embedded).
 #
 #   make            -> ./botter     (static x86-64 executable: the TUI front end with the agent
 #                                    artifacts/botter.bot = botcore + embedded pack, appended)
-#   make tools      -> tools/bin/*  (static musl executables from tools/src/agent_tools)
+#   make tools      -> skills/build-agent/scripts/agent_tools (static musl; the packer, run by Botter's agent_build)
 #   make artifacts  -> artifacts/botcore (static runtime) + artifacts/packer (packer)
 #   make tui        -> tui/botter-tui (botter-only full-screen UI; agents built by botter never get it)
 #   make test       -> tests/run.sh (stub LLM, sandbox, functions, batch mode, HTTP client; BOTTER_TEST_NET=1 adds internet tests)
@@ -18,21 +19,20 @@ STRIP_NOTES ?= -R .comment -R .note.gnu.property -R .annobin.notes -R .gnu.build
 
 BOTCORE_DIR = tools/src/botcore
 PACK_DIR    = tools/src/packer
-TOOL_NAMES  = agent_build agent_inspect tool_test
-TOOL_BINS   = $(addprefix tools/bin/,$(TOOL_NAMES))
+BUILD_PROG  = skills/build-agent/scripts/agent_tools
 CJSON       = $(BOTCORE_DIR)/lib/cjson
 LUA         = $(BOTCORE_DIR)/lib/lua
 LUA_SRCS    = $(wildcard $(LUA)/*.c)
 BOTLUA      = $(BOTCORE_DIR)/src/botlua.c $(BOTCORE_DIR)/src/botlua.h
 
-AGENT_FILES = $(shell find agent.md config.json skills functions tools/doc -type f 2>/dev/null)
+AGENT_FILES = $(shell find AGENT.md config.json skills functions -type f ! -path '$(BUILD_PROG)' 2>/dev/null)
 
 # The TUI runs the agent from a memfd, so the agent's own executable (which agent_build
 # uses as the runtime for new agents) is plain botcore + pack, without the TUI.
 botter: tui/botter-tui artifacts/botter.bot
 	tui/botter-tui --bundle artifacts/botter.bot $@
 
-artifacts/botter.bot: artifacts/botcore artifacts/packer $(TOOL_BINS) $(AGENT_FILES)
+artifacts/botter.bot: artifacts/botcore artifacts/packer $(BUILD_PROG) $(AGENT_FILES)
 	artifacts/packer build . artifacts/botcore $@
 
 tui: tui/botter-tui
@@ -40,7 +40,7 @@ tui: tui/botter-tui
 tui/botter-tui: $(wildcard tui/*.c tui/*.h) $(CJSON)/cJSON.c
 	$(MAKE) -C tui
 
-tools: $(TOOL_BINS)
+tools: $(BUILD_PROG)
 
 artifacts: artifacts/botcore artifacts/packer
 
@@ -61,9 +61,8 @@ $(AGENT_TOOLS): tools/src/agent_tools/agent_tools.c $(PACK_DIR)/packer.c $(BOTLU
 		-Wl,--gc-sections -o $@ tools/src/agent_tools/agent_tools.c $(CJSON)/cJSON.c $(LUA_SRCS) -lm
 	strip $(STRIP_NOTES) $@
 
-# One executable, three tool names (the tool runner starts it under its tool name).
-$(TOOL_BINS): $(AGENT_TOOLS)
-	@mkdir -p tools/bin
+$(BUILD_PROG): $(AGENT_TOOLS)
+	@mkdir -p $(dir $@)
 	cp $< $@
 
 test: botter
@@ -82,7 +81,7 @@ dist: botter
 	@echo "dist: $(DIST).tar.gz"
 
 clean:
-	rm -rf artifacts botter tools/bin $(AGENT_TOOLS) dist
+	rm -rf artifacts botter $(BUILD_PROG) $(AGENT_TOOLS) dist
 	$(MAKE) -C tui clean
 	$(MAKE) -C $(BOTCORE_DIR) clean
 

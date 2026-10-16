@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "chat.h"
 #include "http.h"
+#include "memory.h"
 #include "term.h"
 
 #include <stdio.h>
@@ -15,6 +16,7 @@
 static double       g_temp = -1; /* config.json "temperature"; < 0 = the provider's default */
 static int          g_has_seed;
 static long long    g_seed;
+static char         g_reasoning[16]; /* config.json "reasoning"; "" = the provider's default */
 static chat_t      *g_running;   /* the conversation whose tool calls are running (innermost) */
 static chat_usage_t g_use[8];
 static int          g_nuse;
@@ -26,8 +28,16 @@ void chat_set_sampling(double temperature, int has_seed, long long seed)
     g_seed = seed;
 }
 
+void chat_set_reasoning(const char *effort)
+{
+    snprintf(g_reasoning, sizeof(g_reasoning), "%s", effort ? effort : "");
+}
+
 static void add_sampling(cJSON *root)
 {
+    if (g_reasoning[0]) {
+        cJSON_AddStringToObject(root, "reasoning_effort", g_reasoning);
+    }
     if (g_temp >= 0) {
         cJSON_AddNumberToObject(root, "temperature", g_temp);
     }
@@ -62,6 +72,24 @@ static void count_usage(const char *model, const cJSON *u)
     }
 }
 
+chat_t *chat_current(void)
+{
+    return g_running;
+}
+
+int chat_has_tool(const chat_t *c, const char *name)
+{
+    const cJSON *t;
+    cJSON_ArrayForEach(t, (c ? c->tools : NULL))
+    {
+        const char *n = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(t, "function"), "name"));
+        if (n && !strcmp(n, name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int chat_usage(const chat_usage_t **u)
 {
     *u = g_use;
@@ -88,17 +116,19 @@ static char *base64(const unsigned char *d, size_t n)
 
 int chat_attach_image(const char *label, const char *mime, const unsigned char *data, size_t len)
 {
-    if (!g_running) {
-        return -1;
-    }
+    return g_running ? chat_add_image(g_running, label, mime, data, len) : -1;
+}
+
+int chat_add_image(chat_t *c, const char *label, const char *mime, const unsigned char *data, size_t len)
+{
     char *b = base64(data, len), *url = NULL, note[300];
     if (!b || asprintf(&url, "data:%s;base64,%s", mime, b) < 0) {
         free(b);
         return -1;
     }
     free(b);
-    if (!g_running->images) {
-        g_running->images = cJSON_CreateArray();
+    if (!c->images) {
+        c->images = cJSON_CreateArray();
     }
     cJSON *t = cJSON_CreateObject(), *im = cJSON_CreateObject();
     snprintf(note, sizeof(note), "Image %.200s:", label);
@@ -106,8 +136,8 @@ int chat_attach_image(const char *label, const char *mime, const unsigned char *
     cJSON_AddStringToObject(t, "text", note);
     cJSON_AddStringToObject(im, "type", "image_url");
     cJSON_AddStringToObject(cJSON_AddObjectToObject(im, "image_url"), "url", url);
-    cJSON_AddItemToArray(g_running->images, t);
-    cJSON_AddItemToArray(g_running->images, im);
+    cJSON_AddItemToArray(c->images, t);
+    cJSON_AddItemToArray(c->images, im);
     free(url);
     return 0;
 }
@@ -169,6 +199,8 @@ void chat_free(chat_t *c)
     cJSON_Delete(c->hist);
     cJSON_Delete(c->tools);
     cJSON_Delete(c->images);
+    cJSON_Delete(c->notes);
+    cJSON_Delete(c->archive);
     memset(c, 0, sizeof(*c));
 }
 
@@ -364,49 +396,56 @@ int chat_set_system(chat_t *c, const char *text)
     return 0;
 }
 
-static size_t hist_bytes(const chat_t *c)
-{
-    size_t n = 0;
-    const cJSON *m;
-    cJSON_ArrayForEach(m, c->hist)
-    {
-        const cJSON *t = cJSON_GetObjectItemCaseSensitive(m, "content");
-        if (cJSON_IsString(t)) {
-            n += strlen(t->valuestring);
-        }
-    }
-    return n;
-}
-
 static int msg_is_user(const cJSON *m)
 {
     const cJSON *r = cJSON_GetObjectItemCaseSensitive(m, "role");
     return cJSON_IsString(r) && strcmp(r->valuestring, "user") == 0;
 }
 
-/* Drop oldest whole turns (user .. final answer, incl. tool traffic) until `extra` more bytes fit. */
+static const char TRIM_NOTE[] = "[Earlier conversation was removed here to make room.]";
+
+static int is_trim_note(const cJSON *m)
+{
+    const cJSON *t = cJSON_GetObjectItemCaseSensitive(m, "content");
+    return cJSON_IsString(t) && !strcmp(t->valuestring, TRIM_NOTE);
+}
+
+/*
+ * Drop oldest whole turns (user .. final answer, incl. tool traffic) until `extra` more bytes fit.
+ * The first user message is the task: it stays pinned, followed by a note that something was removed.
+ */
 static void trim_history(chat_t *c, size_t extra)
 {
-    int first = has_system(c) ? 1 : 0;
-    size_t bytes = hist_bytes(c);
+    int keep = has_system(c) ? 1 : 0, pin = -1, removed = 0;
+    size_t bytes = mem_hist_bytes(c->hist);
 
+    if (msg_is_user(cJSON_GetArrayItem(c->hist, keep))) {
+        pin = keep++;
+    }
+    if (pin >= 0 && is_trim_note(cJSON_GetArrayItem(c->hist, keep))) {
+        keep++;
+    }
     while (bytes + extra > CHAT_HIST_MAX_BYTES) {
         int n = cJSON_GetArraySize(c->hist);
-        int next = first + 1; /* start of the 2nd turn */
+        int next = keep + 1; /* drop from `keep` up to the next turn's user message */
         while (next < n && !msg_is_user(cJSON_GetArrayItem(c->hist, next))) {
             next++;
         }
         if (next >= n) {
-            break; /* only one turn left: keep it */
+            break; /* only the latest turn left: keep it */
         }
-        for (int i = first; i < next; i++) {
-            const cJSON *t = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(c->hist, first), "content");
-            if (cJSON_IsString(t)) {
-                bytes -= strlen(t->valuestring);
-            }
-            cJSON_DeleteItemFromArray(c->hist, first);
+        for (int i = keep; i < next; i++) {
+            bytes -= mem_msg_bytes(cJSON_GetArrayItem(c->hist, keep));
+            cJSON_DeleteItemFromArray(c->hist, keep);
             c->dropped++;
+            removed = 1;
         }
+    }
+    if (removed && pin >= 0 && !is_trim_note(cJSON_GetArrayItem(c->hist, pin + 1))) {
+        cJSON *m = cJSON_CreateObject();
+        cJSON_AddStringToObject(m, "role", "assistant");
+        cJSON_AddStringToObject(m, "content", TRIM_NOTE);
+        cJSON_InsertItemInArray(c->hist, pin + 1, m);
     }
 }
 
@@ -418,6 +457,10 @@ void chat_clear(chat_t *c)
     while (cJSON_GetArraySize(c->hist) > keep) {
         cJSON_DeleteItemFromArray(c->hist, keep);
     }
+    cJSON_Delete(c->notes);
+    cJSON_Delete(c->archive);
+    c->notes = c->archive = NULL;
+    mem_reset();
 }
 
 void chat_set_tools(chat_t *c, cJSON *tools, char *(*cb)(void *, const char *, const char *), void *ud)
@@ -853,6 +896,43 @@ static int busy_wait(int attempt, const char *body)
 
 static int send_turn(chat_t *c, const char *user, char **reply, char **err);
 
+/*
+ * The request body, with the memory block (memory.h) at the end of the last message for this request
+ * only: earlier messages stay byte-identical between requests, so provider prompt caching holds.
+ */
+static char *print_with_memory(chat_t *c, cJSON *root)
+{
+    char *state = mem_state(c->notes, c->archive);
+    cJSON *last = cJSON_GetArrayItem(c->hist, cJSON_GetArraySize(c->hist) - 1);
+    cJSON *lc = cJSON_GetObjectItemCaseSensitive(last, "content"), *part = NULL;
+    const cJSON *role = cJSON_GetObjectItemCaseSensitive(last, "role");
+    int attach = state && cJSON_IsString(role) && (!strcmp(role->valuestring, "user") || !strcmp(role->valuestring, "tool"));
+    char *orig = NULL;
+    if (attach && cJSON_IsString(lc)) {
+        char *joined = NULL;
+        orig = strdup(lc->valuestring);
+        if (orig && asprintf(&joined, "%s\n\n%s", orig, state) >= 0) {
+            cJSON_ReplaceItemInObjectCaseSensitive(last, "content", cJSON_CreateString(joined));
+        }
+        free(joined);
+    } else if (attach && cJSON_IsArray(lc)) {
+        part = cJSON_CreateObject();
+        cJSON_AddStringToObject(part, "type", "text");
+        cJSON_AddStringToObject(part, "text", state);
+        cJSON_AddItemToArray(lc, part);
+    }
+    char *body = cJSON_PrintUnformatted(root);
+    if (orig) {
+        cJSON_ReplaceItemInObjectCaseSensitive(last, "content", cJSON_CreateString(orig));
+    }
+    if (part) {
+        cJSON_Delete(cJSON_DetachItemViaPointer(lc, part));
+    }
+    free(orig);
+    free(state);
+    return body;
+}
+
 int chat_send(chat_t *c, const char *user, char **reply, char **err)
 {
     chat_t *outer = g_running; /* a sub-agent's turn runs inside the main one's tool call */
@@ -888,13 +968,26 @@ static int send_turn(chat_t *c, const char *user, char **reply, char **err)
     trim_history(c, strlen(user));
     add_msg(c->hist, "user", user);
     int user_idx = cJSON_GetArraySize(c->hist) - 1;
+    if (cJSON_GetArraySize(c->images)) { /* pictures added before the turn (chat_add_image) go with the message */
+        cJSON *parts = c->images, *t = cJSON_CreateObject();
+        c->images = NULL;
+        cJSON_AddStringToObject(t, "type", "text");
+        cJSON_AddStringToObject(t, "text", user);
+        cJSON_InsertItemInArray(parts, 0, t);
+        cJSON_ReplaceItemInObjectCaseSensitive(cJSON_GetArrayItem(c->hist, user_idx), "content", parts);
+    }
 
     if (!url) {
         *err = strdup("out of memory");
         goto fail;
     }
 
-    for (int round = 0; round <= CHAT_MAX_TOOL_ROUNDS; round++) {
+    if (!c->archive) {
+        c->archive = cJSON_CreateArray();
+    }
+    int max_rounds = c->max_rounds > 0 ? c->max_rounds : CHAT_MAX_TOOL_ROUNDS;
+    for (int round = 0; round <= max_rounds; round++) {
+        mem_compact(c->hist, c->archive);
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "model", c->model);
         cJSON_AddItemReferenceToObject(root, "messages", c->hist);
@@ -912,7 +1005,7 @@ static int send_turn(chat_t *c, const char *user, char **reply, char **err)
             cJSON *tc = cJSON_AddObjectToObject(cJSON_AddObjectToObject(eb, "google"), "thinking_config");
             cJSON_AddTrueToObject(tc, "include_thoughts");
         }
-        char *body = cJSON_PrintUnformatted(root);
+        char *body = print_with_memory(c, root);
         cJSON_Delete(root); /* only drops the references (and extra_body) */
         if (!body) {
             *err = strdup("out of memory");
@@ -929,10 +1022,12 @@ static int send_turn(chat_t *c, const char *user, char **reply, char **err)
             stream_free(&st);
             goto fail;
         }
-        if (r.status == 400 && (g_has_seed || c->thoughts || streaming)) {
-            /* endpoint refused the seed, then extra_body, then "stream": retry without it */
+        if (r.status == 400 && (g_has_seed || g_reasoning[0] || c->thoughts || streaming)) {
+            /* endpoint refused the seed, reasoning_effort, extra_body, then "stream": retry without it */
             if (g_has_seed) {
                 g_has_seed = 0;
+            } else if (g_reasoning[0]) {
+                g_reasoning[0] = '\0';
             } else if (c->thoughts) {
                 c->thoughts = 0;
             } else {

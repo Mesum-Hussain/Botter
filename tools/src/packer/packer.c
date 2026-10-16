@@ -5,18 +5,19 @@
  *   packer check <agent-dir> <botcore|file.bot>        (validate only)
  *   packer list  <file.bot>
  *
- * Embeds (read-only) from <agent-dir>:
- *   agent.md, config.json, skills/, agents/, tools/doc/ (recursive)   plain files
- *       (config.json: how to build and run the agent, read by load_config/check_config:
- *        name, display_name, version, description, internet, skills, tools, requires, builder,
- *        mcp, agents, temperature, seed)
- *   functions/<name>.lua                             the agent's Lua functions (botcore/src/botlua.c checks
- *       them; functions/tests/<name>.lua run here and are never embedded; any error stops the build)
- *   tools/bin/<name>                                 tool executables: either a
- *       native ELF x86-64 binary (any language that compiles to one) or a script
- *       starting with "#!" (interpreter must exist on the machine running the agent).
- * Never embedded: tools/src, artifacts/, hidden files, symlinks, anything else.
- * Every tools/bin/<name> needs tools/doc/<name>.json (see botcore docs).
+ * Embeds (read-only) from <agent-dir> (progress.md §12.1):
+ *   AGENT.md, config.json, secrets.vault          persona; how to build and run the agent (load_config:
+ *       name, display_name, version, description, internet, skills, requires, builder, mcp, agents,
+ *       temperature, seed, reasoning); the sealed keys
+ *   FLOW.lua                                      OPTIONAL orchestration: flow(input) gets every job
+ *   functions/<name>.lua                          agent-wide Lua, always loaded (botcore/src/botlua.c checks
+ *       it; functions/tests/<name>.lua run here and are never embedded; any error stops the build)
+ *   skills/<name>/                                SKILL.md + anything the skill brings: references/,
+ *       scripts/ (native ELF x86-64 or "#!" scripts: runnable at a real path at run time), assets/,
+ *       functions/<n>.lua (tools only while the skill is loaded; functions/tests/ run here, never embedded)
+ *   agents/<name>/AGENT.md                        sub-agents
+ * Never embedded: evals/, artifacts/, hidden files, symlinks, anything else.
+ * The old layout (agent.md, tools/bin, tools/doc) is an error that says where things go now.
  *
  * Output format: botcore ELF + zero padding to 4096 + BLOB + FOOTER, with the
  * ELF's 32-byte pack reference ("BOTPKREF", u64 blob_off, u64 file_size, u64 0)
@@ -219,21 +220,6 @@ static int bad_name(const char *name)
     return 0;
 }
 
-static int valid_tool_name(const char *s)
-{
-    size_t n = strlen(s);
-    if (n == 0 || n > 64) {
-        return 0;
-    }
-    for (; *s; s++) {
-        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '_' ||
-              *s == '-')) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static void add_item(const char *rel, const char *full, uint32_t kind)
 {
     if (n_items == cap_items) {
@@ -320,13 +306,24 @@ static int has_item(const char *path)
     return 0;
 }
 
+static const item_t *find_item(const char *path)
+{
+    for (size_t i = 0; i < n_items; i++) {
+        if (!strcmp(items[i].path, path)) {
+            return &items[i];
+        }
+    }
+    return NULL;
+}
+
 #include "../botcore/src/botlua.c"
 
 /* A name some tool of this agent already has: botcore's built-ins, tools/bin, MCP servers' tools. */
 static int known_tool(const char *name)
 {
-    static const char *const builtin[] = {"fs_list",  "fs_read",   "fs_write",  "shell_exec", "vfs_list",   "vfs_read",
-                                          "get_time", "cron_set",  "cron_list", "cron_delete", "image_view", NULL};
+    static const char *const builtin[] = {"fs_list",  "fs_read",  "fs_write",  "fs_edit",     "shell_exec", "skill",
+                                          "note",     "recall",   "get_time",  "cron_set",    "cron_list",  "cron_delete",
+                                          "image_view", NULL};
     for (int i = 0; builtin[i]; i++) {
         if (strcmp(builtin[i], name) == 0) {
             return 1;
@@ -343,9 +340,7 @@ static int known_tool(const char *name)
             return 1;
         }
     }
-    char p[300];
-    snprintf(p, sizeof(p), "tools/bin/%s", name);
-    return has_item(p);
+    return 0;
 }
 
 /* ---- functions/<name>.lua (botlua.c): checked, and functions/tests/<name>.lua run, at build time ---- */
@@ -450,32 +445,133 @@ static void lua_diag(void *ud, const char *file, int line, int error, const char
     }
 }
 
+/* functions/<n>.lua or skills/<skill>/functions/<n>.lua */
+static int is_function_file(const char *path)
+{
+    const char *f = !strncmp(path, "functions/", 10) ? path + 10 : NULL;
+    if (!f && !strncmp(path, "skills/", 7)) {
+        const char *sl = strchr(path + 7, '/');
+        f = sl && !strncmp(sl, "/functions/", 11) ? sl + 11 : NULL;
+    }
+    size_t l = f ? strlen(f) : 0;
+    return l > 4 && !strchr(f, '/') && !strcmp(f + l - 4, ".lua");
+}
+
+static char g_skill_dir[4096];
+
+/* bot.skill_dir in tests: the project's own skills/<name> folder. */
+static const char *t_skill_dir(void *ud, const char *name)
+{
+    (void)ud;
+    char p[300];
+    snprintf(p, sizeof(p), "skills/%s/SKILL.md", name);
+    if (strchr(name, '/') || !has_item(p)) {
+        return NULL;
+    }
+    char *d = join(g_dir, "skills");
+    snprintf(g_skill_dir, sizeof(g_skill_dir), "%s/%s", d, name);
+    free(d);
+    return g_skill_dir;
+}
+
 static bl_state *load_functions(int collect_fns)
 {
-    static const bl_io io = {.fs_read = t_read, .fs_exists = t_exists, .today = t_today}; /* tests: no writes, no network */
+    static const bl_io io = {.fs_read = t_read, .fs_exists = t_exists, .today = t_today, .skill_dir = t_skill_dir}; /* tests: no writes, no network */
     bl_state *s = bl_open(&io);
     if (!s) {
         die("out of memory starting Lua");
     }
     for (size_t i = 0; i < n_items; i++) {
-        if (!strncmp(items[i].path, "functions/", 10) && items[i].data) {
-            bl_load(s, items[i].path, items[i].data, items[i].len, collect_fns, collect_fns ? lua_diag : NULL, NULL);
+        int flow = !strcmp(items[i].path, "FLOW.lua"); /* orchestration: loaded, never tools */
+        if ((flow || is_function_file(items[i].path)) && items[i].data) {
+            bl_load(s, items[i].path, items[i].data, items[i].len, collect_fns && !flow, collect_fns ? lua_diag : NULL, NULL);
         }
     }
     return s;
+}
+
+/* Run every test_ and score_ function of the test files in reldir (relative to the project). */
+static void run_tests(const char *reldir, int *passed, int *failed)
+{
+    char *tdir = join(g_dir, reldir);
+    DIR *d = opendir(tdir);
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (e->d_name[0] == '.' || l < 5 || strcmp(e->d_name + l - 4, ".lua") != 0) {
+            continue;
+        }
+        char rel[300], *full = join(tdir, e->d_name);
+        size_t len = 0;
+        snprintf(rel, sizeof(rel), "%s/%s", reldir, e->d_name);
+        char *src = slurp(full, &len);
+        free(full);
+        bl_state *t = load_functions(0);
+        if (src && bl_load(t, rel, src, len, 0, lua_diag, NULL) == 0) {
+            int n = 0, ns = 0;
+            char **scores = bl_globals(t, "score_", &ns); /* how close to the examples: reported, never a failure */
+            for (int k = 0; k < ns; k++) {
+                double got = 0, total = 0;
+                char *details = NULL, *why = bl_call_score(t, scores[k], &got, &total, &details);
+                if (why) {
+                    fprintf(stderr, "%s: %s FAILED: %s\n", rel, scores[k], why);
+                    errors++;
+                } else {
+                    fprintf(stderr, "packer: score %s: %g/%g (%.0f%%)\n", scores[k] + 6, got, total, 100.0 * got / total);
+                    if (details && *details) {
+                        fprintf(stderr, "%s%s", details, details[strlen(details) - 1] == '\n' ? "" : "\n");
+                    }
+                }
+                free(why);
+                free(details);
+                free(scores[k]);
+            }
+            free(scores);
+            char **names = bl_globals(t, "test_", &n);
+            for (int k = 0; k < n; k++) {
+                char *why = bl_call_plain(t, names[k]);
+                if (why) {
+                    fprintf(stderr, "%s: test %s FAILED: %s\n", rel, names[k], why);
+                    (*failed)++;
+                    errors++;
+                } else {
+                    (*passed)++;
+                }
+                free(why);
+                free(names[k]);
+            }
+            free(names);
+        }
+        free(src);
+        bl_close(t);
+    }
+    if (d) {
+        closedir(d);
+    }
+    free(tdir);
 }
 
 /* Every function: a name no other tool has; then each test file, on its own copy of the functions. */
 static void check_functions(void)
 {
     int any = 0;
+    const item_t *flow = find_item("FLOW.lua");
     for (size_t i = 0; i < n_items; i++) {
-        any |= !strncmp(items[i].path, "functions/", 10);
+        any |= is_function_file(items[i].path);
     }
-    if (!any) {
+    if (!any && !flow) {
         return;
     }
     bl_state *s = load_functions(1);
+    if (flow && !errors && !bl_has_global(s, "flow")) {
+        fprintf(stderr, "FLOW.lua: error: it defines no global function flow(input): botcore calls flow with each job "
+                        "(a user message, a --run line, a request) and shows what it returns\n");
+        errors++;
+    }
+    if (flow && flow->data && (memmem(flow->data, flow->len, "\n---@param", 10) || !strncmp(flow->data, "---", 3))) {
+        warn("%s", "FLOW.lua: its functions are not tools (FLOW.lua orchestrates); a function the model should call "
+                   "belongs in functions/");
+    }
     char line[1000] = "";
     for (int i = 0; i < bl_count(s); i++) {
         const bl_fn *f = bl_get(s, i);
@@ -494,9 +590,9 @@ static void check_functions(void)
     }
     free(hook);
     if (line[0]) {
-        fprintf(stderr, "packer: functions: %s%s\n", line, hooks ? "; hook: on_turn_end" : "");
-    } else if (hooks) {
-        fprintf(stderr, "packer: functions: no tools; hook: on_turn_end\n");
+        fprintf(stderr, "packer: functions: %s%s%s\n", line, hooks ? "; hook: on_turn_end" : "", flow ? "; FLOW.lua: flow" : "");
+    } else if (hooks || flow) {
+        fprintf(stderr, "packer: functions: no tools%s%s\n", hooks ? "; hook: on_turn_end" : "", flow ? "; FLOW.lua: flow" : "");
     } else {
         warn("%s", "functions/: no function has a --- doc comment directly above it, so the model can call none of "
                    "them (see the write-functions skill)");
@@ -505,63 +601,21 @@ static void check_functions(void)
     if (errors) {
         return;
     }
-    char *tdir = join(g_dir, "functions/tests");
-    DIR *d = opendir(tdir);
-    struct dirent *e;
     int passed = 0, failed = 0;
-    while (d && (e = readdir(d))) {
-        size_t l = strlen(e->d_name);
-        if (e->d_name[0] == '.' || l < 5 || strcmp(e->d_name + l - 4, ".lua") != 0) {
-            continue;
+    run_tests("functions/tests", &passed, &failed);
+    char *sk = join(g_dir, "skills");
+    DIR *sd = opendir(sk);
+    struct dirent *se;
+    while (sd && (se = readdir(sd))) {
+        char rel[300];
+        if (se->d_name[0] != '.' && snprintf(rel, sizeof(rel), "skills/%s/functions/tests", se->d_name) < (int)sizeof(rel)) {
+            run_tests(rel, &passed, &failed);
         }
-        char rel[300], *full = join(tdir, e->d_name);
-        size_t len = 0;
-        snprintf(rel, sizeof(rel), "functions/tests/%s", e->d_name);
-        char *src = slurp(full, &len);
-        free(full);
-        bl_state *t = load_functions(0);
-        if (src && bl_load(t, rel, src, len, 0, lua_diag, NULL) == 0) {
-            int n = 0, ns = 0;
-            char **scores = bl_globals(t, "score_", &ns); /* how close to the examples: reported, never a failure */
-            for (int k = 0; k < ns; k++) {
-                double passed = 0, total = 0;
-                char *details = NULL, *why = bl_call_score(t, scores[k], &passed, &total, &details);
-                if (why) {
-                    fprintf(stderr, "%s: %s FAILED: %s\n", rel, scores[k], why);
-                    errors++;
-                } else {
-                    fprintf(stderr, "packer: score %s: %g/%g (%.0f%%)\n", scores[k] + 6, passed, total, 100.0 * passed / total);
-                    if (details && *details) {
-                        fprintf(stderr, "%s%s", details, details[strlen(details) - 1] == '\n' ? "" : "\n");
-                    }
-                }
-                free(why);
-                free(details);
-                free(scores[k]);
-            }
-            free(scores);
-            char **names = bl_globals(t, "test_", &n);
-            for (int k = 0; k < n; k++) {
-                char *why = bl_call_plain(t, names[k]);
-                if (why) {
-                    fprintf(stderr, "%s: test %s FAILED: %s\n", rel, names[k], why);
-                    failed++;
-                    errors++;
-                } else {
-                    passed++;
-                }
-                free(why);
-                free(names[k]);
-            }
-            free(names);
-        }
-        free(src);
-        bl_close(t);
     }
-    if (d) {
-        closedir(d);
+    if (sd) {
+        closedir(sd);
     }
-    free(tdir);
+    free(sk);
     if (passed || failed) {
         fprintf(stderr, "packer: function tests: %d passed, %d failed\n", passed, failed);
     }
@@ -701,7 +755,7 @@ static void load_config(const char *dir)
     }
     static const char *const strs[] = {"name", "display_name", "version", "description", NULL};
     static const char *const bools[] = {"internet", "builder", NULL};
-    static const char *const lists[] = {"skills", "tools", "requires", NULL};
+    static const char *const lists[] = {"skills", "requires", NULL};
     for (const cJSON *x = g_cfg->child; x; x = x->next) {
         int known = 0;
         for (int k = 0; strs[k]; k++) {
@@ -727,6 +781,18 @@ static void load_config(const char *dir)
             known = 1;
             if (!cJSON_IsNumber(x) || x->valuedouble < 0 || x->valuedouble > 2) {
                 cfg_err("\"temperature\" must be a number from 0 to 2 (0 = the most repeatable answers)%s", "");
+            }
+        }
+        if (!strcmp(x->string, "tools")) { /* the old layout: programs are skill scripts now */
+            known = 1;
+            cfg_err("\"tools\" is gone: programs live in a skill's scripts/ folder (listed through \"skills\"), "
+                    "and a Lua function in functions/ reaches one with bot.shell%s", "");
+        }
+        if (!strcmp(x->string, "reasoning")) { /* reasoning_effort on every model request */
+            known = 1;
+            if (!cJSON_IsString(x) || (strcmp(x->valuestring, "low") && strcmp(x->valuestring, "medium") &&
+                                      strcmp(x->valuestring, "high"))) {
+                cfg_err("\"reasoning\" must be \"low\", \"medium\" or \"high\" (how much the model thinks first)%s", "");
             }
         }
         if (!strcmp(x->string, "seed")) {
@@ -815,35 +881,26 @@ static void load_config(const char *dir)
 static void select_from_config(void)
 {
     const cJSON *sk = cJSON_GetObjectItemCaseSensitive(g_cfg, "skills");
-    const cJSON *tl = cJSON_GetObjectItemCaseSensitive(g_cfg, "tools");
     char seen[1024] = "";
     size_t w = 0;
     for (size_t i = 0; i < n_items; i++) {
         const char *p = items[i].path;
         char nm[200] = "";
-        const char *key = NULL;
         if (cJSON_IsArray(sk) && !strncmp(p, "skills/", 7)) {
             snprintf(nm, sizeof(nm), "%.*s", (int)strcspn(p + 7, "/"), p + 7);
-            key = "skills";
-        } else if (cJSON_IsArray(tl) && !strncmp(p, "tools/bin/", 10)) {
-            snprintf(nm, sizeof(nm), "%s", p + 10);
-            key = "tools";
-        } else if (cJSON_IsArray(tl) && !strncmp(p, "tools/doc/", 10)) {
-            snprintf(nm, sizeof(nm), "%.*s", (int)strcspn(p + 10, "."), p + 10);
-            key = "tools";
-        }
-        if (key && !in_cfg_list(key, nm)) {
-            char tag[260];
-            snprintf(tag, sizeof(tag), "|%s/%s|", key, nm);
-            if (!strstr(seen, tag) && strlen(seen) + strlen(tag) < sizeof(seen)) {
-                strcat(seen, tag);
-                char m[300];
-                snprintf(m, sizeof(m), "%s \"%s\" is not listed in config.json \"%s\"; it is left out", key, nm, key);
-                warn("%s", m);
+            if (!in_cfg_list("skills", nm)) {
+                char tag[260];
+                snprintf(tag, sizeof(tag), "|%s|", nm);
+                if (!strstr(seen, tag) && strlen(seen) + strlen(tag) < sizeof(seen)) {
+                    strcat(seen, tag);
+                    char m[300];
+                    snprintf(m, sizeof(m), "skill \"%s\" is not listed in config.json \"skills\"; it is left out", nm);
+                    warn("%s", m);
+                }
+                free(items[i].path);
+                free(items[i].full);
+                continue;
             }
-            free(items[i].path);
-            free(items[i].full);
-            continue;
         }
         items[w++] = items[i];
     }
@@ -857,17 +914,9 @@ static void select_from_config(void)
             cfg_err("skill \"%s\" is listed but there is no %s", cJSON_IsString(e) ? e->valuestring : "?", p);
         }
     }
-    cJSON_ArrayForEach(e, (cJSON_IsArray(tl) ? tl : NULL))
-    {
-        char p[300];
-        snprintf(p, sizeof(p), "tools/bin/%s", cJSON_IsString(e) ? e->valuestring : "");
-        if (!has_item(p)) {
-            cfg_err("tool \"%s\" is listed but there is no %s", cJSON_IsString(e) ? e->valuestring : "?", p);
-        }
-    }
 }
 
-/* Script tools need their interpreter on the machine: it belongs in "requires". */
+/* Skill scripts need their interpreter on the machine: it belongs in "requires". */
 static void check_requires(void)
 {
     for (size_t i = 0; i < n_items; i++) {
@@ -894,55 +943,36 @@ static void check_requires(void)
     }
 }
 
-/* Load every item; classify tools/bin entries as ELF or script. */
+/* Load every item; a skill's programs (ELF, or a script with "#!") become runnable files. */
 static void load_and_classify(void)
 {
-    const char *binp = "tools/bin/";
-    size_t      bl = strlen(binp);
     for (size_t i = 0; i < n_items; i++) {
         item_t *it = &items[i];
         it->data = slurp(it->full, &it->len);
-        if (!it->data) {
-            continue;
-        }
-        if (strncmp(it->path, binp, bl) != 0) {
-            continue; /* plain data */
-        }
-        const char *name = it->path + bl;
-        if (!valid_tool_name(name)) {
-            err("tools/bin/%s: tool names must be 1-64 chars of [A-Za-z0-9_-]", name, NULL);
+        if (!it->data || strncmp(it->path, "skills/", 7) != 0) {
             continue;
         }
         int x86, dyn;
+        const char *sl = strchr(it->path + 7, '/');
+        int in_scripts = sl && !strncmp(sl, "/scripts/", 9);
         if (elf_info((unsigned char *)it->data, it->len, &x86, &dyn)) {
             it->kind = K_ELF;
             if (!x86) {
-                err("tools/bin/%s is an ELF binary but not for x86-64", name, NULL);
+                err("%s is an ELF program but not for x86-64%s", it->path, "");
             } else if (dyn) {
-                warn("tools/bin/%s is dynamically linked; it only runs where its shared libraries exist "
+                warn("%s is dynamically linked; it only runs where its shared libraries exist "
                      "(link it statically for a portable agent)",
-                     name);
+                     it->path);
             }
         } else if (it->len >= 3 && it->data[0] == '#' && it->data[1] == '!') {
             it->kind = K_SCRIPT;
-        } else {
-            err("tools/bin/%s is neither an ELF executable nor a script starting with \"#!\"", name, NULL);
-        }
-        char dp[160];
-        snprintf(dp, sizeof(dp), "tools/doc/%s.json", name);
-        if (!has_item(dp)) {
-            err("tools/bin/%s has no descriptor %s", name, dp);
-        }
-    }
-    /* descriptor without executable: harmless but almost surely a mistake */
-    for (size_t i = 0; i < n_items; i++) {
-        const char *p = items[i].path;
-        size_t      l = strlen(p);
-        if (strncmp(p, "tools/doc/", 10) == 0 && l > 15 && strcmp(p + l - 5, ".json") == 0) {
-            char bp[160];
-            snprintf(bp, sizeof(bp), "tools/bin/%.*s", (int)(l - 15), p + 10);
-            if (!has_item(bp)) {
-                warn("%s has no matching executable in tools/bin (tool will not exist)", p);
+        } else if (in_scripts && memchr(it->data, '\0', it->len < 4096 ? it->len : 4096) == NULL) {
+            const char *dot = strrchr(it->path, '.');
+            if (dot && (!strcmp(dot, ".py") || !strcmp(dot, ".sh") || !strcmp(dot, ".js") || !strcmp(dot, ".rb") ||
+                        !strcmp(dot, ".pl"))) {
+                warn("%s has no \"#!\" line, so it cannot run on its own: add one (#!/usr/bin/env python3, #!/bin/sh ...) "
+                     "or run it through its interpreter",
+                     it->path);
             }
         }
     }
@@ -965,97 +995,216 @@ static void diagf(int error, const char *fmt, ...)
     }
 }
 
-/* tools/doc/<name>.json: the model only learns a tool's inputs from "parameters". */
-static void check_descriptor(const item_t *it)
+/* Frontmatter value of key (one line, or a folded/indented block after "key: >" or "key: |"), quotes removed. */
+static int fm_value(const char *fm, size_t fl, const char *key, char *out, size_t cap)
 {
-    static const char *const known[] = {"description", "parameters", "timeout_s", "network", "readonly", "status", "example", NULL};
-    cJSON *j = cJSON_ParseWithLength(it->data, it->len);
-    if (!cJSON_IsObject(j)) {
-        diagf(1, "%s is not a JSON object", it->path);
-        cJSON_Delete(j);
-        return;
+    char pat[40];
+    snprintf(pat, sizeof(pat), "\n%s:", key);
+    const char *k = memmem(fm, fl, pat, strlen(pat)), *end = fm + fl;
+    out[0] = '\0';
+    if (!k) {
+        return 0;
     }
-    const cJSON *d = cJSON_GetObjectItemCaseSensitive(j, "description");
-    const cJSON *par = cJSON_GetObjectItemCaseSensitive(j, "parameters");
-    if (!cJSON_IsString(d) || !d->valuestring[0]) {
-        diagf(1, "%s: no \"description\" (one sentence: what the tool does)", it->path);
+    const char *v = k + strlen(pat);
+    while (v < end && (*v == ' ' || *v == '\t')) {
+        v++;
     }
-    if (!par) {
-        diagf(1, "%s: no \"parameters\": the model would call the tool without arguments. Add a JSON Schema, e.g. "
-                 "{\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"...\"}}, "
-                 "\"required\": [\"query\"]} ({\"type\": \"object\", \"properties\": {}} for a tool without input)",
-              it->path);
+    size_t n = 0;
+    const char *nl = memchr(v, '\n', (size_t)(end - v));
+    size_t first = nl ? (size_t)(nl - v) : (size_t)(end - v);
+    int block = first == 0 || ((*v == '>' || *v == '|') && first <= 2);
+    if (!block) {
+        n = first < cap - 1 ? first : cap - 1;
+        memcpy(out, v, n);
     } else {
-        const cJSON *ty = cJSON_GetObjectItemCaseSensitive(par, "type");
-        const cJSON *pr = cJSON_GetObjectItemCaseSensitive(par, "properties");
-        const cJSON *rq = cJSON_GetObjectItemCaseSensitive(par, "required"), *e;
-        if (!cJSON_IsObject(par) || !cJSON_IsString(ty) || strcmp(ty->valuestring, "object") != 0 || !cJSON_IsObject(pr)) {
-            diagf(1, "%s: \"parameters\" must be {\"type\": \"object\", \"properties\": {...}}", it->path);
-        } else {
-            cJSON_ArrayForEach(e, pr)
-            {
-                const cJSON *pd = cJSON_GetObjectItemCaseSensitive(e, "description");
-                if (!cJSON_IsObject(e) || !cJSON_GetObjectItemCaseSensitive(e, "type")) {
-                    diagf(1, "%s: parameter \"%s\" needs a \"type\"", it->path, e->string);
-                } else if (!cJSON_IsString(pd) || !pd->valuestring[0]) {
-                    diagf(0, "%s: parameter \"%s\" has no \"description\" (the model guesses what to pass)", it->path,
-                          e->string);
-                }
+        for (const char *l = nl ? nl + 1 : end; l < end && (*l == ' ' || *l == '\t');) { /* indented lines */
+            const char *e = memchr(l, '\n', (size_t)(end - l));
+            size_t ll = e ? (size_t)(e - l) : (size_t)(end - l);
+            size_t sp = strspn(l, " \t");
+            for (size_t i = sp; i < ll && n + 2 < cap; i++) {
+                out[n++] = l[i];
             }
-            cJSON_ArrayForEach(e, rq)
-            {
-                if (!cJSON_IsString(e) || !cJSON_GetObjectItemCaseSensitive(pr, e->valuestring)) {
-                    diagf(1, "%s: \"required\" names \"%s\", which is not in \"properties\"", it->path,
-                          cJSON_IsString(e) ? e->valuestring : "?");
-                }
+            if (n + 1 < cap) {
+                out[n++] = ' ';
             }
+            l = e ? e + 1 : end;
         }
     }
-    const cJSON *ex = cJSON_GetObjectItemCaseSensitive(j, "example");
-    if (!ex) {
-        diagf(0, "%s: no \"example\": add a realistic, harmless input object so the tool can be tested for real "
-                 "(Botter's tool_test runs it)",
-              it->path);
-    } else if (!cJSON_IsObject(ex)) {
-        diagf(1, "%s: \"example\" must be a JSON object of arguments", it->path);
+    while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\r')) {
+        n--;
     }
-    const cJSON *k;
-    cJSON_ArrayForEach(k, j)
-    {
-        int ok = 0;
-        for (int i = 0; known[i]; i++) {
-            ok |= strcmp(k->string, known[i]) == 0;
-        }
-        if (!ok) {
-            diagf(0, "%s: unknown key \"%.60s\" is ignored (known: description, parameters, timeout_s, network, "
-                     "readonly, status, example; prose docs go in tools/doc/<name>.md)",
-                  it->path, k->string);
-        }
+    out[n] = '\0';
+    if (n >= 2 && (out[0] == '"' || out[0] == '\'') && out[n - 1] == out[0]) {
+        memmove(out, out + 1, n - 2);
+        out[n - 2] = '\0';
     }
-    cJSON_Delete(j);
+    return 1;
 }
 
-/* skills/<name>/SKILL.md: the agent picks skills by the frontmatter description. */
+/* Placeholder words that mean the text is unfinished (whole words, as written). */
+static const char *placeholder(const char *t, size_t n)
+{
+    static const char *const words[] = {"TODO", "TBD", "FIXME", "XXX", NULL};
+    for (int i = 0; words[i]; i++) {
+        size_t wl = strlen(words[i]);
+        for (const char *p = t; (p = memmem(p, (size_t)(t + n - p), words[i], wl)); p += wl) {
+            /* a quoted word ("TODO", `TODO`) is a mention, not a placeholder */
+            int before = p == t || (!isalnum((unsigned char)p[-1]) && !strchr("\"'`", p[-1]));
+            int after = p + wl >= t + n || (!isalnum((unsigned char)p[wl]) && !strchr("\"'`", p[wl]));
+            if (before && after) {
+                return words[i];
+            }
+        }
+    }
+    return strcasestr(t, "lorem ipsum") ? "lorem ipsum" : NULL;
+}
+
+
+/* "a/b/../c" -> "a/c"; 0 when it climbs out. */
+static int norm_path(char *p)
+{
+    char out[600] = "";
+    for (char *save = NULL, *c = strtok_r(p, "/", &save); c; c = strtok_r(NULL, "/", &save)) {
+        if (!strcmp(c, ".")) {
+            continue;
+        }
+        if (!strcmp(c, "..")) {
+            char *sl = strrchr(out, '/');
+            if (!out[0]) {
+                return 0;
+            }
+            if (sl) {
+                *sl = '\0';
+            } else {
+                out[0] = '\0';
+            }
+            continue;
+        }
+        size_t l = strlen(out);
+        snprintf(out + l, sizeof(out) - l, "%s%s", l ? "/" : "", c);
+    }
+    strcpy(p, out);
+    return 1;
+}
+
+/*
+ * skills/<name>/: the agent picks a skill by its description and follows SKILL.md; everything else in the
+ * folder must be reachable from it. Checks: frontmatter (name = folder, description <= 1024 chars), links
+ * that resolve, references/ files that something points to, length, placeholder words.
+ */
 static void check_skill(const item_t *it)
 {
     const char *d = it->data, *end = it->data + it->len;
     const char *close = it->len > 4 && strncmp(d, "---\n", 4) == 0 ? memmem(d + 4, end - d - 4, "\n---", 4) : NULL;
+    char folder[200], v[2048];
+    snprintf(folder, sizeof(folder), "%.*s", (int)strcspn(it->path + 7, "/"), it->path + 7);
     if (!close) {
-        diagf(1, "%s has no frontmatter; start it with:\n---\nname: <folder name>\ndescription: <when to read this "
-                 "skill, one sentence>\n---",
-              it->path);
+        diagf(1, "%s has no frontmatter; start it with:\n---\nname: %s\ndescription: <what it does and when to use "
+                 "it, one or two sentences>\n---",
+              it->path, folder);
         return;
     }
-    size_t fl = close - d;
-    if (!memmem(d, fl, "\nname:", 6)) {
-        diagf(1, "%s: frontmatter has no \"name:\"", it->path);
+    size_t fl = (size_t)(close - d) + 1;
+    if (!fm_value(d, fl, "name", v, sizeof(v))) {
+        diagf(1, "%s: frontmatter has no \"name:\" (it must be %s, the folder's name)", it->path, folder);
+    } else if (strcmp(v, folder) != 0) {
+        diagf(1, "%s: \"name: %s\" must be the folder's name, %s", it->path, v, folder);
     }
-    if (!memmem(d, fl, "\ndescription:", 13)) {
-        diagf(1, "%s: frontmatter has no \"description:\" (the agent decides from it when to read the skill)", it->path);
+    if (!fm_value(d, fl, "description", v, sizeof(v)) || !v[0]) {
+        diagf(1, "%s: frontmatter has no \"description:\" (the agent decides from it when to load the skill: say what "
+                 "it does and when to use it)",
+              it->path);
+    } else if (strlen(v) > 1024) {
+        diagf(1, "%s: the description has %zu characters; keep it under 1024 (what it does and when to use it; the "
+                 "details belong in the body)",
+              it->path, strlen(v));
     }
+    long lines = 0;
+    for (const char *p = d; p < end; p++) {
+        lines += *p == '\n';
+    }
+    if (lines > 500) {
+        diagf(0, "%s has %ld lines: keep SKILL.md under 500 and move details to references/ files it points to",
+              it->path, lines);
+    }
+    char base[300];
+    snprintf(base, sizeof(base), "skills/%s/", folder);
+    size_t bl = strlen(base);
+    /* every file of this skill: reachable from SKILL.md (by a link or by its path), and finished */
+    size_t first = 0, count = 0;
+    for (size_t i = 0; i < n_items; i++) {
+        if (!strncmp(items[i].path, base, bl)) {
+            if (!count++) {
+                first = i;
+            }
+        }
+    }
+    char *reach = calloc(count + 1, 1);
+    for (size_t k = 0; k < count; k++) {
+        reach[k] = items[first + k].path == it->path || !strcmp(items[first + k].path, it->path);
+    }
+    for (int changed = 1; changed && reach;) {
+        changed = 0;
+        for (size_t k = 0; k < count; k++) {
+            const item_t *m = &items[first + k];
+            size_t ml = strlen(m->path);
+            if (!reach[k] || m->kind != K_DATA || ml < 3 || strcmp(m->path + ml - 3, ".md") != 0) {
+                continue;
+            }
+            for (size_t j = 0; j < count; j++) {
+                const char *rel = items[first + j].path + bl, *bn = strrchr(rel, '/');
+                if (!reach[j] && (memmem(m->data, m->len, rel, strlen(rel)) ||
+                                  (bn && memmem(m->data, m->len, bn + 1, strlen(bn + 1))))) {
+                    reach[j] = 1;
+                    changed = 1;
+                }
+            }
+        }
+    }
+    for (size_t k = 0; k < count && reach; k++) {
+        const item_t *m = &items[first + k];
+        const char *rel = m->path + bl;
+        if (!reach[k] && !strncmp(rel, "references/", 11)) {
+            diagf(0, "%s: neither SKILL.md nor anything it points to names this file, so the agent will not find it "
+                     "(say in SKILL.md when to read it)",
+                  m->path);
+        }
+        size_t ml = strlen(m->path);
+        const char *ph = m->kind == K_DATA && ml > 3 && !strcmp(m->path + ml - 3, ".md") ? placeholder(m->data, m->len) : NULL;
+        if (ph) {
+            diagf(1, "%s says \"%s\": finish the text before building", m->path, ph);
+        }
+        if (m->kind != K_DATA || !(ml > 3 && !strcmp(m->path + ml - 3, ".md"))) {
+            continue;
+        }
+        /* markdown links to files of the skill must resolve */
+        for (const char *l = m->data; (l = memmem(l, (size_t)(m->data + m->len - l), "](", 2)); l += 2) {
+            const char *t = l + 2, *e = t;
+            while (e < m->data + m->len && *e != ')' && *e != ' ' && *e != '#' && *e != '\n') {
+                e++;
+            }
+            char target[600], full[700];
+            snprintf(target, sizeof(target), "%.*s", (int)(e - t), t);
+            if (!target[0] || strstr(target, "://") || !strncmp(target, "mailto:", 7) || target[0] == '/') {
+                continue;
+            }
+            const char *dir_end = strrchr(m->path, '/');
+            snprintf(full, sizeof(full), "%.*s/%s", (int)(dir_end - m->path), m->path, target);
+            int inside = norm_path(full) && !strncmp(full, base, bl - 1);
+            size_t fl2 = strlen(full);
+            int found = inside && find_item(full) != NULL;
+            for (size_t j = 0; inside && !found && j < count; j++) { /* a link to a folder of the skill */
+                found = !strncmp(items[first + j].path, full, fl2) && items[first + j].path[fl2] == '/';
+            }
+            if (!found) {
+                diagf(1, "%s links to %s, which is not in the skill", m->path, target);
+            }
+        }
+    }
+    free(reach);
 }
 
-/* tools/bin scripts: arguments arrive as JSON on stdin; output must be real. */
+/* A skill's runnable files: real work only, and nothing from outside the agent. */
 static void check_script(const item_t *it)
 {
     char *low = malloc(it->len + 1);
@@ -1066,18 +1215,6 @@ static void check_script(const item_t *it)
         low[i] = (char)tolower((unsigned char)it->data[i]);
     }
     low[it->len] = '\0';
-    const char *nl = memchr(low, '\n', it->len);
-    int py = memmem(low, nl ? (size_t)(nl - low) : it->len, "python", 6) != NULL; /* the #! line */
-    int reads = py ? strstr(low, "sys.stdin") || strstr(low, "input(") || strstr(low, "/dev/stdin")
-                   : strstr(low, "read ") || strstr(low, "cat") || strstr(low, "jq") || strstr(low, "/dev/stdin") ||
-                         strstr(low, "stdin") || strstr(low, "python");
-    if (!reads) {
-        diagf(0, "%s does not seem to read stdin: its arguments arrive as one JSON object on stdin (see write-tool)",
-              it->path);
-    }
-    if (py ? strstr(low, "sys.argv[1") != NULL : strstr(it->data, "$1") != NULL) {
-        diagf(0, "%s reads command-line arguments; botcore passes none (arguments arrive as JSON on stdin)", it->path);
-    }
     int uses_art = 0; /* outside comments: a credit line naming the source is fine */
     for (const char *l = it->data, *end = it->data + it->len; l < end && !uses_art;) {
         const char *nl = memchr(l, '\n', (size_t)(end - l));
@@ -1090,32 +1227,14 @@ static void check_script(const item_t *it)
     }
     if (uses_art) {
         diagf(1, "%s uses files under artifacts/, which are not part of the .bot (the agent must run in any "
-                 "folder): copy the code it needs into the tool itself, keeping the licence notice",
+                 "folder): copy the code it needs into the skill itself, keeping the licence notice",
               it->path);
-    }
-    if (strstr(low, "sleep")) { /* polls a job: the default 60 s timeout kills it mid-wait */
-        char dp[200];
-        snprintf(dp, sizeof(dp), "tools/doc/%s.json", it->path + 10);
-        const cJSON *to = NULL;
-        cJSON *d = NULL;
-        for (size_t i = 0; i < n_items; i++) {
-            if (strcmp(items[i].path, dp) == 0 && items[i].data) {
-                d = cJSON_ParseWithLength(items[i].data, items[i].len);
-                to = cJSON_GetObjectItemCaseSensitive(d, "timeout_s");
-            }
-        }
-        if (!cJSON_IsNumber(to) || to->valuedouble <= 60) {
-            diagf(0, "%s waits (sleep) but %s has no \"timeout_s\" above the default 60 s: set it to the "
-                     "longest run it needs (max 600)",
-                  it->path, dp);
-        }
-        cJSON_Delete(d);
     }
     static const char *const fake[] = {"mock", "placeholder", "dummy", "lorem ipsum", "hard-coded", "hardcoded",
                                        "simulated", "fake ", NULL};
     for (int i = 0; fake[i]; i++) {
         if (strstr(low, fake[i])) {
-            diagf(0, "%s mentions \"%s\": tools must do the real job or fail with a clear error, never return "
+            diagf(0, "%s mentions \"%s\": scripts must do the real job or fail with a clear error, never return "
                      "mock or placeholder output",
                   it->path, fake[i]);
             break;
@@ -1132,11 +1251,10 @@ static void check_contracts(void)
         if (!it->data) {
             continue;
         }
-        if (strncmp(it->path, "tools/doc/", 10) == 0 && l > 15 && strcmp(it->path + l - 5, ".json") == 0) {
-            check_descriptor(it);
-        } else if (strncmp(it->path, "skills/", 7) == 0 && l > 9 && strcmp(it->path + l - 9, "/SKILL.md") == 0) {
+        if (strncmp(it->path, "skills/", 7) == 0 && l > 9 && strcmp(it->path + l - 9, "/SKILL.md") == 0 &&
+            !strchr(it->path + 7, '/')[9]) {
             check_skill(it);
-        } else if (strncmp(it->path, "agents/", 7) == 0 && l > 9 && strcmp(it->path + l - 9, "/agent.md") == 0) {
+        } else if (strncmp(it->path, "agents/", 7) == 0 && l > 9 && strcmp(it->path + l - 9, "/AGENT.md") == 0) {
             const char *c = it->len > 4 && !strncmp(it->data, "---\n", 4) ? memmem(it->data + 4, it->len - 4, "\n---", 4) : NULL;
             if (!c || !memmem(it->data, (size_t)(c - it->data), "\ndescription:", 13)) {
                 diagf(1, "%s: start it with a frontmatter that says what this sub-agent is for:\n---\ndescription: "
@@ -1154,6 +1272,76 @@ static void check_contracts(void)
 static int write_all(FILE *f, const void *d, size_t n)
 {
     return fwrite(d, 1, n, f) == n;
+}
+
+/* The layout before progress.md §12.1: each piece is an error that says where it goes now. */
+static void old_layout(const char *dir)
+{
+    static const char *const moved[][2] = {
+        {"agent.md", "agent.md is now AGENT.md: rename it"},
+        {"tools/bin", "tools/bin is gone: put each program in the scripts/ folder of the skill that uses it; a Lua "
+                      "function in functions/ reaches it with bot.shell(bot.skill_dir(\"<skill>\") .. \"/scripts/...\")"},
+        {"tools/doc", "tools/doc is gone: a program's usage belongs in its skill's SKILL.md, or in the --- doc comment "
+                      "of the Lua function that runs it"},
+    };
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        char *f = join(dir, moved[i][0]);
+        struct stat st;
+        /* agent.md: an exact name (a case-insensitive file system shows AGENT.md under both) */
+        int there = lstat(f, &st) == 0;
+        if (there && i == 0) {
+            DIR *d = opendir(dir);
+            struct dirent *e;
+            there = 0;
+            while (d && (e = readdir(d))) {
+                there |= !strcmp(e->d_name, "agent.md");
+            }
+            if (d) {
+                closedir(d);
+            }
+        }
+        if (there) {
+            err("%s: %s", f, moved[i][1]);
+        }
+        free(f);
+    }
+    char *ag = join(dir, "agents");
+    DIR *d = opendir(ag);
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char rel[300], *f;
+        snprintf(rel, sizeof(rel), "agents/%s/agent.md", e->d_name);
+        f = join(dir, rel);
+        if (e->d_name[0] != '.' && access(f, F_OK) == 0) {
+            char *up = join(ag, e->d_name), *n = join(up, "AGENT.md");
+            if (access(n, F_OK) != 0) {
+                err("%s: sub-agents use AGENT.md too: rename it%s", f, "");
+            }
+            free(up);
+            free(n);
+        }
+        free(f);
+    }
+    if (d) {
+        closedir(d);
+    }
+    free(ag);
+}
+
+/* skills/<name>/functions/tests/ run at build time and are never embedded. */
+static void drop_skill_tests(void)
+{
+    size_t w = 0;
+    for (size_t i = 0; i < n_items; i++) {
+        const char *sl = !strncmp(items[i].path, "skills/", 7) ? strchr(items[i].path + 7, '/') : NULL;
+        if (sl && !strncmp(sl, "/functions/tests/", 17)) {
+            free(items[i].path);
+            free(items[i].full);
+            continue;
+        }
+        items[w++] = items[i];
+    }
+    n_items = w;
 }
 
 static int cmd_build(const char *dir, const char *botcore, const char *out)
@@ -1196,15 +1384,16 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     }
 
     load_config(dir);
-    add_root_file(dir, "agent.md");
+    old_layout(dir);
+    add_root_file(dir, "AGENT.md");
+    add_root_file(dir, "FLOW.lua"); /* optional orchestration (progress.md §12.3) */
     add_root_file(dir, "config.json");
     add_root_file(dir, "secrets.vault"); /* opt-in: the agent's keys, encrypted with a password (vault_seal) */
     add_tree(dir, "skills", K_DATA, 0);
     add_tree(dir, "agents", K_DATA, 0);
-    add_tree(dir, "tools/doc", K_DATA, 0);
-    add_tree(dir, "tools/bin", K_DATA, 1);
     add_functions(dir);
     g_dir = dir;
+    drop_skill_tests();
     select_from_config();
     if (errors) {
         return 1;
@@ -1216,8 +1405,8 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
         return 1;
     }
     check_requires();
-    if (!has_item("agent.md")) {
-        warn("no agent.md (%s: default system prompt will be used)", "agent");
+    if (!has_item("AGENT.md")) {
+        warn("no AGENT.md (%s: default system prompt will be used)", "agent");
     }
     char *mf = join(dir, "manifest.md");
     if (access(mf, F_OK) == 0) {
@@ -1228,7 +1417,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     for (int i = 0; flows[i]; i++) { /* the flow languages are gone: the model drives, functions do exact work */
         char *old = join(dir, flows[i]);
         if (access(old, F_OK) == 0) {
-            err("%s is no longer used: write how the agent works in agent.md (or a skill it reads), and exact, "
+            err("%s is no longer used: write how the agent works in AGENT.md (or a skill it loads), and exact, "
                 "repeatable steps as Lua in functions/ (see the write-functions skill)%s", old, "");
         }
         free(old);
@@ -1247,7 +1436,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
         for (size_t i = 0; i < n_items; i++) {
             nx += items[i].kind != K_DATA;
         }
-        fprintf(stderr, "packer: check passed (runtime botcore %s): %zu files (%zu tools), %d warning(s)\n",
+        fprintf(stderr, "packer: check passed (runtime botcore %s): %zu files (%zu runnable), %d warning(s)\n",
                 g_core_version[0] ? g_core_version : "?", n_items, nx, warnings);
         return 0;
     }
@@ -1339,7 +1528,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     for (size_t i = 0; i < n_items; i++) {
         nexec += items[i].kind != K_DATA;
     }
-    fprintf(stderr, "packer: wrote %s (runtime botcore %s): %zu files (%zu tools), pack %llu bytes, total %llu bytes", out,
+    fprintf(stderr, "packer: wrote %s (runtime botcore %s): %zu files (%zu runnable), pack %llu bytes, total %llu bytes", out,
             g_core_version[0] ? g_core_version : "?", n_items,
             nexec, (unsigned long long)pos, (unsigned long long)(base + pos + FOOTER_SIZE));
     if (saved) {
