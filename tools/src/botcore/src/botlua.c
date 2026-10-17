@@ -18,9 +18,19 @@
 #define BL_LOAD_S     10                   /* running a file's top level */
 #define BL_JSON_DEPTH 100
 
+/* Files a test wrote: tests read the real folder but never write it; their writes live here, and a later
+ * bot.fs.read/exists of the same path sees them. */
+typedef struct scratch {
+    char           *path;
+    char           *data;
+    size_t          n;
+    struct scratch *next;
+} scratch;
+
 struct bl_state {
     lua_State *L;
     bl_io      io;
+    scratch   *scratch;
     bl_fn     *fn;
     int        nfn, cap;
     size_t     mem;
@@ -76,6 +86,33 @@ static void bl_hook(lua_State *L, lua_Debug *ar)
 }
 
 /* ---- JSON <-> Lua ------------------------------------------------------- */
+
+static int key_cmp(const void *a, const void *b)
+{
+    return strcmp((*(cJSON *const *)a)->string, (*(cJSON *const *)b)->string);
+}
+
+/* Keys in sorted order: Lua's table order changes from run to run, and the same table must give the same
+ * text (prompts stay cacheable, outputs reproducible). */
+static void sort_keys(cJSON *o)
+{
+    int n = cJSON_GetArraySize(o);
+    if (n < 2) {
+        return;
+    }
+    cJSON **v = malloc(sizeof(*v) * (size_t)n);
+    if (!v) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        v[i] = cJSON_DetachItemViaPointer(o, o->child);
+    }
+    qsort(v, (size_t)n, sizeof(*v), key_cmp);
+    for (int i = 0; i < n; i++) {
+        cJSON_AddItemToArray(o, v[i]); /* keeps the item's key */
+    }
+    free(v);
+}
 
 static cJSON *to_json(lua_State *L, int idx, int depth)
 {
@@ -141,6 +178,7 @@ static cJSON *to_json(lua_State *L, int idx, int depth)
             }
             cJSON_AddItemToObject(o, k, v);
         }
+        sort_keys(o);
         return o;
     }
     default:
@@ -530,10 +568,63 @@ static int l_today(lua_State *L)
     return 1;
 }
 
+static scratch *scratch_find(bl_state *s, const char *path)
+{
+    while (path[0] == '.' && path[1] == '/') {
+        path += 2;
+    }
+    for (scratch *f = s->scratch; f; f = f->next) {
+        if (!strcmp(f->path, path)) {
+            return f;
+        }
+    }
+    return NULL;
+}
+
+/* A test's write: kept in memory (no fs_write here, but files can be read: the host runs tests). */
+static int scratch_put(bl_state *s, const char *path, const char *data, size_t n, int append)
+{
+    while (path[0] == '.' && path[1] == '/') {
+        path += 2;
+    }
+    scratch *f = scratch_find(s, path);
+    if (!f) {
+        f = calloc(1, sizeof(*f));
+        if (!f || !(f->path = strdup(path))) {
+            free(f);
+            return -1;
+        }
+        if (append && s->io.fs_read) { /* appending to a real file starts from its content */
+            char err[8];
+            f->data = s->io.fs_read(s->io.ud, path, &f->n, err, sizeof(err));
+            if (!f->data) {
+                f->n = 0;
+            }
+        }
+        f->next = s->scratch;
+        s->scratch = f;
+    }
+    size_t base = append ? f->n : 0;
+    char *d = realloc(f->data, base + n + 1);
+    if (!d) {
+        return -1;
+    }
+    memcpy(d + base, data, n);
+    d[base + n] = 0;
+    f->data = d;
+    f->n = base + n;
+    return 0;
+}
+
 static int l_fs_read(lua_State *L)
 {
     bl_state *s = state_of(L);
     const char *path = luaL_checkstring(L, 1);
+    scratch *f = scratch_find(s, path);
+    if (f) {
+        lua_pushlstring(L, f->data ? f->data : "", f->n);
+        return 1;
+    }
     char err[300] = "";
     size_t n = 0;
     char *d = s->io.fs_read ? s->io.fs_read(s->io.ud, path, &n, err, sizeof(err)) : NULL;
@@ -552,6 +643,12 @@ static int fs_put(lua_State *L, int append)
     size_t n;
     const char *data = luaL_checklstring(L, 2, &n);
     char err[300] = "";
+    if (!s->io.fs_write && s->io.fs_read) {
+        if (scratch_put(s, path, data, n, append) != 0) {
+            return luaL_error(L, "bot.fs.%s %s: out of memory", append ? "append" : "write", path);
+        }
+        return 0;
+    }
     if (!s->io.fs_write || s->io.fs_write(s->io.ud, path, data, n, append, err, sizeof(err)) != 0) {
         return luaL_error(L, "bot.fs.%s %s: %s", append ? "append" : "write", path,
                           err[0] ? err : "files are not available here");
@@ -585,7 +682,7 @@ static int l_fs_exists(lua_State *L)
 {
     bl_state *s = state_of(L);
     const char *path = luaL_checkstring(L, 1);
-    lua_pushboolean(L, s->io.fs_exists && s->io.fs_exists(s->io.ud, path));
+    lua_pushboolean(L, scratch_find(s, path) || (s->io.fs_exists && s->io.fs_exists(s->io.ud, path)));
     return 1;
 }
 
@@ -833,6 +930,25 @@ static int l_say(lua_State *L)
     return 0;
 }
 
+/* bot.usage() -> {calls, input_tokens, output_tokens} */
+static int l_usage(lua_State *L)
+{
+    bl_state *s = state_of(L);
+    long calls = 0;
+    long long in = 0, out = 0;
+    if (!s->io.usage || s->io.usage(s->io.ud, &calls, &in, &out) != 0) {
+        return luaL_error(L, "bot.usage is not available here");
+    }
+    lua_newtable(L);
+    lua_pushinteger(L, calls);
+    lua_setfield(L, -2, "calls");
+    lua_pushinteger(L, in);
+    lua_setfield(L, -2, "input_tokens");
+    lua_pushinteger(L, out);
+    lua_setfield(L, -2, "output_tokens");
+    return 1;
+}
+
 /* ---- bot.test: the project's Lua, loaded fresh from the working folder, and its tests run ---- */
 
 static int bl_cmp_str(const void *a, const void *b);
@@ -941,6 +1057,16 @@ static void load_project(bl_state *s, bl_state *t, test_rep_t *r)
     free(files);
 }
 
+/* A score's count: an integer when it is whole (so it prints 3, not 3.0) */
+static void push_count(lua_State *L, double v)
+{
+    if (v > -1e15 && v < 1e15 && v == (double)(lua_Integer)v) {
+        lua_pushinteger(L, (lua_Integer)v);
+    } else {
+        lua_pushnumber(L, v);
+    }
+}
+
 static int l_test(lua_State *L)
 {
     bl_state *s = state_of(L);
@@ -994,9 +1120,9 @@ static int l_test(lua_State *L)
                     lua_newtable(L);
                     lua_pushstring(L, names[k] + 6);
                     lua_setfield(L, -2, "name");
-                    lua_pushnumber(L, got);
+                    push_count(L, got);
                     lua_setfield(L, -2, "passed");
-                    lua_pushnumber(L, total);
+                    push_count(L, total);
                     lua_setfield(L, -2, "total");
                     lua_pushstring(L, details ? details : "");
                     lua_setfield(L, -2, "details");
@@ -1153,7 +1279,7 @@ bl_state *bl_open(const bl_io *io)
     set_funcs(L, "http", http);
     static const luaL_Reg top[] = {{"today", l_today}, {"shell", l_shell},   {"mcp", l_mcp},  {"agent", l_agent},
                                    {"secret", l_secret}, {"tool", l_tool}, {"skill_dir", l_skill_dir},
-                                   {"worker", l_worker}, {"ask", l_ask}, {"say", l_say}, {"test", l_test},
+                                   {"worker", l_worker}, {"ask", l_ask}, {"say", l_say}, {"usage", l_usage}, {"test", l_test},
                                    {"llm", l_llm}, {NULL, NULL}};
     luaL_setfuncs(L, top, 0);
     lua_setglobal(L, "bot");
@@ -1183,6 +1309,12 @@ void bl_close(bl_state *s)
     }
     free(s->fn);
     lua_close(s->L);
+    for (scratch *f = s->scratch, *nx; f; f = nx) {
+        nx = f->next;
+        free(f->path);
+        free(f->data);
+        free(f);
+    }
     free(s);
 }
 

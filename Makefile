@@ -25,7 +25,7 @@ LUA         = $(BOTCORE_DIR)/lib/lua
 LUA_SRCS    = $(wildcard $(LUA)/*.c)
 BOTLUA      = $(BOTCORE_DIR)/src/botlua.c $(BOTCORE_DIR)/src/botlua.h
 
-AGENT_FILES = $(shell find AGENT.md config.json skills functions -type f ! -path '$(BUILD_PROG)' 2>/dev/null)
+AGENT_FILES = $(shell find AGENT.md FLOW.lua config.json skills functions -type f ! -path '$(BUILD_PROG)' 2>/dev/null)
 
 # The TUI runs the agent from a memfd, so the agent's own executable (which agent_build
 # uses as the runtime for new agents) is plain botcore + pack, without the TUI.

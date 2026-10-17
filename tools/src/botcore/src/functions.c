@@ -207,6 +207,18 @@ static char *io_ask(void *ud, const char *q)
     return g_host.ask ? g_host.ask(q) : NULL;
 }
 
+static int io_usage(void *ud, long *calls, long long *in, long long *out)
+{
+    (void)ud;
+    const chat_usage_t *u;
+    for (int i = 0, n = chat_usage(&u); i < n; i++) {
+        *calls += u[i].calls;
+        *in += u[i].input_tokens;
+        *out += u[i].output_tokens;
+    }
+    return 0;
+}
+
 static void io_say(void *ud, const char *t)
 {
     (void)ud;
@@ -307,7 +319,7 @@ void fn_init(void)
         if (!g_bl) {
             static const bl_io io = {io_read,        io_write, io_list,   io_exists,    io_today,
                                      io_interrupted, io_tool,  io_http,   io_secret,    io_skill_dir,
-                                     io_worker,      io_ask,   io_say,    io_llm,       NULL};
+                                     io_worker,      io_ask,   io_say,    io_llm,       io_usage, NULL};
             g_bl = bl_open(&io);
             if (!g_bl) {
                 fprintf(stderr, ANSI_BOLD_RED "Error:" ANSI_RESET " out of memory starting Lua\n");

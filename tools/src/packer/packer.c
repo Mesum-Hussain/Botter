@@ -490,6 +490,26 @@ static bl_state *load_functions(int collect_fns)
     return s;
 }
 
+/* A score's details, at most 20 lines (a long list of differences hides the build's real errors). */
+static void print_details(const char *details)
+{
+    int lines = 0, more = 0;
+    for (const char *p = details; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (lines < 20) {
+            fprintf(stderr, "%.*s\n", (int)n, p);
+            lines++;
+        } else {
+            more++;
+        }
+        p = nl ? nl + 1 : p + n;
+    }
+    if (more) {
+        fprintf(stderr, "... %d more line(s)\n", more);
+    }
+}
+
 /* Run every test_ and score_ function of the test files in reldir (relative to the project). */
 static void run_tests(const char *reldir, int *passed, int *failed)
 {
@@ -518,9 +538,7 @@ static void run_tests(const char *reldir, int *passed, int *failed)
                     errors++;
                 } else {
                     fprintf(stderr, "packer: score %s: %g/%g (%.0f%%)\n", scores[k] + 6, got, total, 100.0 * got / total);
-                    if (details && *details) {
-                        fprintf(stderr, "%s%s", details, details[strlen(details) - 1] == '\n' ? "" : "\n");
-                    }
+                    print_details(details);
                 }
                 free(why);
                 free(details);

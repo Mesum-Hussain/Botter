@@ -26,7 +26,8 @@
  *   bot.csv.parse(text) -> rows keyed by the header / bot.csv.encode(rows, columns) -> text
  *   bot.date.add_days(d, n) / add_months(d, n) / diff_days(from, to) / weekday(d) / is_valid(d)
  *   bot.today()                               (bl_io.today; BOTTER_TODAY pins it)
- *   bot.fs.read / write / append / list / exists   (bl_io: botcore keeps them in the working folder)
+ *   bot.fs.read / write / append / list / exists   (bl_io: botcore keeps them in the working folder; with
+ *       fs_read but no fs_write, as in tests, writes stay in memory and later reads/exists see them)
  *   bot.http.get(url [, headers]) / bot.http.post(url, body [, headers]) -> {status, body, json}
  *   bot.shell(command [, timeout_s]) -> output, exit code    (the shell_exec tool: same rules, same asking)
  *   bot.mcp(server, tool, args) -> text      bot.agent(name, task) -> text      bot.secret(name) -> value
@@ -38,6 +39,7 @@
  *   bot.test(path?) -> {passed, failed, report, scores}: the project's Lua in the working folder, loaded fresh,
  *       and the test_/score_ functions of path (a test file or folder, default functions/tests) run
  *   bot.ask(question) -> the person's answer, or nil when nobody is there (batch, remote)
+ *   bot.usage() -> {calls, input_tokens, output_tokens}: the model's use so far in this process (all models)
  *   bot.say(text): a progress line for the person
  *   bot.llm(prompt) / bot.llm{prompt, system?, schema?, images?} -> text, or a table when a schema is given: one
  *       request to the agent's own model, for judgement inside code (reading text or images, wording)
@@ -65,6 +67,8 @@ typedef struct {
     void  (*say)(void *ud, const char *text);           /* bot.say: a progress line for the person */
     /* bot.llm: one request to the agent's own model (spec = JSON object); malloc'd reply, or NULL + err */
     char *(*llm)(void *ud, const char *spec_json, char *err, size_t el);
+    /* bot.usage: model calls and tokens so far, all models together; 0 ok */
+    int   (*usage)(void *ud, long *calls, long long *in, long long *out);
     void  *ud;
 } bl_io;
 

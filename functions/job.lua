@@ -9,7 +9,7 @@ local BUILTIN = { fs_list = true, fs_read = true, fs_write = true, fs_edit = tru
   cron_delete = true, get_time = true, delegate = true, vault_seal = true }
 
 function botter_reset_job()
-  BOTTER.job = { goal = "", inputs = {}, outputs = {}, rules = {}, examples = {}, success = {}, edges = {} }
+  BOTTER.job = { goal = "", inputs = {}, outputs = {}, rules = {}, examples = {}, success = {}, edges = {}, skipped = {} }
   BOTTER.design = { kind = nil, why = "", functions = {}, model_steps = {}, skills = {} }
 end
 
@@ -56,20 +56,59 @@ end
 
 --- Record one output the agent must produce: a file (with its columns in order and value formats) or a reply.
 ---@param path string  the file it writes, relative to the project; "" for a reply in the conversation
----@param description string  the format: columns in order, how each value is written, one row per what
+---@param columns string  its column or field names in order, comma-separated, exactly as the brief writes them; "" for free text
+---@param description string  the format: how each value is written, one row per what
 ---@return string  confirmation
-function job_output(path, description)
-  table.insert(BOTTER.job.outputs, { path = trim(path), description = need(description, "the description") })
-  return "ok: output " .. #BOTTER.job.outputs .. " recorded"
+function job_output(path, columns, description)
+  local cols = {}
+  for c in tostring(columns or ""):gmatch("[^,%s|]+") do table.insert(cols, c) end
+  table.insert(BOTTER.job.outputs, { path = trim(path), columns = cols, description = need(description, "the description") })
+  return "ok: output " .. #BOTTER.job.outputs .. " recorded" .. (#cols > 0 and (" with " .. #cols .. " columns") or "")
 end
 
---- Record one rule of the brief: a calculation, a limit, an order, a format, a tie-break, a decision. One rule per call, in the brief's own words where possible, with its numbers.
+local RULE_KINDS = { exact = true, judgement = true, hybrid = true }
+
+-- A rule's words, for spotting one recorded twice (case, punctuation and "(R3)" references ignored).
+local function words(text)
+  local set, n = {}, 0
+  for w in tostring(text):lower():gsub("%(r%d+%)", ""):gmatch("[%w_]+") do
+    if not set[w] then set[w], n = true, n + 1 end
+  end
+  return set, n
+end
+
+local function same_rule(a, b)
+  local wa, na = words(a)
+  local wb, nb = words(b)
+  if na == 0 or nb == 0 then return false end
+  local common = 0
+  for w in pairs(wa) do
+    if wb[w] then common = common + 1 end
+  end
+  return common / (na + nb - common) >= 0.8
+end
+
+--- Record one rule of the brief: a calculation, a limit, an order, a format, a tie-break, a decision. One rule per call, in the brief's own words where possible, with its numbers. A rule already recorded is not added again.
 ---@param text string  the rule
 ---@param source string  where the brief states it (file and section)
+---@param kind "exact"|"judgement"|"hybrid"  exact = arithmetic, dates, limits, joins, orders, formats (code does it); judgement = reading free text or images, wording, tone (the model does it); hybrid = the model reads facts that code then decides on
 ---@return string  the rule's id (R1, R2 ...)
-function job_rule(text, source)
+function job_rule(text, source, kind)
+  text = need(text, "the rule")
+  if not RULE_KINDS[kind] then
+    error("kind must be exact, judgement or hybrid")
+  end
+  source = trim(source)
+  for _, r in ipairs(BOTTER.job.rules) do
+    if same_rule(r.text, text) then
+      if source ~= "" and not r.source:lower():find(source:lower(), 1, true) then
+        r.source = r.source ~= "" and (r.source .. "; " .. source) or source -- the same rule, stated in another section
+      end
+      return "already recorded as " .. r.id .. " (not added again); " .. #BOTTER.job.rules .. " rules so far"
+    end
+  end
   local id = "R" .. (#BOTTER.job.rules + 1)
-  table.insert(BOTTER.job.rules, { id = id, text = need(text, "the rule"), source = trim(source) })
+  table.insert(BOTTER.job.rules, { id = id, text = text, source = source, kind = kind })
   return "ok: " .. id
 end
 
@@ -84,6 +123,56 @@ function job_examples(path, description)
   end
   table.insert(BOTTER.job.examples, { path = path, description = need(description, "the description") })
   return "ok: examples recorded"
+end
+
+--- Say that a section of the brief holds no rule for the agent (e.g. how to submit, the file list already recorded with job_input), so job_check stops asking for it.
+---@param section string  the section's heading, as the brief writes it
+---@param why string  why it holds no rule
+---@return string  confirmation
+function job_skip_section(section, why)
+  section = need(section, "the section")
+  need(why, "the reason")
+  table.insert(BOTTER.job.skipped, section)
+  return "ok: " .. section .. " skipped"
+end
+
+-- The brief: Markdown files in the folder and one level down (not the agent's own AGENT.md or Botter's files).
+function botter_brief_files()
+  local found = {}
+  local function look(dir, depth)
+    local ok, names = pcall(bot.fs.list, dir)
+    if not ok then return end
+    for _, name in ipairs(names) do
+      local path = dir == "." and name or (dir .. "/" .. name)
+      if name:sub(-1) == "/" then
+        if depth < 1 and name ~= "functions/" and name ~= "skills/" and name ~= ".botter/" and name ~= "agents/" then
+          look(path:sub(1, -2), depth + 1)
+        end
+      elseif name:lower():match("%.md$") and name ~= "AGENT.md" then
+        table.insert(found, path)
+      end
+    end
+  end
+  look(".", 0)
+  return found
+end
+
+-- Headings of the brief (## and ###) that no rule names in its source and that were not skipped.
+local function uncovered_sections()
+  local said = {}
+  for _, r in ipairs(BOTTER.job.rules) do table.insert(said, r.source:lower()) end
+  for _, sk in ipairs(BOTTER.job.skipped or {}) do table.insert(said, sk:lower()) end
+  local text = table.concat(said, "\n")
+  local out = {}
+  for _, file in ipairs(botter_brief_files()) do
+    for line in (bot.fs.read(file) .. "\n"):gmatch("([^\n]*)\n") do
+      local heading = line:match("^###?%s+(.-)%s*$")
+      if heading and heading ~= "" and not text:find(heading:lower(), 1, true) then
+        table.insert(out, file .. ": " .. heading)
+      end
+    end
+  end
+  return out
 end
 
 --- Record how success is measured: the score, the checks, what "done" means.
@@ -182,9 +271,15 @@ function design_model_step(name, purpose, rules)
       error(id .. " is not a recorded rule")
     end
   end
-  table.insert(BOTTER.design.model_steps, { name = need(name, "the name"), purpose = need(purpose, "the purpose"),
-    rules = rule_ids(rules) })
-  return "ok: model step planned"
+  name = need(name, "the name")
+  for i, s in ipairs(BOTTER.design.model_steps) do
+    if s.name == name then
+      table.remove(BOTTER.design.model_steps, i) -- planned again: the new plan replaces it
+      break
+    end
+  end
+  table.insert(BOTTER.design.model_steps, { name = name, purpose = need(purpose, "the purpose"), rules = rule_ids(rules) })
+  return "ok: model step " .. name .. " planned"
 end
 
 --- Add rules to a function or model step you already planned (when a rule is not implemented anywhere yet).
@@ -269,7 +364,34 @@ function job_problems()
   if #j.outputs == 0 then table.insert(p, "no output (job_output)") end
   if #j.rules == 0 then table.insert(p, "no rule (job_rule, one per rule of the brief)") end
   if #j.success == 0 then table.insert(p, "no success criterion (job_success)") end
+  local open = uncovered_sections()
+  if #open > 0 then
+    table.insert(p, "sections of the brief no rule comes from: " .. table.concat(open, "; ")
+      .. ". Read each one again and record its rules with job_rule, its source naming the section (e.g. \""
+      .. open[1]:match("^[^:]+") .. ": " .. open[1]:match(": (.*)$") .. "\"), or job_skip_section when it holds no rule for the agent")
+  end
   return #p > 0 and table.concat(p, "; ") or nil
+end
+
+local MAX_FUNCTIONS = 8
+
+-- Rules one function may implement: 7, more when the job has so many that 8 functions could not hold them.
+local function max_rules()
+  return math.max(7, math.ceil(#BOTTER.job.rules / (MAX_FUNCTIONS - 2)))
+end
+
+-- A column of an output comes from a function's returns, or a model step names it (a text the model writes).
+local function column_made(col)
+  local function names(text)
+    return (" " .. tostring(text or ""):lower():gsub("[^%w_]", " ") .. " "):find(" " .. col:lower() .. " ", 1, true)
+  end
+  for _, f in ipairs(BOTTER.design.functions) do
+    if names(f.returns) then return true end
+  end
+  for _, s in ipairs(BOTTER.design.model_steps) do
+    if names(s.purpose) then return true end
+  end
+  return false
 end
 
 -- What the design still lacks (nil when it can be built).
@@ -279,13 +401,20 @@ function design_problems()
   if #d.functions == 0 and #d.model_steps == 0 and #d.skills == 0 then
     table.insert(p, "no function, model step or skill")
   end
-  if #d.functions > 8 then
-    table.insert(p, #d.functions .. " functions: plan at most 8 (each is a tool the model sees on every request)")
+  if #d.functions > MAX_FUNCTIONS then
+    table.insert(p, #d.functions .. " functions: plan at most " .. MAX_FUNCTIONS
+      .. " (each is a tool the model sees on every request)")
   end
-  local covered, names = {}, {}
+  for _, f in ipairs(d.functions) do
+    if #f.rules > max_rules() then -- one function that does everything cannot be tested or fixed piece by piece
+      table.insert(p, f.name .. " implements " .. #f.rules .. " rules: at most " .. max_rules()
+        .. "; split it into functions of one calculation or decision each")
+    end
+  end
+  local covered, names, in_code = {}, {}, {}
   for _, f in ipairs(d.functions) do
     names[f.name] = true
-    for _, id in ipairs(f.rules) do covered[id] = true end
+    for _, id in ipairs(f.rules) do covered[id], in_code[id] = true, true end
   end
   for _, s in ipairs(d.model_steps) do
     for _, id in ipairs(s.rules) do covered[id] = true end
@@ -299,6 +428,16 @@ function design_problems()
   end
   if #missing > 0 then
     table.insert(p, "rules no function or model step implements: " .. table.concat(missing, ", "))
+  end
+  local exact = {} -- a model cannot do arithmetic, dates or orderings reliably: code must
+  for _, r in ipairs(j.rules) do
+    if covered[r.id] and not in_code[r.id] and (r.kind == "exact" or r.kind == "hybrid") then
+      table.insert(exact, r.id)
+    end
+  end
+  if #exact > 0 then
+    table.insert(p, "rules that are exact or hybrid but only a model step or skill covers: " .. table.concat(exact, ", ")
+      .. ": a function must implement them (a model step may read facts for them, not decide them)")
   end
   for _, f in ipairs(d.functions) do
     for used in f.uses:gmatch("[%w_]+") do
@@ -315,6 +454,14 @@ function design_problems()
     if file and not made then
       table.insert(p, "no function says it writes " .. o.path .. " (name the file in its purpose)")
     end
+    local missing_cols = {}
+    for _, c in ipairs(o.columns or {}) do
+      if not column_made(c) then table.insert(missing_cols, c) end
+    end
+    if #missing_cols > 0 then
+      table.insert(p, (o.path ~= "" and o.path or "the reply") .. ": no function returns (and no model step writes) "
+        .. table.concat(missing_cols, ", ") .. ": name each column in the returns of the function that computes it")
+    end
   end
   return #p > 0 and table.concat(p, "; ") or nil
 end
@@ -324,12 +471,22 @@ function job_markdown()
   local out = { "# Job", "", "Goal: " .. j.goal, "", "## Inputs" }
   for _, i in ipairs(j.inputs) do table.insert(out, "- " .. (i.path ~= "" and i.path or "(typed)") .. ": " .. i.description) end
   table.insert(out, "\n## Outputs")
-  for _, o in ipairs(j.outputs) do table.insert(out, "- " .. (o.path ~= "" and o.path or "(reply)") .. ": " .. o.description) end
+  for _, o in ipairs(j.outputs) do
+    table.insert(out, "- " .. (o.path ~= "" and o.path or "(reply)") .. ": "
+      .. (#(o.columns or {}) > 0 and ("columns " .. table.concat(o.columns, ",") .. ". ") or "") .. o.description)
+  end
   table.insert(out, "\n## Rules")
-  for _, r in ipairs(j.rules) do table.insert(out, r.id .. ". " .. r.text .. (r.source ~= "" and (" (" .. r.source .. ")") or "")) end
+  for _, r in ipairs(j.rules) do
+    table.insert(out, r.id .. ". " .. (r.kind and ("[" .. r.kind .. "] ") or "") .. r.text
+      .. (r.source ~= "" and (" (" .. r.source .. ")") or ""))
+  end
   if #j.edges > 0 then
     table.insert(out, "\n## Edge cases")
     for _, e in ipairs(j.edges) do table.insert(out, "- " .. e) end
+  end
+  if #(j.skipped or {}) > 0 then
+    table.insert(out, "\n## Sections of the brief without rules")
+    for _, sk in ipairs(j.skipped) do table.insert(out, "- " .. sk) end
   end
   if #j.examples > 0 then
     table.insert(out, "\n## Examples")
@@ -373,7 +530,7 @@ function job_check()
   return job_problems() or ("complete: " .. #BOTTER.job.rules .. " rules")
 end
 
---- Check the plan: rules no unit implements, too many functions, outputs nobody writes; or "complete". Call it before you reply.
+--- Check the plan: rules no unit implements, too many functions or rules per function, outputs or columns nobody makes; or "complete". Call it before you reply.
 ---@return string  the gaps, or "complete"
 function design_check()
   return design_problems() or "complete"

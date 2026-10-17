@@ -63,4 +63,4 @@ function test_days_between()
   assert(days_between("2026-03-01", "2026-02-28") == -1)
 end
 ```
-In tests, bot.fs.read reads files relative to the project folder (put sample data in functions/tests/), and writes, the network, commands and other agents are not available. Test the rules from the user's request, including the edge cases (empty data, a missing field, the last day of a month).
+In tests, bot.fs.read reads files relative to the project folder (put sample data in functions/tests/); bot.fs.write/append work but stay in memory (the folder is never changed; a later bot.fs.read of the same path in that test file sees what was written), so a function that writes output.csv is tested by reading output.csv back. The network, commands and other agents are not available. Use real ids and rows from the data files, never invented ones (user1, req1): look them up first. Test the rules from the user's request, including the edge cases (empty data, a missing field, the last day of a month).

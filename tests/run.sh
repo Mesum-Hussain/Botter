@@ -1057,15 +1057,21 @@ check "bot.test: reports scores" "$T/out" "score sums: 1/2"
 printf 'function add(a, b\n' >"$T/flws/functions/add.lua"
 flowrun fltest "functions/tests/add.lua"
 check "bot.test: a project that does not load fails, with the reason" "$T/out" "functions/add.lua:[0-9]+: error"
+printf -- '--- Save.\n---@param t string  text\nfunction save(t)\n  bot.fs.write("out/saved.csv", t)\n  bot.fs.append("out/saved.csv", "!")\nend\n' >"$T/flws/functions/add.lua"
+printf 'function test_save()\n  save("hi")\n  assert(bot.fs.exists("out/saved.csv"))\n  assert(bot.fs.read("./out/saved.csv") == "hi!", bot.fs.read("out/saved.csv"))\nend\n' >"$T/flws/functions/tests/add.lua"
+flowrun fltest "functions/tests/add.lua"
+check "bot.test: a test's writes stay in memory and read back" "$T/out" '^1/0$'
+[ ! -e "$T/flws/out/saved.csv" ] && pass "bot.test: a test never writes the folder" || fail "bot.test: a test never writes the folder"
 
 # ---------------------------------------------------------------------------
 section "Botter's build pipeline (FLOW.lua, scripted stub LLM)"
 rm -rf "$T/pipe" && mkdir -p "$T/pipe"
-printf 'Write an agent that adds a and b of each row of data.csv.\n' >"$T/pipe/brief.md"
+printf '# Adder\nWrite an agent that adds a and b of each row of data.csv.\n## Sums\nsum = a + b\n## Submission\nSend it in.\n' >"$T/pipe/brief.md"
 printf 'a,b\n1,2\n3,4\n' >"$T/pipe/data.csv"
 python3 - "$T/pipe.json" <<'PY'
 import json, sys
 test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
+invented = 'function test_add()\n  local row = "row7"\n  assert(add_row(1, 2) == 3, row)\nend\n'
 wrong = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a - b\nend\n'
 right = wrong.replace("a - b", "a + b")
 steps = [
@@ -1074,14 +1080,24 @@ steps = [
   {"tool": "job_goal", "args": {"text": "Add a and b of each row."}},
   {"tool": "job_input", "args": {"path": "data.csv", "description": "columns a, b"}},
   {"tool": "job_input", "args": {"path": "nope.csv", "description": "a file that is not there"}},
-  {"tool": "job_output", "args": {"path": "out.csv", "description": "one sum per row"}},
-  {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md"}},
+  {"tool": "job_output", "args": {"path": "out.csv", "columns": "sum", "description": "one sum per row"}},
+  {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md", "kind": "exact"}},
+  {"tool": "job_rule", "args": {"text": "Sum = a + b.", "source": "brief.md", "kind": "exact"}},
   {"tool": "job_success", "args": {"text": "every sum is right"}},
   {"text": "1 rule recorded"},
+  {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md: Sums", "kind": "exact"}},
+  {"tool": "job_skip_section", "args": {"section": "Submission", "why": "how to hand it in"}},
+  {"text": "sections done"},
   {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
   {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number",
-                                        "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
+                                        "purpose": "adds a and b; the caller writes out.csv", "rules": ""}},
+  {"tool": "design_model_step", "args": {"name": "adds", "purpose": "the model adds the numbers", "rules": "R1"}},
   {"text": "planned"},
+  {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number: the sum",
+                                        "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
+  {"text": "planned again"},
+  {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": invented}},
+  {"text": "tests written"},
   {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}},
   {"text": "tests written"},
   {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": wrong}},
@@ -1097,14 +1113,24 @@ stub_start --script "$T/pipe.json"
 printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/pipe/.env"
 (cd "$T/pipe" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the agent described in brief.md" >"$T/out" 2>"$T/err")
 check "pipeline: the lead hands the build over" "$T/err" "^Starting\.$"
-check "pipeline: the job is recorded and readable" "$T/pipe/.botter/job.md" "^R1\. sum = a \+ b \(brief.md\)$"
+check "pipeline: the job is recorded and readable" "$T/pipe/.botter/job.md" "^R1\. \[exact\] sum = a \+ b \(brief.md; brief.md: Sums\)$"
+check "pipeline: the analyst must account for every section of the brief" "$T/rec/requests.jsonl" "sections of the brief no rule comes from: brief.md: Sums; brief.md: Submission"
+check "pipeline: a section without rules is recorded as such" "$T/pipe/.botter/job.md" "^- Submission$"
+check "pipeline: a rule recorded twice is not added again" "$T/rec/requests.jsonl" "already recorded as R1"
+check_not "pipeline: the job holds no duplicate rule" "$T/pipe/.botter/job.md" "^R2\."
+check "pipeline: an exact rule left to the model is sent back" "$T/rec/requests.jsonl" "exact or hybrid but only a model step or skill covers: R1"
 check "pipeline: a recording tool checks on the spot" "$T/rec/requests.jsonl" "nope.csv does not exist"
 check "pipeline: the design is recorded" "$T/pipe/.botter/design.md" "^- add_row\(a number, b number\) -> number"
 check "pipeline: the analyst gets its role and only its tools" "$T/rec/requests.jsonl" "\"system\": \"You are Botter.s analyst.*\"tools\": \[[^]]*\"job_rule\""
-check "pipeline: the designer works from the pinned job" "$T/rec/requests.jsonl" "You are Botter.s designer.*What you must follow \(the job\):.*R1\. sum = a"
+check "pipeline: the designer works from the pinned job" "$T/rec/requests.jsonl" "You are Botter.s designer.*What you must follow \(the job\):.*R1\. \[exact\] sum = a"
 check "pipeline: tests are written before the code, by another worker" "$T/pipe/functions/tests/add_row.lua" "add_row\(1, 2\) == 3"
 check "pipeline: a failed check sends the task back with the failure" "$T/rec/requests.jsonl" "did not pass the check.*test_add FAILED"
 check "pipeline: the code passes its tests in the end" "$T/pipe/functions/add_row.lua" "return a \+ b"
+check "pipeline: the design check wants every output column made" "$T/rec/requests.jsonl" "out.csv: no function returns \(and no model step writes\) sum"
+check "pipeline: the job lists the output's columns" "$T/pipe/.botter/job.md" "^- out.csv: columns sum\. "
+check "pipeline: tests on invented ids are sent back" "$T/rec/requests.jsonl" "uses ids that no data file holds: row7"
+check "pipeline: the cost of each phase is logged" "$T/pipe/.botter/log.md" "^- cost of add_row: [0-9]+ calls, [0-9]+ input tokens"
+check "pipeline: the report says what the build cost" "$T/out" "^Model use for this build: [0-9]+ calls"
 check "pipeline: config.json is written by code" "$T/pipe/config.json" '"temperature": ?0'
 check "pipeline: the agent is built" "$T/out" "^Built .*pipe\.bot"
 check "pipeline: the report quotes what was measured" "$T/out" "^Functions passing their tests: 1/1\.$"
@@ -1117,6 +1143,68 @@ printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$
 check "pipeline: resume continues the build in .botter/" "$T/pipe/.botter/log.md" "^- resumed: continue the build"
 check "pipeline: finished tasks are not redone" "$T/out" "^Functions passing their tests: 1/1\.$"
 check_not "pipeline: the job is not studied again" "$T/rec/requests.jsonl" "You are Botter.s analyst"
+# a fix that breaks passing tests is undone; tests that stay red are set aside and the rest still builds
+for d in ex stuck noagent; do rm -rf "$T/$d" && mkdir -p "$T/$d" && printf 'a,b\n1,2\n3,4\n' >"$T/$d/data.csv"; done
+printf 'a,b,sum\n2,2,5\n' >"$T/ex/sample_expected.csv"
+python3 - "$T" <<'PY'
+import json, sys
+t = sys.argv[1]
+test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
+code = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a + b\nend\n'
+broken = code.replace("a + b", "a + b + 1")
+wrong = code.replace("a + b", "a * b")
+score = ('function score_examples()\n  local rows = bot.csv.parse(bot.fs.read("sample_expected.csv"))\n  local passed, bad = 0, {}\n'
+         '  for _, r in ipairs(rows) do\n    local got = add_row(tonumber(r.a), tonumber(r.b))\n'
+         '    if got == tonumber(r.sum) then passed = passed + 1 else table.insert(bad, r.a .. "+" .. r.b .. ": got " .. got) end\n'
+         '  end\n  return passed, #rows, table.concat(bad, "\\n")\nend\n')
+def job(examples):
+    j = [{"tool": "start_build", "args": {"request": "the adder"}}, {"text": "Starting."},
+         {"tool": "job_goal", "args": {"text": "Add a and b of each row."}},
+         {"tool": "job_input", "args": {"path": "data.csv", "description": "columns a, b"}},
+         {"tool": "job_output", "args": {"path": "out.csv", "columns": "sum", "description": "one sum per row"}},
+         {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief", "kind": "exact"}},
+         {"tool": "job_success", "args": {"text": "every sum is right"}}]
+    if examples:
+        j.append({"tool": "job_examples", "args": {"path": "sample_expected.csv", "description": "a, b and the expected sum"}})
+    return j + [{"text": "1 rule"},
+         {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
+         {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number: the sum",
+                                               "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
+         {"text": "planned"},
+         {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}}, {"text": "tests written"}]
+def write(path, content, said="written"):
+    return [{"tool": "fs_write", "args": {"path": path, "content": content}}, {"text": said}]
+agent = write("AGENT.md", "You add numbers with add_row.\n")
+ex = job(True) + write("functions/add_row.lua", code) + write("functions/tests/examples.lua", score)
+for _ in range(4):
+    ex += write("functions/add_row.lua", broken, "fixed")
+json.dump(ex + agent, open(t + "/ex.json", "w"))
+stuck = job(False)
+for _ in range(3):
+    stuck += write("functions/add_row.lua", wrong)
+stuck += [{"text": "test right"}]
+for _ in range(2):
+    stuck += write("functions/add_row.lua", wrong)
+json.dump(stuck + agent, open(t + "/stuck.json", "w"))
+json.dump(job(False) + write("functions/add_row.lua", code) + [{"text": "I wrote nothing"}] * 3, open(t + "/noagent.json", "w"))
+PY
+for d in ex stuck noagent; do
+    stub_start --script "$T/$d.json"
+    printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/$d/.env"
+    (cd "$T/$d" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the adder" >"$T/$d.out" 2>"$T/$d.err")
+    cp "$T/rec/requests.jsonl" "$T/$d.requests"
+done
+check "pipeline: a fix that breaks a passing test is sent back" "$T/ex.requests" "your change broke tests that passed before:.*add_row.lua: test_add"
+check "pipeline: a fix that still breaks tests is undone" "$T/ex/.botter/log.md" "^- fix examples 1: undone \(it broke passing tests\)"
+check "pipeline: the undone fix leaves the code as it was" "$T/ex/functions/add_row.lua" "^  return a \+ b$"
+check "pipeline: the report quotes the examples score" "$T/ex.out" "^Score on the brief's examples: 0/1\.$"
+check "pipeline: the agent with a low score still builds" "$T/ex.out" "^Built .*ex\.bot"
+check "pipeline: tests that stay red are set aside" "$T/stuck/.botter/failing-tests/add_row.lua" "test_add"
+check "pipeline: the report lists the set-aside tests" "$T/stuck.out" "functions/tests/add_row.lua failed .*moved to .botter/failing-tests/"
+check "pipeline: the rest of the agent still builds" "$T/stuck.out" "^Built .*stuck\.bot"
+check "pipeline: the report counts the failing function" "$T/stuck.out" "^Functions passing their tests: 0/1\.$"
+check "pipeline: no AGENT.md, no agent" "$T/noagent.out" "AGENT.md was not written.*nothing was built"
+[ ! -e "$T/noagent/noagent.bot" ] && pass "pipeline: nothing is built without AGENT.md" || fail "pipeline: nothing is built without AGENT.md"
 rm -rf "$T/haiku" && mkdir -p "$T/haiku"
 python3 - "$T/haiku.json" <<'PY'
 import json, sys
@@ -1125,8 +1213,8 @@ steps = [
   {"tool": "start_build", "args": {"request": "a haiku agent"}}, {"text": "Starting."},
   {"tool": "job_goal", "args": {"text": "Write haiku on request."}},
   {"tool": "job_input", "args": {"path": "", "description": "a topic the user types"}},
-  {"tool": "job_output", "args": {"path": "", "description": "a haiku in the reply"}},
-  {"tool": "job_rule", "args": {"text": "three lines of 5, 7 and 5 syllables", "source": "request"}},
+  {"tool": "job_output", "args": {"path": "", "columns": "", "description": "a haiku in the reply"}},
+  {"tool": "job_rule", "args": {"text": "three lines of 5, 7 and 5 syllables", "source": "request", "kind": "judgement"}},
   {"tool": "job_success", "args": {"text": "the form is right"}}, {"text": "1 rule"},
   {"tool": "design_kind", "args": {"kind": "chat", "why": "talks with a person"}},
   {"tool": "design_skill", "args": {"name": "haiku", "description": "Writes a haiku. Use it when the user asks for a poem.",
