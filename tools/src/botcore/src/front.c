@@ -157,6 +157,7 @@ int front_init(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--run")) { /* batch: tasks in, results out, nobody to ask */
         g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
         dup2(STDERR_FILENO, STDOUT_FILENO); /* stdout carries the results only; notes go to stderr */
+        setvbuf(stdout, NULL, _IOLBF, 0);   /* in order with stderr, not all at exit */
         g_task = argc > 2 ? argv[2] : NULL;
         g_on = F_RUN;
         return 1;

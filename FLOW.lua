@@ -939,7 +939,7 @@ function flow(input)
   })
   if not ok then
     if tostring(reply):find("HTTP 429", 1, true) then
-      return "The model refused more requests (HTTP 429: quota or rate limit). Try again when the quota is back."
+      error("The model refused more requests (HTTP 429: quota or rate limit). Try again when the quota is back.", 0)
     end
     error(reply, 0)
   end
@@ -949,7 +949,12 @@ function flow(input)
     local request = input
     if #history > 0 then request = table.concat(history, "\n") .. "\nUser: " .. input end
     local ok, result = pcall(build, request, BOTTER.resume)
-    reply = ok and result or ("The build stopped: " .. tostring(result) .. "\nWhat was done so far is in .botter/.")
+    if not ok then -- an error, not a reply: --run exits with status 1
+      table.insert(history, "User: " .. first_lines(input, 5))
+      table.insert(history, "Botter: the build stopped: " .. first_lines(tostring(result), 3))
+      error("The build stopped: " .. tostring(result) .. "\nWhat was done so far is in .botter/.", 0)
+    end
+    reply = result
   end
   table.insert(history, "User: " .. first_lines(input, 5))
   table.insert(history, "Botter: " .. first_lines(reply, 5))

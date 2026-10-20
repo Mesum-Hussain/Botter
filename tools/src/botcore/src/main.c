@@ -1207,6 +1207,8 @@ static void show_mode(void)
 }
 
 /* One agent turn: send `text`, run any tool calls, print the answer. CHAT_*; the reply into *out if given. */
+static int g_batch_failed; /* --run: a task failed (the exit status says so) */
+
 static int run_turn(chat_t *chat, const char *text, char **out)
 {
     char *reply = NULL, *err = NULL;
@@ -1238,6 +1240,7 @@ static int run_turn(chat_t *chat, const char *text, char **out)
     free(sent);
     front_event("idle", (char *)NULL);
     term_clear_interrupt();
+    g_batch_failed |= r != CHAT_OK && front_batch();
 
     if (chat->dropped != g_last_dropped) {
         printf(ANSI_DIM "(context full: %d oldest messages dropped)" ANSI_RESET "\n",
@@ -1639,5 +1642,5 @@ int main(int argc, char **argv)
         print_usage();
     }
     chat_free(&chat);
-    return 0;
+    return g_batch_failed;
 }

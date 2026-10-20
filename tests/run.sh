@@ -261,7 +261,8 @@ check_not "streaming fallback: reasoning is not printed" "$T/out" "pondering|<th
 stub_start --think --busy 2
 drive "$T/on.bot" "$T/ws"
 check "busy endpoint: a 503 (high demand) is retried and the answer arrives" "$T/out" "Hello there, streamed reply\\."
-check_not "busy endpoint: no error is shown when a retry succeeds" "$T/out" "HTTP 503"
+check "busy endpoint: each wait is announced (a silent wait looks like a hang)" "$T/out" "The model is busy \\(HTTP 503\\): trying again in 2 s \\(1 of 5\\)"
+check_not "busy endpoint: no error is shown when a retry succeeds" "$T/out" "Error"
 
 # Session key cache (kernel keyring, own namespace): 2nd run reconnects without asking
 if [ -r /proc/keys ]; then
@@ -907,7 +908,7 @@ mkflow() { # mkflow NAME FLOW_LUA_TEXT: an agent whose FLOW.lua is that text; bu
 }
 flowrun() { # flowrun NAME TASK: one --run task in $T/flws
     printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/flws/.env"
-    (cd "$T/flws" && timeout 60 "$T/$1.bot" --run "$2" >"$T/out" 2>"$T/err")
+    (cd "$T/flws" && timeout 60 "$T/$1.bot" --run "$2" >"$T/out" 2>"$T/err"; echo "exit $?" >>"$T/err")
 }
 mkdir -p "$T/flws"
 mkflow flw 'function flow(input)
@@ -920,6 +921,7 @@ tool_call fs_write '{"path": "out/a.txt", "content": "made by a worker"}'
 flowrun flw hello
 check "FLOW.lua: flow(input) answers the job" "$T/out" "^flow got: done$"
 check "FLOW.lua: bot.say shows progress (stderr in batch mode)" "$T/err" "^starting hello$"
+check "--run: every task done, exit status 0" "$T/err" "^exit 0$"
 check "bot.worker: the task is the worker's message" "$T/rec/user.txt" "^do: hello$"
 check "bot.worker: the worker is told it is one" "$T/rec/system.txt" "You are a worker: you do one task"
 check "bot.worker: the pinned context reaches it" "$T/rec/system.txt" "THE-SPEC-123"
@@ -947,6 +949,7 @@ mkflow flerr 'function flow(input)
 end'
 flowrun flerr go
 check "FLOW.lua: an error in the flow is reported" "$T/err" "boom in the flow"
+check "--run: a task that failed makes the exit status 1" "$T/err" "^exit 1$"
 mkflow flnone 'function helper() end'
 check "FLOW.lua: one without flow() is a build error" "$T/build.log" "FLOW.lua: error: it defines no global function flow"
 mkflow fldoc '--- Not a tool.
@@ -1145,7 +1148,7 @@ PY
 for d in ex stuck noagent; do
     stub_start --script "$T/$d.json"
     printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/$d/.env"
-    (cd "$T/$d" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the adder" >"$T/$d.out" 2>"$T/$d.err")
+    (cd "$T/$d" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the adder" >"$T/$d.out" 2>"$T/$d.err"; echo "exit $?" >>"$T/$d.err")
     cp "$T/rec/requests.jsonl" "$T/$d.requests"
 done
 check "pipeline: a fix that breaks a passing test is sent back" "$T/ex.requests" "your change broke tests that passed before:.*add_row.lua: test_add"
@@ -1162,7 +1165,9 @@ check "pipeline: tests that stay red are set aside" "$T/stuck/.botter/failing-te
 check "pipeline: the report lists the set-aside tests" "$T/stuck.out" "functions/tests/add_row.lua failed .*moved to .botter/failing-tests/"
 check "pipeline: the rest of the agent still builds" "$T/stuck.out" "^Built .*stuck\.bot"
 check "pipeline: the report counts the failing function" "$T/stuck.out" "^Functions passing their tests: 0/1\.$"
-check "pipeline: no AGENT.md, no agent" "$T/noagent.out" "AGENT.md was not written.*nothing was built"
+check "pipeline: no AGENT.md, no agent" "$T/noagent.err" "AGENT.md was not written.*nothing was built"
+check "pipeline: a stopped build exits with status 1" "$T/noagent.err" "^exit 1$"
+check "pipeline: a finished build exits with status 0" "$T/ex.err" "^exit 0$"
 [ ! -e "$T/noagent/noagent.bot" ] && pass "pipeline: nothing is built without AGENT.md" || fail "pipeline: nothing is built without AGENT.md"
 rm -rf "$T/haiku" && mkdir -p "$T/haiku"
 python3 - "$T/haiku.json" <<'PY'

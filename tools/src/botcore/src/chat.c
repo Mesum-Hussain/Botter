@@ -875,13 +875,17 @@ static int retry_hint_s(const char *body)
     return 0;
 }
 
-/* Wait 2, 4, 8 ... s, or as long as the endpoint asked (at most 2 minutes). */
-static int busy_wait(int attempt, const char *body)
+/* Wait 2, 4, 8 ... s, or as long as the endpoint asked (at most 2 minutes), and say so: a long silent
+ * wait looks like a hang. */
+static int busy_wait(int attempt, int status, const char *body)
 {
     int ms = 2000 << attempt, hint = retry_hint_s(body) * 1000;
     if (hint > ms) {
         ms = hint > 120000 ? 120000 : hint;
     }
+    fprintf(stderr, "The model is %s (HTTP %d): trying again in %d s (%d of %d)\n",
+            status == 429 ? "out of quota or rate-limited" : "busy", status, (ms + 999) / 1000, attempt + 1,
+            CHAT_BUSY_RETRIES);
     for (int t = 0; t < ms; t += 200) {
         if (term_interrupted()) {
             return -1;
@@ -1044,7 +1048,8 @@ static int send_turn(chat_t *c, const char *user, char **reply, char **err)
             goto fail;
         }
         if (busy_status(r.status) && busy < CHAT_BUSY_RETRIES) {
-            int stop = busy_wait(busy++, r.body);
+            int stop = busy_wait(busy, r.status, r.body);
+            busy++;
             http_resp_free(&r);
             stream_free(&st);
             if (stop < 0) {
