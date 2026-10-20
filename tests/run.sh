@@ -1068,9 +1068,11 @@ section "Botter's build pipeline (FLOW.lua, scripted stub LLM)"
 rm -rf "$T/pipe" && mkdir -p "$T/pipe"
 printf '# Adder\nWrite an agent that adds a and b of each row of data.csv.\n## Sums\nsum = a + b\n## Submission\nSend it in.\n' >"$T/pipe/brief.md"
 printf 'a,b\n1,2\n3,4\n' >"$T/pipe/data.csv"
+printf 'x\n1\n' >"$T/pipe/extra.csv"
 python3 - "$T/pipe.json" <<'PY'
 import json, sys
 test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
+idle = 'function test_add()\n  local result = 3\n  assert(result == 3, "made up")\nend\n'
 invented = 'function test_add()\n  local row = "row7"\n  assert(add_row(1, 2) == 3, row)\nend\n'
 wrong = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a - b\nend\n'
 right = wrong.replace("a - b", "a + b")
@@ -1087,6 +1089,7 @@ steps = [
   {"text": "1 rule recorded"},
   {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md: Sums", "kind": "exact"}},
   {"tool": "job_skip_section", "args": {"section": "Submission", "why": "how to hand it in"}},
+  {"tool": "job_skip_file", "args": {"path": "extra.csv", "why": "not used by the adder"}},
   {"text": "sections done"},
   {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
   {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number",
@@ -1096,12 +1099,15 @@ steps = [
   {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number: the sum",
                                         "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
   {"text": "planned again"},
+  {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": idle}},
+  {"text": "tests written"},
   {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": invented}},
   {"text": "tests written"},
   {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}},
   {"text": "tests written"},
   {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": wrong}},
   {"text": "written"},
+  {"tool": "run_tests", "args": {"path": "functions/tests/add_row.lua"}},
   {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": right}},
   {"text": "fixed"},
   {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You add numbers. For each line, call add_row with a and b and reply with the sum.\n"}},
@@ -1129,6 +1135,10 @@ check "pipeline: the code passes its tests in the end" "$T/pipe/functions/add_ro
 check "pipeline: the design check wants every output column made" "$T/rec/requests.jsonl" "out.csv: no function returns \(and no model step writes\) sum"
 check "pipeline: the job lists the output's columns" "$T/pipe/.botter/job.md" "^- out.csv: columns sum\. "
 check "pipeline: tests on invented ids are sent back" "$T/rec/requests.jsonl" "uses ids that no data file holds: row7"
+check "pipeline: a test that never calls its function is sent back" "$T/rec/requests.jsonl" "test_add never calls add_row: every test_ function calls add_row"
+check "pipeline: every data file must be accounted for" "$T/rec/requests.jsonl" "data files the job does not mention: extra.csv"
+check "pipeline: a data file the agent does not use is recorded as such" "$T/pipe/.botter/job.md" "^- extra.csv: not used by the adder$"
+check "pipeline: workers run the tests with run_tests" "$T/rec/requests.jsonl" "0 passed, 1 failed.*test_add FAILED"
 check "pipeline: the cost of each phase is logged" "$T/pipe/.botter/log.md" "^- cost of add_row: [0-9]+ calls, [0-9]+ input tokens"
 check "pipeline: the report says what the build cost" "$T/out" "^Model use for this build: [0-9]+ calls"
 check "pipeline: config.json is written by code" "$T/pipe/config.json" '"temperature": ?0'
@@ -1153,10 +1163,8 @@ test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
 code = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a + b\nend\n'
 broken = code.replace("a + b", "a + b + 1")
 wrong = code.replace("a + b", "a * b")
-score = ('function score_examples()\n  local rows = bot.csv.parse(bot.fs.read("sample_expected.csv"))\n  local passed, bad = 0, {}\n'
-         '  for _, r in ipairs(rows) do\n    local got = add_row(tonumber(r.a), tonumber(r.b))\n'
-         '    if got == tonumber(r.sum) then passed = passed + 1 else table.insert(bad, r.a .. "+" .. r.b .. ": got " .. got) end\n'
-         '  end\n  return passed, #rows, table.concat(bad, "\\n")\nend\n')
+solver = ('--- Decide one case.\n---@param case table  the case\n---@return table  the answers\n'
+          'function solve_case(case)\n  return { sum = add_row(tonumber(case.a), tonumber(case.b)) }\nend\n')
 def job(examples):
     j = [{"tool": "start_build", "args": {"request": "the adder"}}, {"text": "Starting."},
          {"tool": "job_goal", "args": {"text": "Add a and b of each row."}},
@@ -1166,16 +1174,21 @@ def job(examples):
          {"tool": "job_success", "args": {"text": "every sum is right"}}]
     if examples:
         j.append({"tool": "job_examples", "args": {"path": "sample_expected.csv", "description": "a, b and the expected sum"}})
-    return j + [{"text": "1 rule"},
+    design = [{"text": "1 rule"},
          {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
          {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number: the sum",
                                                "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
-         {"text": "planned"},
+         {"text": "planned"}]
+    if examples:  # the examples hold answers: the design check asks for solve_case
+        design += [{"tool": "design_function", "args": {"name": "solve_case", "params": "case table", "returns": "table {sum}",
+                                                         "purpose": "decides one case with add_row", "rules": "", "uses": "add_row"}},
+                   {"text": "planned"}]
+    return j + design + [
          {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}}, {"text": "tests written"}]
 def write(path, content, said="written"):
     return [{"tool": "fs_write", "args": {"path": path, "content": content}}, {"text": said}]
 agent = write("AGENT.md", "You add numbers with add_row.\n")
-ex = job(True) + write("functions/add_row.lua", code) + write("functions/tests/examples.lua", score)
+ex = job(True) + write("functions/add_row.lua", code) + write("functions/solve_case.lua", solver)
 for _ in range(4):
     ex += write("functions/add_row.lua", broken, "fixed")
 json.dump(ex + agent, open(t + "/ex.json", "w"))
@@ -1198,6 +1211,11 @@ check "pipeline: a fix that breaks a passing test is sent back" "$T/ex.requests"
 check "pipeline: a fix that still breaks tests is undone" "$T/ex/.botter/log.md" "^- fix examples 1: undone \(it broke passing tests\)"
 check "pipeline: the undone fix leaves the code as it was" "$T/ex/functions/add_row.lua" "^  return a \+ b$"
 check "pipeline: the report quotes the examples score" "$T/ex.out" "^Score on the brief's examples: 0/1\.$"
+check "pipeline: examples with answers need solve_case in the design" "$T/ex.requests" "sample_expected.csv holds 1 worked examples with the expected sum: plan solve_case\(case table\)"
+check "pipeline: Botter writes the examples scorer itself" "$T/ex/functions/tests/examples.lua" "^-- Botter wrote this file from sample_expected.csv"
+check "pipeline: the scorer compares the answer columns" "$T/ex/functions/tests/examples.lua" '^local SCORED = \{ "sum" \}'
+check "pipeline: solve_case is written against Botter's scorer" "$T/ex.requests" "You are Botter.s coder. You write solve_case\(case\)"
+check "pipeline: the report gives the right answers per column" "$T/ex.out" "^Right per answer \(Botter.s own comparison with the expected answers\): sum 0/1\.$"
 check "pipeline: the agent with a low score still builds" "$T/ex.out" "^Built .*ex\.bot"
 check "pipeline: tests that stay red are set aside" "$T/stuck/.botter/failing-tests/add_row.lua" "test_add"
 check "pipeline: the report lists the set-aside tests" "$T/stuck.out" "functions/tests/add_row.lua failed .*moved to .botter/failing-tests/"

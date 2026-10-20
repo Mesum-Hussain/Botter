@@ -144,3 +144,78 @@ function botter_reads_answer_key(files)
   end
   return leaks
 end
+
+--- Run the tests of the project's functions and see the result: which tests pass, which fail and why, and any score. The shell cannot run them (it has no bot module and does not load the functions): use this.
+---@param path string?  a test file (e.g. functions/tests/add_row.lua) or folder; default: every test
+---@return string  the test report
+function run_tests(path)
+  local r = bot.test(path ~= "" and path or nil)
+  local lines, n = {}, 0
+  for line in r.report:gmatch("[^\n]+") do
+    n = n + 1
+    if n > 60 then
+      table.insert(lines, "...")
+      break
+    end
+    table.insert(lines, line)
+  end
+  return r.passed .. " passed, " .. r.failed .. " failed\n" .. table.concat(lines, "\n")
+end
+
+-- A column holds free text (an explanation, a message) when most of its values run to 6 words or more:
+-- such text is the model's judgement, compared by nobody.
+local function free_text(rows, col)
+  local long, filled = 0, 0
+  for _, r in ipairs(rows) do
+    local v = tostring(r[col] or "")
+    if v:find("%S") then
+      filled = filled + 1
+      local words = 0
+      for _ in v:gmatch("%S+") do words = words + 1 end
+      if words >= 6 then long = long + 1 end
+    end
+  end
+  return filled > 0 and long * 2 >= filled
+end
+
+-- Worked examples that are CSV rows holding a case's fields and its expected answers: for each such file,
+-- {path, id (the first column that is not an answer), answers (columns of an output that no input holds:
+-- removed from the case), scored (answers compared, free text left out), count}. Botter scores the agent on these by code.
+function botter_answer_examples()
+  local outputs = {}
+  for _, o in ipairs(BOTTER.job.outputs) do
+    for _, c in ipairs(o.columns or {}) do outputs[c] = true end
+  end
+  for _, i in ipairs(BOTTER.job.inputs) do -- a column an input holds too (an id) is a case field, not an answer
+    if i.path:match("%.csv$") and bot.fs.exists(i.path) then
+      local ok, raw = pcall(bot.csv.parse, bot.fs.read(i.path):match("^[^\n]*"), { header = false })
+      for _, col in ipairs(ok and raw[1] or {}) do outputs[col] = nil end
+    end
+  end
+  local paths, seen, found = {}, {}, {}
+  for _, e in ipairs(BOTTER.job.examples) do table.insert(paths, e.path) end
+  local ok, files = pcall(botter_example_files)
+  for _, p in ipairs(ok and files or {}) do table.insert(paths, p) end
+  for _, path in ipairs(paths) do
+    path = path:gsub("^%./", "")
+    if not seen[path] and path:match("%.csv$") and bot.fs.exists(path) then
+      seen[path] = true
+      local text = bot.fs.read(path)
+      local okh, raw = pcall(bot.csv.parse, text, { header = false })
+      local okr, rows = pcall(bot.csv.parse, text)
+      if okh and okr and raw[1] and #rows > 0 then
+        local ex = { path = path, answers = {}, scored = {}, count = #rows }
+        for _, col in ipairs(raw[1]) do
+          if outputs[col] then
+            table.insert(ex.answers, col)
+            if not free_text(rows, col) then table.insert(ex.scored, col) end
+          elseif not ex.id then
+            ex.id = col
+          end
+        end
+        if #ex.scored > 0 and ex.id then table.insert(found, ex) end
+      end
+    end
+  end
+  return found
+end

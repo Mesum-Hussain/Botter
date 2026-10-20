@@ -13,7 +13,7 @@ local DIR = ".botter"
 local TRIES = 3            -- attempts per task before the stuck policy
 local SCORE_ROUNDS = 5     -- fix rounds on the examples score
 local READ = { "fs_list", "fs_read", "shell_exec", "note", "recall" }
-local CODE = { "fs_list", "fs_read", "shell_exec", "fs_write", "fs_edit", "note", "recall" }
+local CODE = { "fs_list", "fs_read", "shell_exec", "fs_write", "fs_edit", "run_tests", "note", "recall" }
 
 local history = {} -- the last exchanges with the person, for the lead
 
@@ -108,7 +108,7 @@ end
 
 local ANALYST = [[You are Botter's analyst. You read a request, the brief and the data in the project folder, and you record the job precisely with the job_ tools, so that others can build the agent from your record alone.
 - fs_list the folder (and its sub-folders). Read every brief in full (README, problem statement, notes). Read every data file with fs_read: big CSV files come back as a profile (rows, columns, types, values).
-- Record: job_goal once; job_input for every input file with its key columns; job_output for every output with its exact column names in order and their formats; job_rule for EVERY rule of the brief, once each, with its numbers and its exact wording (formulas, limits, priorities, tie-breaks, rounding, date handling, allowed values) and its kind (exact, judgement or hybrid), its source naming the file and the section heading; job_edge for each special case; job_examples for any file or text of worked examples or expected answers; job_success for how the result is judged.
+- Record: job_goal once; job_input for every input file with its key columns; job_output for every output with its exact column names in order and their formats; job_rule for EVERY rule of the brief, once each, with its numbers and its exact wording (formulas, limits, priorities, tie-breaks, rounding, date handling, allowed values) and its kind (exact, judgement or hybrid), its source naming the file and the section heading; job_edge for each special case; job_examples for any file or text of worked examples or expected answers; job_success for how the result is judged. Every data file next to the inputs is either an input, examples, or job_skip_file with why the agent does not need it.
 - Go through the brief section by section: every section either gives rules (record them) or holds none for the agent (job_skip_section, with why). A rule you leave out will be missing from the agent.
 - Do not write any file. When everything is recorded, call job_check and fill what it reports, then reply with one line: how many rules you recorded.]]
 
@@ -117,7 +117,7 @@ local function understand(request)
   local ok, why = attempt("understand", {
     system = ANALYST,
     task = "The request: " .. request .. "\n\nStudy the folder and record the job.",
-    tools = list(READ, { "job_goal", "job_input", "job_output", "job_rule", "job_examples", "job_success", "job_edge", "job_skip_section", "job_check" }),
+    tools = list(READ, { "job_goal", "job_input", "job_output", "job_rule", "job_examples", "job_success", "job_edge", "job_skip_section", "job_skip_file", "job_check" }),
     writes = {},
   }, function() return job_problems() end)
   save()
@@ -136,6 +136,7 @@ local DESIGNER = [[You are Botter's designer. From the job below you plan the ag
 - At most 8 functions, each implementing at most 7 rules. Plain parameters (ids, dates, numbers), not whole tables, so each can be tested alone.
 - Every column of every output must come from somewhere: name it in the returns of the function that computes it (e.g. "table {amount_safe_to_pay, affordability_status}"), or in the purpose of the model step that writes it.
 - When the worked examples are input rows with their expected answers in a file of their own (e.g. sample_requests.csv beside requests.csv), the examples' cases are NOT in the input file: functions must take the case's own fields (user id, date, amount ...), not look the case up by its id in the input file, so the examples run through the same code. Only tests may read the examples file.
+- When the examples give each case's expected answers in columns (design_check names the file and the columns), plan solve_case(case table) -> table {those columns}: it decides one case from the case's fields (case.user_id, case.request_date ... strings as in the CSV) by calling the other functions, and returns every answer column code computes. The agent calls it once per case; Botter scores it on every example.
 - For a batch agent over records (CSV in, CSV out): one input line is one case; a function gathers that case's facts from the data by its fields; the model reads what needs reading (messages, images); functions decide by the rules and append the result row; a last function writes the final output file in the required order and columns.
 - Write no file. When the plan is complete, reply with one line.]]
 
@@ -187,12 +188,13 @@ local TESTER = [[You are Botter's tester. You write the tests for ONE function b
 - Use only real cases: ids, dates and rows that exist in the data files (look them up with fs_read, or shell_exec with grep). Never invent ids such as user1 or req1: the check rejects ids no data file holds.
 - When the job has worked examples with expected answers, test against them first (their cases may exist only in the examples file: pass the example row's fields to the function): where this function's result can be read from an example's expected fields, take the expected value from there (the test may read the example file). Otherwise work out the expected values BY HAND from the rules, and show the working in a comment above each assert.
 - Write global test_ functions with assert(value == expected, "what was expected and why"); compare numbers with a tolerance when the brief rounds. Test the normal case, each rule the function implements, and the edge cases.
-- Write only the test file. Do not write the function.]]
+- Every test_ function calls the function under test and checks what IT returns. A test that builds a result itself and checks that proves nothing: the check rejects it.
+- Write only the test file. Do not write the function. run_tests(path) runs it (it fails until the function exists; it must load); the shell cannot run Lua tests.]]
 
 local CODER = [[You are Botter's coder. You write ONE Lua function of the agent so that its tests pass, implementing the brief's rules exactly.
 - Read the test file first, then the data it uses. Write the function in the file you are given, with its --- doc comment (what it does and when the model calls it, ---@param for every parameter, ---@return).
 - Implement every rule named in the design for this function, the general rule, never the test's numbers: the function must work for cases nobody has seen. No stubs, no placeholder values, no copying expected answers.
-- After writing, the build runs the tests; you see their result in the write's Lua check and in the next task if they fail.]]
+- run_tests(path) runs the tests and shows what fails; the shell cannot (it has no bot module and does not load the functions). Run them after each change until they pass.]]
 
 local function snapshot(paths)
   local snap = {}
@@ -206,7 +208,106 @@ local function put_back(snap)
   end
 end
 
-local function test_file(f) return "functions/tests/" .. f.name .. ".lua" end
+-- ---- the examples score, written by code ---------------------------------------------------------
+-- When the examples are CSV rows with the expected answers in columns, Botter writes the scorer itself:
+-- run 17's model-written scorer only checked that nothing crashed, so a stub that answered the same for
+-- every case scored 25/25 (really 0/25). The model writes solve_case; it never writes its own grader.
+
+local EXAMPLES = "functions/tests/examples.lua"
+
+local function answer_examples()
+  return botter_answer_examples()[1]
+end
+
+local SCORER_CODE = [[
+-- Botter wrote this file from %s, the brief's worked examples: it scores solve_case on every example,
+-- comparing %s. It is Botter's measure of the agent, not the agent's code: do not edit it.
+local FILE = %q
+local ID = %q
+local ANSWERS = { %s } -- the expected answers: removed from the case solve_case gets
+local SCORED = { %s }  -- the answers compared
+
+local function text(v)
+  if v == nil then return "" end
+  if type(v) == "number" then return string.format("%%.10g", v) end
+  return (tostring(v):gsub("^%%s+", ""):gsub("%%s+$", ""))
+end
+
+-- Same value: equal text, or the same parts (split at | ; : and spaces) with numbers equal to the cent.
+local function same(got, want)
+  got, want = text(got), text(want)
+  if got == want then return true end
+  local g, w = {}, {}
+  for t in got:gmatch("[^|;:%%s]+") do g[#g + 1] = t end
+  for t in want:gmatch("[^|;:%%s]+") do w[#w + 1] = t end
+  if #g ~= #w or #g == 0 then return false end
+  for i = 1, #g do
+    local x, y = tonumber(g[i]), tonumber(w[i])
+    if x and y then
+      if math.abs(x - y) > math.max(0.011, math.abs(y) * 1e-4) then return false end
+    elseif g[i] ~= w[i] then
+      return false
+    end
+  end
+  return true
+end
+
+function score_examples()
+  local rows = bot.csv.parse(bot.fs.read(FILE))
+  local passed, lines, right = 0, {}, {}
+  for _, c in ipairs(SCORED) do right[c] = 0 end
+  for i, row in ipairs(rows) do
+    local case = {}
+    for k, v in pairs(row) do case[k] = v end
+    for _, c in ipairs(ANSWERS) do case[c] = nil end
+    local id = text(row[ID] ~= "" and row[ID] or ("row " .. i))
+    local ok, got = pcall(solve_case, case)
+    if not ok then
+      lines[#lines + 1] = id .. ": ERROR " .. tostring(got)
+    elseif type(got) ~= "table" then
+      lines[#lines + 1] = id .. ": ERROR solve_case returned " .. type(got) .. ", not a table"
+    else
+      local diff = {}
+      for _, c in ipairs(SCORED) do
+        if same(got[c], row[c]) then
+          right[c] = right[c] + 1
+        else
+          diff[#diff + 1] = c .. ": got " .. text(got[c]) .. ", expected " .. text(row[c])
+        end
+      end
+      if #diff == 0 then passed = passed + 1 else lines[#lines + 1] = id .. ": " .. table.concat(diff, "; ") end
+    end
+  end
+  local fields = {}
+  for _, c in ipairs(SCORED) do fields[#fields + 1] = c .. " " .. right[c] .. "/" .. #rows end
+  return passed, #rows, "right per answer: " .. table.concat(fields, ", ") .. "\n" .. table.concat(lines, "\n")
+end
+]]
+
+local function lua_list(values)
+  local out = {}
+  for _, v in ipairs(values) do table.insert(out, string.format("%q", v)) end
+  return table.concat(out, ", ")
+end
+
+-- The scorer's source for these answer examples (see botter_answer_examples).
+function botter_examples_scorer(ex)
+  return string.format(SCORER_CODE, ex.path, table.concat(ex.scored, ", "), ex.path, ex.id,
+    lua_list(ex.answers), lua_list(ex.scored))
+end
+
+-- Write the scorer for solve_case; returns the examples it scores, or nil when they are not answer columns.
+local function write_examples_scorer()
+  local ex = answer_examples()
+  if not ex then return nil end
+  bot.fs.write(EXAMPLES, botter_examples_scorer(ex))
+  return ex
+end
+
+local function test_file(f)
+  if f.name == "solve_case" and answer_examples() then return EXAMPLES end
+  return "functions/tests/" .. f.name .. ".lua"
+end
 local function code_file(f) return "functions/" .. f.name .. ".lua" end
 
 -- Errors loading the project or the tests, else nil.
@@ -258,11 +359,29 @@ function botter_invented_ids(path)
   return missing
 end
 
+-- test_ functions that never call the function under test: run 17's tests built a result themselves
+-- and checked that, so a function that ignored its inputs passed them.
+function botter_tests_without_call(path, name)
+  local src = bot.fs.read(path)
+  local starts, out = {}, {}
+  for pos, test in src:gmatch("()function%s+(test_[%w_]*)%s*%(") do table.insert(starts, { pos = pos, name = test }) end
+  for i, t in ipairs(starts) do
+    local body = src:sub(t.pos, (starts[i + 1] and starts[i + 1].pos or #src + 1) - 1):gsub("^[^\n]*", "")
+    if not body:find(name .. "%s*%(") then table.insert(out, t.name) end
+  end
+  return out
+end
+
 local function check_tests(f)
   return function()
     local path = test_file(f)
     if not bot.fs.exists(path) then return path .. " was not written" end
     if not bot.fs.read(path):find("function test_") then return path .. " has no test_ function" end
+    local idle = botter_tests_without_call(path, f.name)
+    if #idle > 0 then
+      return table.concat(idle, ", ") .. " never call" .. (#idle == 1 and "s " or " ") .. f.name
+        .. ": every test_ function calls " .. f.name .. " with a real case and asserts on what it returns"
+    end
     local invented = botter_invented_ids(path)
     if #invented > 0 then
       return path .. " uses ids that no data file holds: " .. table.concat(invented, ", ")
@@ -302,7 +421,50 @@ local REVIEWER = [[You are Botter's reviewer. A function keeps failing its tests
 - If the test is right, change nothing.
 - Reply with one line per failing test: "test wrong: <why>" or "test right".]]
 
+local SOLVER = [[You are Botter's coder. You write solve_case(case), the function that decides ONE case of the agent's job: it takes the case's fields and returns every answer column, by calling the agent's other functions (already written and tested) in the order the brief's procedure needs.
+- Read the job, the other functions (their doc comments and code), and the examples file. case holds the case's fields as strings, as in the CSV (convert numbers with tonumber, "true"/"false" yourself).
+- Return a table with exactly the answer columns, each formatted as the brief writes it (dates YYYY-MM-DD, amounts, allowed values, plans and lists in the brief's notation; empty or "none" exactly where the brief says).
+- functions/tests/examples.lua is Botter's scorer: it runs solve_case on every example and compares each answer. run_tests("functions/tests/examples.lua") shows the score and every difference. Do not edit it.
+- Never read the examples file in the agent's code and never copy expected answers: implement the brief's rules.
+- Write only solve_case. A difference that comes from another function is fixed in the next phase.]]
+
+-- solve_case is checked against the examples by Botter's scorer: it must load and run every case without an error.
+local function check_solver(f)
+  return function()
+    local path = code_file(f)
+    if not bot.fs.exists(path) then return path .. " was not written" end
+    if not bot.fs.read(path):find("function solve_case%(") then return path .. " does not define solve_case(case)" end
+    local r = bot.test(EXAMPLES)
+    local errors = load_errors(r.report)
+    if errors then return errors end
+    local sc = r.scores[1]
+    if not sc then return "the examples scorer did not run:\n" .. r.report end
+    local bad = {}
+    for line in sc.details:gmatch("[^\n]+") do
+      if line:find(": ERROR ", 1, true) then table.insert(bad, line) end
+    end
+    if #bad > 0 then
+      return #bad .. " of " .. sc.total .. " examples stop with an error:\n" .. table.concat(bad, "\n", 1, math.min(#bad, 10))
+    end
+    return nil
+  end
+end
+
+local function build_solver(f)
+  bot.say("Writing solve_case")
+  local ok, why = attempt(f.name, {
+    system = SOLVER, context = full_context(), skills = { "write-functions" }, tools = CODE, writes = { code_file(f) },
+    task = "The function: " .. design_function_line(f) .. "\n\nWrite " .. code_file(f)
+      .. ". The examples: " .. answer_examples().path .. "; the answers it must return: "
+      .. table.concat(answer_examples().scored, ", ") .. ".",
+  }, check_solver(f))
+  BOTTER.tasks[f.name] = ok and "done" or "failed"
+  if not ok then table.insert(BOTTER.limits, f.name .. ": " .. first_lines(why, 3)) end
+  save()
+end
+
 local function build_function(f)
+  if f.name == "solve_case" and answer_examples() then return build_solver(f) end
   local spec = "The function: " .. design_function_line(f)
   local rules = {}
   for _, id in ipairs(f.rules) do
@@ -363,7 +525,10 @@ local function ordered_functions()
     end
     table.insert(out, f)
   end
-  for _, f in ipairs(BOTTER.design.functions) do visit(f, 0) end
+  for _, f in ipairs(BOTTER.design.functions) do
+    if f.name ~= "solve_case" then visit(f, 0) end
+  end
+  if byname.solve_case then table.insert(out, byname.solve_case) end -- it calls the others: always last
   return out
 end
 
@@ -422,7 +587,7 @@ local SCORER = [[You are Botter's scorer. You write functions/tests/examples.lua
 
 local FIXER = [[You are Botter's fixer. The agent's functions get some worked examples wrong. You find the rule behind ONE difference and fix the function that implements it: the general rule from the brief, never the example's numbers.
 - Read the job's rules again, the function, and the data of the failing example. Work the example out by hand, find where the function goes wrong, fix it.
-- Do not change the tests or the examples. Keep every other test passing.]]
+- Do not change the tests or the examples. Keep every other test passing: run_tests() runs them all, run_tests("functions/tests/examples.lua") shows the examples score.]]
 
 local function examples_check(expected, files)
   return function()
@@ -493,15 +658,23 @@ local function examples()
   end
   local expected = #files > 0 and botter_count_examples(files) or 0
   bot.say("Measuring the agent against the brief's examples")
-  local ok, why = attempt("examples score", {
-    system = SCORER, context = full_context(), skills = { "write-functions" }, tools = CODE,
-    writes = { "functions/tests/examples.lua" },
-    task = "Write functions/tests/examples.lua. Example files: " .. (#files > 0 and table.concat(files, ", ") or "see the job")
-      .. (expected > 0 and (" (" .. expected .. " examples)") or "") .. ".",
-  }, examples_check(expected, files))
-  if not ok then
-    table.insert(BOTTER.limits, "no score against the examples: " .. first_lines(why, 2))
-    return nil
+  local ex = write_examples_scorer() -- answers in columns: Botter scores solve_case itself
+  if ex then
+    local listed = false
+    for _, f in ipairs(files) do listed = listed or f == ex.path end
+    if not listed then table.insert(files, ex.path) end
+    log("examples score: written by Botter from " .. ex.path .. " (compares " .. table.concat(ex.scored, ", ") .. ")")
+  else
+    local ok, why = attempt("examples score", {
+      system = SCORER, context = full_context(), skills = { "write-functions" }, tools = CODE,
+      writes = { EXAMPLES },
+      task = "Write functions/tests/examples.lua. Example files: " .. (#files > 0 and table.concat(files, ", ") or "see the job")
+        .. (expected > 0 and (" (" .. expected .. " examples)") or "") .. ".",
+    }, examples_check(expected, files))
+    if not ok then
+      table.insert(BOTTER.limits, "no score against the examples: " .. first_lines(why, 2))
+      return nil
+    end
   end
   local writes = {}
   for _, f in ipairs(BOTTER.design.functions) do table.insert(writes, code_file(f)) end
@@ -509,7 +682,8 @@ local function examples()
   local passed, total, details = score()
   if not passed then return nil end
   log("score: " .. passed .. "/" .. total)
-  BOTTER.score = { passed = passed, total = total }
+  local function per_answer(d) return ex and (d or ""):match("^right per answer: ([^\n]*)") or nil end
+  BOTTER.score = { passed = passed, total = total, fields = per_answer(details) }
   save()
   local stalled = 0
   for round = 1, SCORE_ROUNDS do
@@ -537,7 +711,7 @@ local function examples()
       stalled = p > passed and 0 or stalled + 1
       passed, total, details = p, t, d
       log("score after fix " .. round .. ": " .. passed .. "/" .. total)
-      BOTTER.score = { passed = passed, total = total }
+      BOTTER.score = { passed = passed, total = total, fields = per_answer(details) }
       save()
     end
   end
@@ -562,7 +736,10 @@ local function write_agent_md()
   local ok, why = attempt("AGENT.md", {
     system = WRITER, context = full_context(), skills = { "write-agent-md-and-skills" }, tools = CODE,
     writes = { "AGENT.md" },
-    task = "Write AGENT.md for this agent. Its functions: " .. table.concat(documented_functions(), ", ") .. ".",
+    task = "Write AGENT.md for this agent. Its functions: " .. table.concat(documented_functions(), ", ") .. "."
+      .. ((BOTTER.tasks.solve_case == "done") and ("\nsolve_case decides one case: for each case the agent reads the case's "
+        .. "row (its fields), calls solve_case with them once, and uses the answers it returns as they are; the model "
+        .. "only adds what the model steps say (e.g. the explanation, from those answers).") or ""),
   }, function()
     if not bot.fs.exists("AGENT.md") then return "AGENT.md was not written" end
     local text, missing = bot.fs.read("AGENT.md"), {}
@@ -688,6 +865,9 @@ local function final_report(build)
   end
   if BOTTER.score then
     table.insert(out, "Score on the brief's examples: " .. BOTTER.score.passed .. "/" .. BOTTER.score.total .. ".")
+    if BOTTER.score.fields then
+      table.insert(out, "Right per answer (Botter's own comparison with the expected answers): " .. BOTTER.score.fields .. ".")
+    end
   end
   if BOTTER.design.kind == "batch" then
     table.insert(out, "Run it: ./" .. tostring(file):match("([^/]+)$") .. " --run < ids.txt (one case per line).")
@@ -733,6 +913,7 @@ local function build(request, resume)
     checkpoint()
   end
   write_config() -- early, so the build's checks see the planned skills
+  write_examples_scorer() -- before the code: solve_case is written against it
   for _, f in ipairs(ordered_functions()) do
     if BOTTER.tasks[f.name] ~= "done" then phase(f.name, build_function, f) end
   end

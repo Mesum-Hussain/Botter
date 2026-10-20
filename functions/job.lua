@@ -9,7 +9,8 @@ local BUILTIN = { fs_list = true, fs_read = true, fs_write = true, fs_edit = tru
   cron_delete = true, get_time = true, delegate = true, vault_seal = true }
 
 function botter_reset_job()
-  BOTTER.job = { goal = "", inputs = {}, outputs = {}, rules = {}, examples = {}, success = {}, edges = {}, skipped = {} }
+  BOTTER.job = { goal = "", inputs = {}, outputs = {}, rules = {}, examples = {}, success = {}, edges = {}, skipped = {},
+    skipped_files = {} }
   BOTTER.design = { kind = nil, why = "", functions = {}, model_steps = {}, skills = {} }
 end
 
@@ -134,6 +135,55 @@ function job_skip_section(section, why)
   need(why, "the reason")
   table.insert(BOTTER.job.skipped, section)
   return "ok: " .. section .. " skipped"
+end
+
+--- Say that a data file next to the inputs is not used by the agent (e.g. a blank template of the output), so job_check stops asking for it.
+---@param path string  the file, as fs_list shows it
+---@param why string  why the agent does not need it
+---@return string  confirmation
+function job_skip_file(path, why)
+  path = need(path, "the path"):gsub("^%./", "")
+  need(why, "the reason")
+  table.insert(BOTTER.job.skipped_files, { path = path, why = trim(why) })
+  return "ok: " .. path .. " skipped"
+end
+
+local DATA = { csv = true, tsv = true, json = true, jsonl = true, xlsx = true, xls = true, parquet = true, xml = true }
+
+-- Data files in the folders of the recorded inputs and examples that the job does not account for: a file
+-- left out (run 17: messages.csv, images.csv) is data the agent never reads.
+local function unaccounted_files()
+  local known, dirs = {}, {}
+  local function note(path)
+    path = tostring(path or ""):gsub("^%./", "")
+    if path == "" then return end
+    known[path] = true
+    if not bot.fs.exists(path) then return end
+    if pcall(bot.fs.list, path) then
+      dirs[(path:gsub("/$", ""))] = true -- a folder recorded whole: its files are accounted for by it
+      known[(path:gsub("/$", ""))] = "folder"
+    else
+      dirs[path:match("^(.*)/[^/]*$") or "."] = true
+    end
+  end
+  for _, i in ipairs(BOTTER.job.inputs) do note(i.path) end
+  for _, e in ipairs(BOTTER.job.examples) do note(e.path) end
+  for _, o in ipairs(BOTTER.job.outputs) do known[tostring(o.path):gsub("^%./", "")] = true end
+  for _, f in ipairs(BOTTER.job.skipped_files or {}) do known[f.path] = true end
+  known["config.json"] = true -- the agent's own settings, not data
+  local out = {}
+  for dir in pairs(dirs) do
+    local ok, names = pcall(bot.fs.list, dir)
+    for _, name in ipairs(ok and names or {}) do
+      local path = dir == "." and name or (dir .. "/" .. name)
+      local ext = name:lower():match("%.(%w+)$")
+      if name:sub(-1) ~= "/" and ext and DATA[ext] and not known[path] and known[dir] ~= "folder" then
+        table.insert(out, path)
+      end
+    end
+  end
+  table.sort(out)
+  return out
 end
 
 -- The brief: Markdown files in the folder and one level down (not the agent's own AGENT.md or Botter's files).
@@ -364,6 +414,11 @@ function job_problems()
   if #j.outputs == 0 then table.insert(p, "no output (job_output)") end
   if #j.rules == 0 then table.insert(p, "no rule (job_rule, one per rule of the brief)") end
   if #j.success == 0 then table.insert(p, "no success criterion (job_success)") end
+  local files = unaccounted_files()
+  if #files > 0 then
+    table.insert(p, "data files the job does not mention: " .. table.concat(files, ", ")
+      .. ". Read each one; record it with job_input (or job_examples when it holds expected answers), or job_skip_file when the agent does not need it")
+  end
   local open = uncovered_sections()
   if #open > 0 then
     table.insert(p, "sections of the brief no rule comes from: " .. table.concat(open, "; ")
@@ -446,6 +501,30 @@ function design_problems()
       end
     end
   end
+  for _, ex in ipairs(botter_answer_examples()) do
+    local solve
+    for _, f in ipairs(d.functions) do
+      if f.name == "solve_case" then solve = f end
+    end
+    if not solve then
+      table.insert(p, ex.path .. " holds " .. ex.count .. " worked examples with the expected " .. table.concat(ex.scored, ", ")
+        .. ": plan solve_case(case table) -> table {" .. table.concat(ex.scored, ", ") .. "}, which decides one case from its "
+        .. "fields (the example's row without the answers, e.g. case." .. ex.id .. ") by calling the other functions; "
+        .. "Botter scores it on every example")
+    else
+      local missing_cols = {}
+      for _, c in ipairs(ex.scored) do
+        if not (" " .. solve.returns:lower():gsub("[^%w_]", " ") .. " "):find(" " .. c:lower() .. " ", 1, true) then
+          table.insert(missing_cols, c)
+        end
+      end
+      if #missing_cols > 0 then
+        table.insert(p, "solve_case must return every answer the examples in " .. ex.path .. " expect; its returns lack "
+          .. table.concat(missing_cols, ", "))
+      end
+    end
+    break -- one scored example file is enough
+  end
   for _, o in ipairs(j.outputs) do
     local file, made = o.path:match("([^/]+)$"), false
     for _, f in ipairs(d.functions) do
@@ -487,6 +566,10 @@ function job_markdown()
   if #(j.skipped or {}) > 0 then
     table.insert(out, "\n## Sections of the brief without rules")
     for _, sk in ipairs(j.skipped) do table.insert(out, "- " .. sk) end
+  end
+  if #(j.skipped_files or {}) > 0 then
+    table.insert(out, "\n## Data files the agent does not use")
+    for _, f in ipairs(j.skipped_files) do table.insert(out, "- " .. f.path .. ": " .. f.why) end
   end
   if #j.examples > 0 then
     table.insert(out, "\n## Examples")
