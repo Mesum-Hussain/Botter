@@ -1,7 +1,7 @@
 # BOTCORE + BOTTER: SPEC + STATUS (AI-consumed; terse by design)
 
-Updated: 2026-10-20 | Version 0.2.0 (released; binary refreshed in place) | Lang: C (gnu11) | Target: x86_64 Linux (dev: Fedora 44, kernel 7.2, SELinux enforcing, Landlock + userns on, musl-gcc)
-State: sub-agents, MCP (both directions, URL + command), A2A, ACP, sealed vault, Lua functions, --run: done and pushed. §12 architecture rebuild IN PROGRESS (steps 1-5 + run 13-17 fixes committed; §13 simplification + inline TUI: 361 tests pass): step 4 (Botter on FLOW.lua) being measured on the September brief (§12.10).
+Updated: 2026-10-21 | Version 0.2.0 (released; binary refreshed in place) | Lang: C (gnu11) | Target: x86_64 Linux (dev: Fedora 44, kernel 7.2, SELinux enforcing, Landlock + userns on, musl-gcc)
+State: sub-agents, MCP (both directions, URL + command), A2A, ACP, sealed vault, Lua functions, --run: done and pushed. §12 architecture rebuild IN PROGRESS (steps 1-5 + run 13-17 fixes committed; §13 simplification + inline TUI committed locally, NOT pushed: 361 tests pass). Start the next session at §13 "NEXT SESSION".
 Legend: [D] = owner decided
 
 ## 1. PRODUCT [D]
@@ -238,17 +238,24 @@ Step 4 Botter on FLOW.lua (in progress): every input goes to a lead worker (AGEN
 Step 5 bot.llm DONE: bot.llm(prompt) -> text; bot.llm{prompt, system?, schema?, images?} -> table when a schema is given (JSON found inside fences/text; missing fields asked again once, then an error); images = files in the working folder sent with the prompt; counted in usage. write-functions skill documents bot.llm and code-driven FLOW.lua; the "never call an LLM" rule now means another service.
 
 ## 13. SIMPLIFICATION + NEXT [D 2026-10-20]
-Owner [D]: dead simple to understand, extremely optimized while running; think long term (the Oct 24 hackathon is a deadline to improve Botter, not the target). Keep: sealed vault (future key-in-binary path if keyring support goes for cross-platform; .env is for Botter only, built agents should not need one), A2A/ACP/MCP both ways, the TUI (to be simplified, below).
-Done (352 tests pass):
+Owner [D]: dead simple to understand, extremely optimized while running; think long term (the Oct 24 hackathon is a deadline to improve Botter, not the target). Keep: sealed vault (future key-in-binary path if keyring support goes for cross-platform; .env is for Botter only, built agents should not need one), A2A/ACP/MCP both ways, the TUI (simplified, below).
+Done (361 tests pass; commits 212e81c run 17 fixes, 074debc removals, 4cb8d4e TUI, 50fa82d retries/exit status; local only, not pushed):
 - cron removed (cron.c, cron_set/list/delete, the REPL idle/tick plumbing in term.c and front.c): a scheduled agent = the system's cron + --run. get_time moved to tools.c.
 - on_turn_end hook removed (FLOW.lua covers it). note tool removed (never called in runs 10-18); recall stays for archived results.
 - --eval removed: --run JSON lines now carry "tools" (the tools the task called); checks are the caller's Lua (Botter's examples scorer, bot.test).
 - One engine for fresh conversations: sub-agents (delegate tool, bot.agent) run on the worker code path with their persona as the system prompt; workers never get skill/delegate (no nesting). bot.agent stays as the Lua name for a named local or remote agent.
 - Run 18 (gemini-3.8-flash, owner's key): stopped in understand after 18 calls / ~80 min on HTTP 429; the 3.8-flash free tier cannot carry a build. gemini-3.8-flash-lite = HTTP 404 (not available to the key). Bugs seen: --run exits 0 when the build stopped; silent busy retries (up to 5 x 2 min per request) look like a hang; "Connected" printed after the failure.
-Next, in order:
+Items:
 1 TUI DONE (2026-10-20, owner chose inline + no message numbers + keep the logo): inline, no screen of its own: finished lines are printed once into the terminal's scrollback (native scroll/select/copy), only the live area is redrawn (streamed reply tail, spinner, a question's label, the input box, a hint line); terminal colours only (default, dim, bold, 16 ANSI; the logo alone keeps RGB); sent messages carry the input box's bar "│ "; tool calls, results and reasoning printed only with ctrl+o (errors always); tab / shift+tab = plan/build; resize clears the screen and redraws the live area. Gone: own screen buffer, paging/mouse wheel, light/dark detection, the sage palette, notebook [N] numbering (and its system-prompt note, which ACP/A2A/MCP callers also got), code highlighting. TUI 3,695 -> ~2,800 lines.
 2 Botter pipeline ideas (from published self-improving harness work): (a) verified data facts recorded by the analyst and checked by code (joins, which file holds the examples, units), pinned for every worker; (b) two independent analysts + a merge (rules both found = solid; one-sided = re-check the brief); (c) fix loop as gated, bounded edits: reflect over the batch of failing examples grouped by answer column (most common pattern, not the first difference), at most N edits per round, keep only if the score on examples the fixer did not see goes up strictly, rejected edits shown to the next round; two candidates per round (code is wrong vs rule/test is wrong), keep the better by measured score; "no change" is a valid answer; (d) evidence as a file (.botter/evidence/examples.md: per failing case the input row, expected vs got per column, intermediate values) instead of 30 lines in the prompt; (e) later: a lesson library across builds (what each change did: helped/hurt/no effect/confounded; at most one lesson with evidence).
 3 Generated FLOW.lua for batch agents (line -> solve_case -> bot.llm only for judgement columns): zero model calls for exact columns; run 17's agent spent the quota in 2 rows.
 4 Small DONE: --run exits 1 when any task fails (Botter's stopped build is now an error, on stderr); each busy/quota retry prints "The model is busy|out of quota or rate-limited (HTTP n): trying again in N s (k of 5)" on stderr; --run stdout line-buffered (notes in order). Open: per-role model (stronger model for analyst/designer).
 5 Measure on flash-lite (500 req/day) vs runs 13-17.
+Sizes after §13: botcore src 13,112 -> 12,499 lines; TUI 3,695 -> 2,905 lines; ./botter 1,230,179 -> 1,152,192 bytes; agent runtime (artifacts/botcore) 562,976 bytes.
+Cautions: the kernel keyring holds a gemini-3.8-flash connection and it wins over .env: manual tests must use BOTCORE_NO_KEYRING=1 (two stray real requests were sent on 2026-10-20 by forgetting this). 3.8-flash's free quota was still exhausted (HTTP 429) late on 2026-10-20.
+NEXT SESSION [owner: "we will continue in the next session"]:
+1 Owner tries the new TUI (`./botter`) and gives feedback; adjust.
+2 Discuss, then build item 2 (pipeline ideas a-d) and item 3 (generated FLOW.lua for batch agents); per-role model if a stronger model is affordable.
+3 Run 19 on gemini-3.1-flash-lite (owner switches with /provider; free tier 500 req/day) in test2/by-botter19 with the same command as runs 13-18; compare calls, tokens, honest score (Botter's own examples.lua) with runs 13-17.
+4 Push the local commits when the owner asks.
 
