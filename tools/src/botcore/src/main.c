@@ -1525,16 +1525,11 @@ int main(int argc, char **argv)
     const char *net_text = offline ? OFFLINE : ONLINE_ALL;
     const char *persona = agent_prompt();
     const char *cwd = guard_ctx();
-    /* Botter's UI numbers each message and the reply to it, and tags messages "[N] ...". */
-    static const char FRONT_HINT[] =
-        "\nThe user's UI numbers each user message and your reply to it with the same number; messages "
-        "arrive prefixed with [N]. When the user refers to a number (\"redo 3\", \"like in 2\"), they mean that "
-        "message and your reply to it. Do not put such numbers in your own replies.";
     static const char BATCH_HINT[] =
         "\nYou are running unattended (batch mode): every message is one task on its own, and nobody is there "
         "to answer questions or approve anything. Do the whole task with your tools, then reply with only the "
         "result the task asks for, in the form it asks for.";
-    const char *front_hint = front_batch() ? BATCH_HINT : front_active() ? FRONT_HINT : "";
+    const char *front_hint = front_batch() ? BATCH_HINT : "";
     char *index = vfs_count() ? pack_index() : NULL;
     /* who the agent is, from config.json (so it can answer "which version are you?") */
     char ident[800] = "";
@@ -1546,7 +1541,7 @@ int main(int argc, char **argv)
                  v ? ", version " : "", v ? v : "", d ? " " : "", d ? d : "", dot ? "." : "");
     }
     size_t sl = strlen(persona) + strlen(ident) + strlen(g_missing) + strlen(cwd) + sizeof(FIXED) + strlen(net_text) +
-                sizeof(FRONT_HINT) + sizeof(BATCH_HINT) + sizeof(MODE_HINT) + (index ? strlen(index) : 0) + 64;
+                sizeof(BATCH_HINT) + sizeof(MODE_HINT) + (index ? strlen(index) : 0) + 64;
     char *sys = malloc(sl);
     if (!sys) {
         fprintf(stderr, ANSI_BOLD_RED "Error:" ANSI_RESET " out of memory\n");

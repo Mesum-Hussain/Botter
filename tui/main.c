@@ -1,12 +1,15 @@
 /*
- * botter TUI: full-screen chat front end for the botter agent.
+ * botter TUI: the chat front end for the botter agent, inline in the terminal.
  *
- * The agent itself (botcore + botter pack, a normal .bot) runs as a child in
- * frontend mode (BOTCORE_FRONTEND=1, see botcore src/front.h); this program
- * owns the terminal. The .bot is appended to this executable by
- * `botter-tui --bundle <agent.bot> <out>`, or given as argv[1] while developing.
- * It is executed from a memfd, so agents that botter builds get the plain
- * botcore runtime (and its REPL), never this UI.
+ * The agent itself (botcore + botter pack, a normal .bot) runs as a child in frontend mode
+ * (BOTCORE_FRONTEND=1, see botcore src/front.h); this program owns the terminal. The .bot is appended to
+ * this executable by `botter-tui --bundle <agent.bot> <out>`, or given as argv[1] while developing. It is
+ * executed from a memfd, so agents that botter builds get the plain botcore runtime (and its REPL).
+ *
+ * No screen of its own: what has been said is printed once into the terminal's scrollback (so scrolling,
+ * selecting and copying are the terminal's), and only the live part at the bottom is redrawn: a reply being
+ * streamed, the spinner, the input box and a hint line. Colours are the terminal's own (default, dim, bold
+ * and its 16 theme colours); only the logo has fixed colours.
  *
  * Not a tty, or BOTTER_TUI=0: the agent is executed directly (plain REPL).
  */
@@ -30,28 +33,45 @@
 #include <time.h>
 #include <unistd.h>
 
-extern char **environ;
+#ifndef BOTTER_VERSION
+#define BOTTER_VERSION "dev"
+#endif
 
-static const char TRAILER_MAGIC[8] = {'B', 'O', 'T', 'T', 'U', 'I', '0', '1'};
-#define TRAILER_LEN 24 /* u64 payload offset, u64 payload length, magic */
+extern char **environ;
 
 /* ================= terminal ================= */
 
-static int            g_tty = -1;     /* output fd (the terminal) */
+static int            g_tty = -1; /* output fd (the terminal) */
 static struct termios g_saved;
 static int            g_raw;
 static int            g_W = 80, g_H = 24;
-static int            g_truecolor;
+static int            g_truecolor; /* for the logo only */
 static int            g_sigpipe[2] = {-1, -1};
 static volatile sig_atomic_t g_winch, g_quit;
+static int            g_live_up; /* rows from the top of the live area down to the cursor */
 
-static const char ENTER_SEQ[] = "\033[?1049h\033[?1000h\033[?1006h\033[?2004h\033[5 q\033[?25l\033[2J";
-static const char LEAVE_SEQ[] = "\033[0m\033[?2004l\033[?1006l\033[?1000l\033[0 q\033[?25h\033[?1049l";
+static void write_all(const char *s, size_t n)
+{
+    for (size_t off = 0; off < n;) {
+        ssize_t w = write(g_tty, s + off, n - off);
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        if (w <= 0) {
+            return;
+        }
+        off += (size_t)w;
+    }
+}
 
+/* Back to the terminal as it was; the live area is wiped, the conversation stays in the scrollback. */
 static void tty_restore(void)
 {
     if (g_raw) {
-        (void)!write(g_tty, LEAVE_SEQ, sizeof(LEAVE_SEQ) - 1);
+        char s[80];
+        int n = g_live_up ? snprintf(s, sizeof(s), "\033[%dA", g_live_up) : 0; /* to the top of the live area */
+        n += snprintf(s + n, sizeof(s) - (size_t)n, "\r\033[J\033[0m\033[?2004l\033[?25h");
+        write_all(s, (size_t)n);
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_saved);
         g_raw = 0;
     }
@@ -99,7 +119,7 @@ static int tty_setup(void)
         return -1;
     }
     g_raw = 1;
-    (void)!write(g_tty, ENTER_SEQ, sizeof(ENTER_SEQ) - 1);
+    write_all("\033[?2004h", 8); /* bracketed paste */
     atexit(tty_restore);
 
     struct sigaction sa;
@@ -130,60 +150,9 @@ static double now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-/*
- * Light or dark terminal background? BOTTER_THEME=light|dark wins; else ask the
- * terminal (OSC 11, followed by DA1 so terminals without OSC 11 answer at once);
- * else COLORFGBG; else dark. Runs in raw mode, before any input is read.
- */
-static int tty_is_light(void)
-{
-    const char *th = getenv("BOTTER_THEME");
-    if (th && (strcmp(th, "light") == 0 || strcmp(th, "dark") == 0)) {
-        return th[0] == 'l';
-    }
-    static const char q[] = "\033]11;?\033\\\033[c";
-    (void)!write(g_tty, q, sizeof(q) - 1);
-    char buf[256];
-    size_t n = 0;
-    double end = now_s() + 0.3;
-    while (n < sizeof(buf) - 1) {
-        int ms = (int)((end - now_s()) * 1000);
-        struct pollfd p = {STDIN_FILENO, POLLIN, 0};
-        if (ms <= 0 || poll(&p, 1, ms) <= 0) {
-            break;
-        }
-        ssize_t r = read(STDIN_FILENO, buf + n, sizeof(buf) - 1 - n);
-        if (r <= 0) {
-            break;
-        }
-        n += (size_t)r;
-        buf[n] = '\0';
-        char *da = strstr(buf, "\033[?");
-        if (da && strchr(da, 'c')) {
-            break; /* DA1 answered: any OSC 11 reply came before it */
-        }
-    }
-    buf[n] = '\0';
-    char *rgb = strstr(buf, "rgb:");
-    if (rgb) {
-        unsigned r, g, b;
-        if (sscanf(rgb + 4, "%x/%x/%x", &r, &g, &b) == 3) {
-            int big = strchr(rgb + 4, '/') - (rgb + 4) > 2; /* 16-bit channels */
-            double s = big ? 65535.0 : 255.0;
-            return 0.2126 * r / s + 0.7152 * g / s + 0.0722 * b / s > 0.5;
-        }
-    }
-    const char *fb = getenv("COLORFGBG"); /* "fg;bg", bg 7 or 15 = light */
-    const char *semi = fb ? strrchr(fb, ';') : NULL;
-    if (semi) {
-        int bg = atoi(semi + 1);
-        return bg == 7 || bg == 15;
-    }
-    return 0;
-}
+/* ================= styled output ================= */
 
-/* ================= colour output ================= */
-
+/* 0xRRGGBB on a 256-colour terminal (the logo). */
 static int rgb256(uint32_t c)
 {
     int r = (int)(c >> 16) & 255, g = (int)(c >> 8) & 255, b = (int)c & 255;
@@ -191,34 +160,37 @@ static int rgb256(uint32_t c)
 #define Q(v) ((v) < 48 ? 0 : (v) < 115 ? 1 : ((v) - 35) / 40)
     int qr = Q(r), qg = Q(g), qb = Q(b);
 #undef Q
-    int cr = lv[qr], cg = lv[qg], cb = lv[qb];
-    int avg = (r + g + b) / 3;
-    int gi = avg > 238 ? 23 : (avg - 3) / 10;
-    if (gi < 0) {
-        gi = 0;
-    }
+    int dc = (r - lv[qr]) * (r - lv[qr]) + (g - lv[qg]) * (g - lv[qg]) + (b - lv[qb]) * (b - lv[qb]);
+    int gi = (r + g + b) / 3 > 238 ? 23 : ((r + g + b) / 3 - 3) / 10;
+    gi = gi < 0 ? 0 : gi;
     int gv = 8 + gi * 10;
-    int dc = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
     int dg = (r - gv) * (r - gv) + (g - gv) * (g - gv) + (b - gv) * (b - gv);
     return dg < dc ? 232 + gi : 16 + 36 * qr + 6 * qg + qb;
 }
 
-static void put_color(tsb_t *o, int base, uint32_t c)
+static void put_color(tsb_t *o, int fg, uint32_t c)
 {
-    if (c == TC_NONE) {
-        tsb_fmt(o, ";%d", base + 1); /* 39 / 49: default */
+    if (c == TC_NONE || c == TC_DIM) {
+        return; /* the reset before it left the default */
+    }
+    if ((c & 0xFF000000u) == 0xFD000000u) {
+        int n = (int)(c & 15);
+        tsb_fmt(o, ";%d", (fg ? 30 : 40) + (n & 7) + (n > 7 ? 60 : 0));
     } else if (g_truecolor) {
-        tsb_fmt(o, ";%d;2;%u;%u;%u", base, (c >> 16) & 255, (c >> 8) & 255, c & 255);
+        tsb_fmt(o, ";%d;2;%u;%u;%u", fg ? 38 : 48, (c >> 16) & 255, (c >> 8) & 255, c & 255);
     } else {
-        tsb_fmt(o, ";%d;5;%d", base, rgb256(c));
+        tsb_fmt(o, ";%d;5;%d", fg ? 38 : 48, rgb256(c));
     }
 }
 
-static void sgr(tsb_t *o, tsty_t s, uint32_t fill)
+static void sgr(tsb_t *o, tsty_t s)
 {
     tsb_str(o, "\033[0");
     if (s.at & TA_BOLD) {
         tsb_str(o, ";1");
+    }
+    if (s.fg == TC_DIM) {
+        tsb_str(o, ";2");
     }
     if (s.at & TA_ITALIC) {
         tsb_str(o, ";3");
@@ -229,276 +201,112 @@ static void sgr(tsb_t *o, tsty_t s, uint32_t fill)
     if (s.at & TA_STRIKE) {
         tsb_str(o, ";9");
     }
-    put_color(o, 38, s.fg);
-    put_color(o, 48, s.bg == TC_NONE ? fill : s.bg);
+    put_color(o, 1, s.fg);
+    put_color(o, 0, s.bg);
     tsb_str(o, "m");
 }
 
-/* Row builder: clips at the row width and pads with a background colour. */
-typedef struct {
-    tsb_t *o;
-    int    w, W;
-} rowb_t;
-
-static void rb_text(rowb_t *rb, tsty_t s, uint32_t fill, const char *t, int tw)
+/* One laid-out line, cut at the terminal's width (a wrapped row would throw off the redraw). */
+static void put_line(tsb_t *o, const tline_t *l)
 {
-    if (rb->w >= rb->W || !*t) {
-        return;
-    }
-    sgr(rb->o, s, fill);
-    if (rb->w + tw <= rb->W) {
-        tsb_str(rb->o, t);
-        rb->w += tw;
-        return;
-    }
-    size_t n = strlen(t);
-    for (size_t i = 0; i < n;) {
-        int l;
-        int cw = tu_width(tu_decode(t + i, n - i, &l));
-        if (rb->w + cw > rb->W) {
-            break;
-        }
-        tsb_add(rb->o, t + i, (size_t)l);
-        rb->w += cw;
-        i += (size_t)l;
-    }
-}
-
-static void rb_fill(rowb_t *rb, uint32_t bg, int upto)
-{
-    if (upto > rb->W) {
-        upto = rb->W;
-    }
-    if (rb->w >= upto) {
-        return;
-    }
-    sgr(rb->o, sty(T.text, 0), bg);
-    while (rb->w < upto) {
-        tsb_add(rb->o, " ", 1);
-        rb->w++;
-    }
-}
-
-static void rb_line(rowb_t *rb, const tline_t *l, uint32_t def_bg)
-{
-    uint32_t fill = l->fill == TC_NONE ? def_bg : l->fill;
-    for (int i = 0; i < l->n; i++) {
-        rb_text(rb, l->r[i].s, fill, l->r[i].t, l->r[i].w);
-    }
-}
-
-/* ================= transcript ================= */
-
-enum { B_HEADER, B_RAW, B_USER, B_ASK, B_AGENT, B_THINK, B_TOOL };
-enum { TOOL_RUN, TOOL_OK, TOOL_ERR };
-
-typedef struct {
-    int      kind;
-    tsb_t    text;  /* body; tool: args json; ask: label */
-    char    *extra; /* tool: result; ask: answer */
-    int      state; /* tool: TOOL_*; ask: secret */
-    int      sep;   /* blank line before */
-    int      num;   /* notebook label: In [num] (user) / Out[num] (first agent block); 0 = none */
-    int      lw, lx; /* laid out for width / expand state; lw < 0 = dirty */
-    tlines_t L;
-} blk_t;
-
-static blk_t *g_b;
-static int    g_nb, g_capb;
-static int    g_expand;        /* ctrl+o: details (tool calls, full thinking); off = plain-language view */
-static int    g_s_text = -1, g_s_think = -1; /* blocks receiving streamed text / reasoning, -1 = none */
-static char  *g_model, *g_cwd;
-static int    g_scroll;        /* lines scrolled up from the bottom */
-static int    g_last_total = -1, g_last_cw = -1;
-static int    g_cell;          /* message number: one per chat message (its reply is "the reply to n") */
-static int    g_plan;          /* botcore's mode: 0 = Build, 1 = Plan (its "mode" event) */
-static int    g_plan_want = -1; /* tab while busy: mode to ask for at the next chat prompt */
-
-/* Left gutter holding the reference numbers (0 on very narrow screens: number on its own line). */
-static int gutter_w(int cw) { return cw >= 30 ? 6 : 0; }
-
-/* Reference number "(n)"; the colour tells message from reply. */
-static void gutter_label(char *out, size_t cap, int user, int num)
-{
-    (void)user;
-    snprintf(out, cap, "(%d)", num);
-}
-
-static blk_t *blk_add(int kind)
-{
-    if (g_nb == g_capb) {
-        g_capb = g_capb ? g_capb * 2 : 32;
-        g_b = realloc(g_b, sizeof(*g_b) * (size_t)g_capb);
-        if (!g_b) {
-            abort();
-        }
-    }
-    blk_t *b = &g_b[g_nb];
-    memset(b, 0, sizeof(*b));
-    b->kind = kind;
-    b->lw = -1;
-    if (kind == B_USER) { /* only messages are numbered; a reply belongs to the message above it */
-        b->num = ++g_cell;
-    }
-    if (g_nb > 0) {
-        int pk = g_b[g_nb - 1].kind;
-        int compact = (kind == B_RAW || kind == B_ASK) && (pk == B_RAW || pk == B_ASK);
-        b->sep = !compact;
-    }
-    g_nb++;
-    return b;
-}
-
-static void blk_text(int kind, const char *t)
-{
-    blk_t *b = blk_add(kind);
-    tsb_str(&b->text, t ? t : "");
-}
-
-/* Text for one-line summaries: newlines -> ↵, control chars -> space, cut at maxw columns. */
-static void put_flat(tsb_t *o, const char *s, int maxw)
-{
-    size_t n = strlen(s);
     int w = 0;
-    for (size_t i = 0; i < n;) {
-        int l;
-        uint32_t cp = tu_decode(s + i, n - i, &l);
-        const char *rep = NULL;
-        if (cp == '\n') {
-            rep = "↵";
-        } else if (cp < 0x20 || cp == 0x7f) {
-            rep = " ";
+    for (int i = 0; i < l->n && w < g_W; i++) {
+        const trun_t *r = &l->r[i];
+        sgr(o, r->s);
+        if (w + r->w <= g_W) {
+            tsb_str(o, r->t);
+            w += r->w;
+            continue;
         }
-        int cw = rep ? 1 : tu_width(cp);
-        if (w + cw > maxw) {
-            tsb_str(o, "…");
-            return;
+        size_t n = strlen(r->t);
+        for (size_t k = 0; k < n;) {
+            int len, cw = tu_width(tu_decode(r->t + k, n - k, &len));
+            if (w + cw > g_W) {
+                break;
+            }
+            tsb_add(o, r->t + k, (size_t)len);
+            w += cw;
+            k += (size_t)len;
         }
-        if (rep) {
-            tsb_str(o, rep);
-        } else {
-            tsb_add(o, s + i, (size_t)l);
-        }
-        w += cw;
-        i += (size_t)l;
+    }
+    tsb_str(o, "\033[0m");
+}
+
+/* ================= the conversation ================= */
+
+static tlines_t g_out;           /* finished lines not yet printed into the scrollback */
+static int      g_gap = 1;       /* the last line printed is blank (no second blank line) */
+static int      g_expand;        /* ctrl+o: tool calls, results and reasoning are printed too */
+static int      g_plan;          /* botcore's mode: 0 = Build, 1 = Plan */
+static int      g_plan_want = -1; /* tab while busy: the mode to ask for at the next chat prompt */
+static tsb_t    g_stream, g_think; /* a reply / reasoning being streamed */
+static tsb_t    g_rawl;          /* the agent's plain output: an unfinished line */
+static tsb_t    g_rx;            /* bytes from the agent not handled yet */
+static int      g_dirty = 1;
+
+static int text_w(void) { return g_W > 12 ? g_W - 4 : 8; }
+
+static void out_blank(void)
+{
+    if (!g_gap) {
+        tl_blank(&g_out);
+        g_gap = 1;
     }
 }
 
-static void args_summary(tsb_t *o, const char *json)
+/* Lines into the scrollback, each after a prefix (the first line may have its own). */
+static void out_lines(tlines_t *L, tsty_t ps, const char *first, const char *rest)
 {
-    cJSON *j = cJSON_Parse(json);
-    if (!cJSON_IsObject(j)) {
-        put_flat(o, json, 120);
-        cJSON_Delete(j);
-        return;
+    if (L->n) {
+        tl_prefix(L, 0, ps, first, ps, rest);
+        tl_move(&g_out, L);
+        g_gap = 0;
     }
-    int first = 1;
-    const cJSON *it;
-    cJSON_ArrayForEach(it, j)
-    {
-        if (!first) {
-            tsb_str(o, ", ");
-        }
-        first = 0;
-        tsb_str(o, it->string ? it->string : "?");
-        tsb_str(o, ": ");
-        if (cJSON_IsString(it)) {
-            tsb_str(o, "\"");
-            put_flat(o, it->valuestring, 60);
-            tsb_str(o, "\"");
-        } else {
-            char *v = cJSON_PrintUnformatted(it);
-            put_flat(o, v ? v : "?", 40);
-            free(v);
-        }
-        if (o->len > 400) {
-            tsb_str(o, ", …");
-            break;
-        }
-    }
-    cJSON_Delete(j);
+    g_dirty = 1;
 }
 
-/* Keep the first `keep` lines of L, then a "+N lines" hint. */
-static void collapse(tlines_t *L, int from, int keep, const char *indent)
+static void out_text(const char *t, tsty_t s, tsty_t ps, const char *first, const char *rest)
 {
-    int n = L->n - from;
-    if (g_expand || n <= keep + 1) {
-        return;
-    }
-    tlines_t tail = {0};
-    for (int i = from + keep; i < L->n; i++) {
-        *tl_new(&tail, 0) = L->l[i];
-    }
-    L->n = from + keep;
-    tl_free(&tail);
-    tline_t *h = tl_new(L, TC_NONE);
-    char m[96];
-    snprintf(m, sizeof(m), "%s… +%d lines (ctrl+o to expand)", indent, n - keep);
-    tl_put(h, sty(T.muted, TA_ITALIC), m, strlen(m));
+    tlines_t L = {0};
+    lay_text(&L, t, strlen(t), s, text_w(), TC_NONE);
+    out_lines(&L, ps, first, rest);
 }
 
-static void trunc_left(tline_t *l, tsty_t s, const char *t, int maxw)
+/* Left-truncate ("…tail") into w columns. */
+static void put_tail(tline_t *l, tsty_t s, const char *t, int w)
 {
-    size_t n = strlen(t);
-    if (tu_strwidth(t, n) <= maxw) {
-        tl_put(l, s, t, n);
-        return;
+    int tw = tu_strwidth(t, strlen(t)), cut = tw > w;
+    while (cut && tw > w - 1 && *t) {
+        int len;
+        tw -= tu_width(tu_decode(t, strlen(t), &len));
+        t += len;
     }
-    size_t i = 0;
-    while (i < n && tu_strwidth(t + i, n - i) > maxw - 1) {
-        int cl;
-        tu_decode(t + i, n - i, &cl);
-        i += (size_t)cl;
+    if (cut) {
+        tl_put(l, s, "…", strlen("…"));
     }
-    tl_put(l, s, "…", strlen("…"));
-    tl_put(l, s, t + i, n - i);
+    tl_put(l, s, t, strlen(t));
 }
 
-static void lay_header(blk_t *b, int cw)
+/* The logo with who and where beside it, at the start (botcore then says which model it uses). */
+static void out_header(void)
 {
-    tlines_t logo = {0};
+    tlines_t logo = {0}, info = {0}, L = {0};
     lay_logo(&logo);
-    int lw = logo_width();
-    int bw = cw; /* full terminal width */
-    int inner = bw - 4;
-    tsty_t border = sty(T.surface, 0), title = sty(T.accent, TA_BOLD), mut = sty(T.muted, 0), txt = sty(T.text, 0);
-    int side = inner >= lw + 3 + 22;
-    int tw = side ? inner - lw - 3 : inner;
-
-    tlines_t info = {0};
-    tline_t *l;
+    int lw = logo_width(), side = g_W >= lw + 30, tw = side ? g_W - lw - 5 : g_W - 2;
+    tsty_t mut = sty(T.muted, 0), txt = sty(T.text, 0);
+    char cwd[4096];
     tl_blank(&info);
-    l = tl_new(&info, TC_NONE);
-    tl_put_trunc(l, title, "Botter", tw);
-    if (tw > 7 + (int)strlen(BOTTER_VERSION)) {
-        tl_put(l, mut, " " BOTTER_VERSION, strlen(" " BOTTER_VERSION));
-    }
-    l = tl_new(&info, TC_NONE);
-    tl_put_trunc(l, mut, "the agent that builds agents", tw);
+    tline_t *l = tl_new(&info, TC_NONE);
+    tl_put(l, sty(T.text, TA_BOLD), "Botter", 6);
+    tl_put(l, mut, " " BOTTER_VERSION, strlen(" " BOTTER_VERSION));
+    tl_put_trunc(tl_new(&info, TC_NONE), mut, "the agent that builds agents", tw);
     tl_blank(&info);
-    l = tl_new(&info, TC_NONE);
-    tl_put(l, mut, "model ", 6);
-    tl_put_trunc(l, g_model ? txt : mut, g_model ? g_model : "not connected", tw - 6);
-    l = tl_new(&info, TC_NONE);
-    tl_put(l, mut, "cwd   ", 6);
-    if (g_cwd) {
-        trunc_left(l, txt, g_cwd, tw - 6);
-    } else {
-        char cwd[4096];
-        trunc_left(l, txt, getcwd(cwd, sizeof(cwd)) ? cwd : "?", tw - 6);
-    }
-    tl_blank(&info);
-    l = tl_new(&info, TC_NONE);
-    tl_put_trunc(l, mut, "Describe the agent you want to build.", tw);
-    l = tl_new(&info, TC_NONE);
-    tl_put_trunc(l, mut, "tab: plan/build · /provider · /help · /exit", tw);
-
-    tlines_t body = {0};
-    if (side) {
-        int h = logo.n > info.n ? logo.n : info.n;
-        for (int y = 0; y < h; y++) {
-            l = tl_new(&body, TC_NONE);
+    put_tail(tl_new(&info, TC_NONE), mut, getcwd(cwd, sizeof(cwd)) ? cwd : "?", tw);
+    tl_put_trunc(tl_new(&info, TC_NONE), mut, "enter send · shift+enter or \\ new line · esc interrupt", tw);
+    int h = side ? (logo.n > info.n ? logo.n : info.n) : logo.n + info.n;
+    for (int y = 0; y < h; y++) {
+        l = tl_new(&L, TC_NONE);
+        if (side) {
             if (y < logo.n) {
                 tl_cat(l, &logo.l[y]);
             }
@@ -506,238 +314,68 @@ static void lay_header(blk_t *b, int cw)
             if (y < info.n) {
                 tl_cat(l, &info.l[y]);
             }
-        }
-    } else {
-        int pad = (inner - lw) / 2;
-        for (int y = 0; y < logo.n; y++) {
-            l = tl_new(&body, TC_NONE);
-            tl_pad(l, pad, txt);
-            tl_cat(l, &logo.l[y]);
-        }
-        for (int y = 0; y < info.n; y++) {
-            l = tl_new(&body, TC_NONE);
-            tl_cat(l, &info.l[y]);
+        } else {
+            tl_cat(l, y < logo.n ? &logo.l[y] : &info.l[y - logo.n]);
         }
     }
     tl_free(&logo);
     tl_free(&info);
-
-    l = tl_new(&b->L, TC_NONE);
-    tl_put(l, border, "╭", strlen("╭"));
-    for (int x = 0; x < bw - 2; x++) {
-        tl_put(l, border, "─", strlen("─"));
-    }
-    tl_put(l, border, "╮", strlen("╮"));
-    for (int y = -1; y <= body.n; y++) {
-        l = tl_new(&b->L, TC_NONE);
-        tl_put(l, border, "│ ", strlen("│ "));
-        if (y >= 0 && y < body.n) {
-            tl_cat(l, &body.l[y]);
-        }
-        tl_pad(l, bw - 1, txt);
-        tl_put(l, border, "│", strlen("│"));
-    }
-    l = tl_new(&b->L, TC_NONE);
-    tl_put(l, border, "╰", strlen("╰"));
-    for (int x = 0; x < bw - 2; x++) {
-        tl_put(l, border, "─", strlen("─"));
-    }
-    tl_put(l, border, "╯", strlen("╯"));
-    tl_free(&body);
+    out_lines(&L, txt, " ", " ");
+    out_blank();
 }
 
-/* A sent user message: a tinted panel with an accent bar down its left edge,
- * one row of padding above and below. */
-static void lay_user_cell(tlines_t *L, const char *t, size_t n, int w)
+/* Plain output of the agent (menus, messages before the model is connected): finished lines go out. */
+static void raw_text(const char *s, size_t n)
 {
-    tsty_t bar = sty_bg(T.accent, T.user_bg, 0), in = sty_bg(T.text, T.user_bg, 0);
-    int inner = w - 4 > 1 ? w - 4 : 1;
-    tlines_t body = {0};
-    lay_text(&body, t, n, in, inner, T.user_bg);
-    for (int y = -1; y <= body.n; y++) {
-        tline_t *l = tl_new(L, TC_NONE);
-        tl_put(l, bar, "┃", strlen("┃"));
-        tl_put(l, in, "  ", 2);
-        if (y >= 0 && y < body.n) {
-            tl_cat(l, &body.l[y]);
-        }
-        tl_pad(l, w, in);
-    }
-    tl_free(&body);
-}
-
-/* First chat message: the header and connect-flow lines go, so the conversation starts at the top. */
-static void blk_clear_all(void)
-{
-    int n = g_nb;
-    for (int i = 0; i < n; i++) {
-        tsb_free(&g_b[i].text);
-        free(g_b[i].extra);
-        tl_free(&g_b[i].L);
-    }
-    memmove(g_b, g_b + n, (size_t)(g_nb - n) * sizeof(*g_b));
-    g_nb -= n;
-    if (g_nb > 0) {
-        g_b[0].sep = 0;
-        g_b[0].lw = -1;
-    }
-    g_scroll = 0;
-    g_last_total = -1;
-}
-
-/* Append C (laid out for width w) to L behind a gutter of width g; the label goes on line `at`
- * of C. A line's fill colour (code blocks) is kept inside the content column, not the gutter. */
-static void put_gutter(tlines_t *L, tlines_t *C, int g, int w, const char *label, uint32_t lc, int at)
-{
-    if (g == 0 && label) {
-        tline_t *l = tl_new(L, TC_NONE);
-        tl_put(l, sty(lc, TA_BOLD), label, strlen(label));
-    }
-    for (int y = 0; y < C->n; y++) {
-        uint32_t fill = C->l[y].fill;
-        tline_t *l = tl_new(L, g > 0 ? TC_NONE : fill);
-        if (g > 0) {
-            if (label && y == at) {
-                int lw = tu_strwidth(label, strlen(label));
-                tl_pad(l, g - 2 - lw, sty(T.text, 0));
-                tl_put(l, sty(lc, TA_BOLD), label, strlen(label));
-            }
-            tl_pad(l, g, sty(T.text, 0));
-        }
-        int r0 = l->n;
-        tl_cat(l, &C->l[y]);
-        if (g > 0 && fill != TC_NONE) {
-            for (int k = r0; k < l->n; k++) {
-                if (l->r[k].s.bg == TC_NONE) {
-                    l->r[k].s.bg = fill;
-                }
-            }
-            tl_pad(l, g + w, sty_bg(T.text, fill, 0));
-        }
-    }
-    tl_free(C);
-}
-
-static void lay_block(blk_t *b, int cw)
-{
-    tl_free(&b->L);
-    if (b->sep) {
-        tl_blank(&b->L);
-    }
-    const char *t = b->text.p ? b->text.p : "";
-    if (b->kind == B_HEADER) {
-        lay_header(b, cw);
-        b->lw = cw;
-        b->lx = g_expand;
-        return;
-    }
-    if (b->kind == B_TOOL && !g_expand) { /* internals: only in the details view */
-        tl_free(&b->L);
-        b->lw = cw;
-        b->lx = g_expand;
-        return;
-    }
-    int g = gutter_w(cw), w = cw - g;
-    tlines_t C = {0};
-    int at = 0;
-    switch (b->kind) {
-    case B_RAW:
-        lay_ansi(&C, t, b->text.len, w);
-        break;
-    case B_USER:
-        lay_user_cell(&C, t, b->text.len, w);
-        at = 1;
-        break;
-    case B_ASK: {
-        tcells_t *c = tc_new();
-        tc_add(c, t, b->text.len, sty(T.muted, 0));
-        tc_add(c, " ", 1, sty(T.text, 0));
-        const char *ans = b->state ? "••••••••" : (b->extra ? b->extra : "");
-        tc_add(c, ans, strlen(ans), sty(T.text, TA_BOLD));
-        tc_flow(c, &C, w, TC_NONE, 1);
-        tc_free(c);
-        break;
-    }
-    case B_AGENT:
-        if (b->text.len == 0 || !t[strspn(t, " \n\t")]) {
-            tline_t *l = tl_new(&C, TC_NONE);
-            tl_put(l, sty(T.muted, TA_ITALIC), "(empty response)", strlen("(empty response)"));
+    tsb_add(&g_rawl, s, n);
+    char *nl;
+    while (g_rawl.p && (nl = memchr(g_rawl.p, '\n', g_rawl.len))) {
+        size_t k = (size_t)(nl - g_rawl.p);
+        tlines_t L = {0};
+        lay_ansi(&L, g_rawl.p, k, text_w());
+        if (!L.n || (L.n == 1 && L.l[0].w == 0)) { /* nothing visible on it */
+            tl_free(&L);
+            out_blank();
         } else {
-            lay_markdown(&C, t, w);
+            out_lines(&L, sty(T.text, 0), "  ", "  ");
         }
-        break;
-    case B_THINK: {
-        tline_t *h = tl_new(&C, TC_NONE);
-        tl_put(h, sty(T.purple, 0), "✻ ", strlen("✻ "));
-        tl_put(h, sty(T.muted, TA_ITALIC), "Thinking", 8);
-        int bf = C.n;
-        lay_text(&C, t, b->text.len, sty(T.muted, TA_ITALIC), w - 2, TC_NONE);
-        collapse(&C, bf, 4, "");
-        tl_prefix(&C, bf, sty(T.muted, 0), "  ", sty(T.muted, 0), "  ");
-        break;
+        memmove(g_rawl.p, nl + 1, g_rawl.len - k);
+        g_rawl.len -= k + 1;
     }
-    case B_TOOL: {
-        /* text = name NUL args-json (see on_record) */
-        const char *nm = t;
-        const char *args = b->text.p && strlen(t) + 1 < b->text.len ? t + strlen(t) + 1 : "{}";
-        tsb_t a = {0};
-        args_summary(&a, args);
-        uint32_t dot = b->state == TOOL_RUN ? T.muted : b->state == TOOL_OK ? T.ok : T.err;
-        tcells_t *c = tc_new();
-        tc_add(c, nm, strlen(nm), sty(T.text, TA_BOLD));
-        tc_add(c, "(", 1, sty(T.muted, 0));
-        if (a.len) {
-            tc_add(c, a.p, a.len, sty(T.muted, 0));
-        }
-        tc_add(c, ")", 1, sty(T.muted, 0));
-        tc_flow(c, &C, w - 2, TC_NONE, 1);
-        tc_free(c);
-        tsb_free(&a);
-        collapse(&C, 0, 3, "");
-        tl_prefix(&C, 0, sty(dot, 0), "⏺ ", sty(T.text, 0), "  ");
-        if (b->state != TOOL_RUN) {
-            const char *r = b->extra && *b->extra ? b->extra : "(no output)";
-            int rf = C.n;
-            lay_text(&C, r, strlen(r), sty(b->state == TOOL_ERR ? T.err : T.muted, 0), w - 5, TC_NONE);
-            collapse(&C, rf, 3, "");
-            tl_prefix(&C, rf, sty(T.muted, 0), "  ⎿  ", sty(T.muted, 0), "     ");
-        }
-        break;
-    }
-    }
-    char lab[32];
-    if (b->num) {
-        gutter_label(lab, sizeof(lab), b->kind == B_USER, b->num);
-    }
-    put_gutter(&b->L, &C, g, w, b->num ? lab : NULL, b->kind == B_USER ? T.in_label : T.out_label, at);
-    b->lw = cw;
-    b->lx = g_expand;
+    g_dirty = 1;
 }
 
-/* Lay out what changed; returns the total number of transcript lines. */
-static int layout_all(int cw)
+static void flush_raw(void)
 {
-    int total = 0;
-    for (int i = 0; i < g_nb; i++) {
-        blk_t *b = &g_b[i];
-        if (b->lw != cw || ((b->kind == B_THINK || b->kind == B_TOOL) && b->lx != g_expand)) {
-            lay_block(b, cw);
-        }
-        total += b->L.n;
+    if (g_rawl.len) {
+        raw_text("\n", 1);
     }
-    return total;
 }
 
-/* ================= child (the agent) ================= */
+/* A finished reply (markdown). */
+static void out_reply(const char *md)
+{
+    tlines_t L = {0};
+    lay_markdown(&L, md, text_w());
+    out_blank();
+    out_lines(&L, sty(T.text, 0), "  ", "  ");
+}
 
-static pid_t g_child = -1;
-static int   g_cin = -1, g_cout = -1;
-static tsb_t g_rx;          /* bytes from the child not yet processed */
-static int   g_raw_open;    /* last block is RAW and may receive more text */
+/* Reasoning, shown only with ctrl+o. */
+static void out_think(const char *t)
+{
+    if (g_expand && t[strspn(t, " \n\t")]) {
+        out_text(t, sty(T.muted, TA_ITALIC), sty(T.muted, 0), "  ✻ ", "    ");
+    }
+}
 
-static int    g_await;      /* child is waiting for a line */
-static int    g_secret;
-static int    g_chat;       /* the prompt is the chat prompt (">> ") */
+/* ================= the agent process ================= */
+
+static pid_t  g_child = -1;
+static int    g_cin = -1, g_cout = -1;
+static int    g_await;  /* the agent waits for a line */
+static int    g_chat;   /* ... and it is the chat prompt (">>"), not a question */
+static int    g_secret; /* ... and it is secret (a key, a password) */
 static char   g_label[256];
 static int    g_busy;
 static char   g_busy_label[96];
@@ -749,6 +387,7 @@ static void notice(const char *m)
 {
     snprintf(g_notice, sizeof(g_notice), "%s", m);
     g_notice_until = now_s() + 3;
+    g_dirty = 1;
 }
 
 static void send_json(cJSON *o)
@@ -773,11 +412,19 @@ static void send_json(cJSON *o)
     free(s);
 }
 
-static void send_flag(const char *k)
+static void send_line(const char *k, const char *v)
 {
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddTrueToObject(o, k);
+    if (v) {
+        cJSON_AddStringToObject(o, k, v);
+    } else {
+        cJSON_AddTrueToObject(o, k);
+    }
     send_json(o);
+    cJSON *x = cJSON_GetObjectItemCaseSensitive(o, k);
+    if (cJSON_IsString(x)) {
+        explicit_bzero(x->valuestring, strlen(x->valuestring));
+    }
     cJSON_Delete(o);
     g_await = 0;
 }
@@ -790,26 +437,26 @@ static void interrupt_child(void)
     }
 }
 
-/* ================= editor ================= */
+/* ================= input line editor ================= */
 
-static tsb_t  E;        /* input text */
-static size_t Epos;     /* cursor (byte offset) */
-static int    Etop;     /* first visible visual line */
-static tsb_t  g_stash;  /* chat draft kept while a question is asked */
+static tsb_t  E;       /* input text */
+static size_t Epos;    /* cursor (byte offset) */
+static int    Etop;    /* first visible row of the input */
+static tsb_t  g_stash; /* chat draft kept while a question is asked */
 static int    g_stashed;
 static char  *g_hist[300];
 static int    g_nh, g_hidx = -1;
 static char  *g_draft;
 
+#define INPUT_ROWS 8 /* the input box grows up to this many rows, then scrolls */
+
 static void ed_clear(void)
 {
     if (E.p) {
         explicit_bzero(E.p, E.cap);
-    }
-    E.len = 0;
-    if (E.p) {
         E.p[0] = '\0';
     }
+    E.len = 0;
     Epos = 0;
     Etop = 0;
 }
@@ -826,14 +473,14 @@ static void ed_insert(const char *s, size_t n)
     if (!E.p) {
         tsb_add(&E, "", 0);
     }
-    if (E.len + n + 1 > E.cap) {
+    if (E.len + n + 1 > E.cap) { /* grow by hand: the old buffer may hold a secret */
         size_t nc = (E.len + n + 1) * 2;
         char *nb = malloc(nc);
         if (!nb) {
             abort();
         }
         memcpy(nb, E.p, E.len + 1);
-        explicit_bzero(E.p, E.cap); /* may hold a secret */
+        explicit_bzero(E.p, E.cap);
         free(E.p);
         E.p = nb;
         E.cap = nc;
@@ -907,16 +554,24 @@ static int chw(size_t i, int *len)
     return g_secret ? 1 : tu_width(cp);
 }
 
-static int cols_between(size_t a, size_t b);
+static int cols_between(size_t a, size_t b)
+{
+    int c = 0;
+    for (size_t i = a; i < b;) {
+        int l;
+        c += chw(i, &l);
+        i += (size_t)l;
+    }
+    return c;
+}
 
-/* Visual lines of the input at text width tw (word wrap + hard newlines). */
+/* Rows of the input at text width tw (word wrap + hard newlines). */
 static int ed_lines(vl_t **out, int tw)
 {
     static vl_t *v;
     static int   cap;
-    int n = 0;
-    size_t a = 0, i = 0, brk = 0; /* brk: just after the last space on this line (0 = none) */
-    int col = 0;
+    int n = 0, col = 0;
+    size_t a = 0, i = 0, brk = 0; /* brk: just after the last space on this row (0 = none) */
 #define PUSH(x, y)                                                                                                \
     do {                                                                                                          \
         if (n == cap) {                                                                                           \
@@ -940,7 +595,7 @@ static int ed_lines(vl_t **out, int tw)
         }
         int l, w = chw(i, &l);
         if (col + w > tw && col > 0) {
-            if (brk > a && !g_secret && E.p[i] != ' ') { /* word wrap: move the partial word down */
+            if (brk > a && !g_secret && E.p[i] != ' ') { /* word wrap: the partial word moves down */
                 PUSH(a, brk);
                 col = cols_between(brk, i);
                 a = brk;
@@ -964,17 +619,6 @@ static int ed_lines(vl_t **out, int tw)
     return n;
 }
 
-static int cols_between(size_t a, size_t b)
-{
-    int c = 0;
-    for (size_t i = a; i < b;) {
-        int l;
-        c += chw(i, &l);
-        i += (size_t)l;
-    }
-    return c;
-}
-
 static void ed_cursor(const vl_t *v, int n, int *row, int *col)
 {
     int r = 0;
@@ -982,7 +626,7 @@ static void ed_cursor(const vl_t *v, int n, int *row, int *col)
         if (Epos >= v[i].a && Epos <= v[i].b) {
             r = i;
             if (!(Epos == v[i].b && i + 1 < n && v[i + 1].a == v[i].b)) {
-                break; /* at a soft wrap the cursor belongs to the next line */
+                break; /* at a soft wrap the cursor belongs to the next row */
             }
         }
     }
@@ -1023,8 +667,7 @@ static void hist_move(int dir)
     if (!g_chat || g_secret || g_nh == 0) {
         return;
     }
-    int idx = g_hidx < 0 ? g_nh : g_hidx;
-    int ni = idx + dir;
+    int ni = (g_hidx < 0 ? g_nh : g_hidx) + dir;
     if (ni < 0 || ni > g_nh) {
         return;
     }
@@ -1036,324 +679,145 @@ static void hist_move(int dir)
     g_hidx = ni == g_nh ? -1 : ni;
 }
 
-/* ================= screen ================= */
+/* ================= the live area ================= */
 
-static tsb_t *g_prev;  /* last frame, one string per row */
-static int    g_prevH;
-static int    g_full = 1;
-static int    g_dirty = 1;
-static int    g_tH = 1;   /* transcript rows (for paging) */
+static int input_tw(void) { return g_W > 10 ? g_W - 6 : 4; } /* "│ > " text " │" */
 
-static void row_reset(tsb_t *rows, int n)
+static void box_edge(tlines_t *L, const char *a, const char *b)
 {
-    for (int i = 0; i < n; i++) {
-        tsb_free(&rows[i]);
+    tline_t *l = tl_new(L, TC_NONE);
+    tsty_t s = sty(T.muted, 0);
+    tl_put(l, s, a, strlen(a));
+    for (int x = 0; x < g_W - 2; x++) {
+        tl_put(l, s, "─", strlen("─"));
+    }
+    tl_put(l, s, b, strlen(b));
+}
+
+/* The live lines; *crow / *ccol: where the cursor goes (row within them, column). */
+static void build_live(tlines_t *L, int *crow, int *ccol)
+{
+    static const char *const SPIN[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    tsty_t mut = sty(T.muted, 0), txt = sty(T.text, 0);
+    vl_t *v;
+    int tw = input_tw(), n = ed_lines(&v, tw), r, c;
+    ed_cursor(v, n, &r, &c);
+    int rows = n < INPUT_ROWS ? n : INPUT_ROWS;
+    rows = rows > g_H - 8 ? (g_H > 9 ? g_H - 8 : 1) : rows;
+    if (r < Etop) {
+        Etop = r;
+    } else if (r >= Etop + rows) {
+        Etop = r - rows + 1;
+    }
+    int fixed = rows + 4 + (g_busy && !g_await) + (!g_chat && g_await && g_label[0]); /* box, hint, spinner, label */
+
+    /* a reply on its way: its last lines, as many as fit */
+    if (g_stream.len || g_rawl.len) {
+        tlines_t S = {0};
+        if (g_stream.len) {
+            lay_markdown(&S, g_stream.p, text_w());
+        }
+        if (g_rawl.len) {
+            lay_ansi(&S, g_rawl.p, g_rawl.len, text_w());
+        }
+        int room = g_H - fixed - 2, from = S.n > room ? S.n - room : 0;
+        tl_blank(L);
+        for (int i = from; i < S.n && room > 0; i++) {
+            tline_t *l = tl_new(L, TC_NONE);
+            tl_put(l, txt, "  ", 2);
+            tl_cat(l, &S.l[i]);
+        }
+        tl_free(&S);
+    }
+    if (g_busy && !g_await) {
+        int secs = (int)(now_s() - g_busy_t0);
+        tline_t *l = tl_new(L, TC_NONE);
+        char t[160];
+        tl_put(l, txt, "  ", 2);
+        tl_put(l, sty(T.info, 0), SPIN[(int)(now_s() * 10) % 10], strlen(SPIN[0]));
+        snprintf(t, sizeof(t), " %s", g_busy_label[0] ? g_busy_label : "Working");
+        tl_put_trunc(l, txt, t, g_W - 30);
+        snprintf(t, sizeof(t), "  %ds · esc to interrupt", secs);
+        tl_put(l, mut, t, strlen(t));
+    }
+    tl_blank(L);
+    if (!g_chat && g_await && g_label[0]) { /* a question: its words above the box */
+        tl_put_trunc(tl_new(L, TC_NONE), sty(T.text, TA_BOLD), g_label, g_W - 2);
+    }
+    box_edge(L, "╭", "╮");
+    *crow = L->n + r - Etop;
+    *ccol = 4 + c;
+    for (int i = Etop; i < Etop + rows; i++) {
+        tline_t *l = tl_new(L, TC_NONE);
+        tl_put(l, mut, "│ ", strlen("│ "));
+        tl_put(l, g_await ? sty(T.text, TA_BOLD) : mut, i == 0 ? "> " : "  ", 2);
+        if (E.len == 0 && i == 0) {
+            const char *ph = !g_await ? "Botter is working" : g_chat ? "Describe the agent you want, or ask a question" : "";
+            tl_put_trunc(l, mut, ph, tw);
+        } else if (g_secret) {
+            for (int k = cols_between(v[i].a, v[i].b); k > 0; k--) {
+                tl_put(l, txt, "•", strlen("•"));
+            }
+        } else {
+            tl_put(l, txt, E.p + v[i].a, v[i].b - v[i].a);
+        }
+        tl_pad(l, g_W - 1, txt);
+        tl_put(l, mut, "│", strlen("│"));
+    }
+    box_edge(L, "╰", "╯");
+    tline_t *l = tl_new(L, TC_NONE);
+    if (g_notice[0]) {
+        tl_put(l, txt, "  ", 2);
+        tl_put_trunc(l, sty(T.info, 0), g_notice, g_W - 4);
+    } else {
+        char t[160];
+        int plan = g_plan_want >= 0 ? g_plan_want : g_plan;
+        snprintf(t, sizeof(t), "  %s · tab %s · ctrl+o %s", plan ? "plan mode" : "build mode", plan ? "build" : "plan",
+                 g_expand ? "less" : "details");
+        tl_put_trunc(l, mut, t, g_W - 2);
     }
 }
 
-static const char *const SPIN[] = {"✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳"};
-
-/* Chat box: starts after the margin and gutter, ends where transcript cells end. */
-static int box_x0(void) { return 1 + gutter_w(g_W - 2); }
-static int box_w(void) { return g_W - 1 - box_x0(); }
-static int input_tw(void) { return box_w() - 6 > 1 ? box_w() - 6 : 1; }
-
-/* Gutter of a chat-box row: margin, right-aligned label (if any), up to the box. */
-static void rb_gutter(rowb_t *rb, const char *label, uint32_t lc)
-{
-    int x0 = box_x0();
-    if (label && x0 > 1) {
-        int lw = tu_strwidth(label, strlen(label));
-        rb_fill(rb, T.bg, x0 - 2 - lw);
-        rb_text(rb, sty(lc, TA_BOLD), T.bg, label, lw);
-    }
-    rb_fill(rb, T.bg, x0);
-}
-
+/* Print the finished lines into the scrollback, then draw the live area over the old one. */
 static void render(void)
 {
-    int W = g_W, H = g_H;
-    tsb_t *cur = calloc((size_t)H, sizeof(*cur));
-    if (!cur) {
-        return;
-    }
-    int curx = -1, cury = -1;
-
-    if (W < 24 || H < 8) {
-        for (int y = 0; y < H; y++) {
-            rowb_t rb = {&cur[y], 0, W};
-            if (y == H / 2) {
-                const char *m = "terminal too small";
-                rb_fill(&rb, T.bg, (W - (int)strlen(m)) / 2);
-                rb_text(&rb, sty(T.muted, 0), T.bg, m, (int)strlen(m));
-            }
-            rb_fill(&rb, T.bg, W);
-        }
-        goto flush;
-    }
-
-    {
-        /* --- input box --- */
-        vl_t *v;
-        int tw = input_tw();
-        int nvl = ed_lines(&v, tw);
-        int crow, ccol;
-        ed_cursor(v, nvl, &crow, &ccol);
-        int footer = H >= 12 ? 1 : 0;
-        int maxbox = (H - 4 - footer) / 2;
-        if (maxbox < 1) {
-            maxbox = 1;
-        }
-        int bl = nvl < maxbox ? nvl : maxbox;
-        if (crow < Etop) {
-            Etop = crow;
-        }
-        if (crow >= Etop + bl) {
-            Etop = crow - bl + 1;
-        }
-        if (Etop > nvl - bl) {
-            Etop = nvl - bl;
-        }
-        if (Etop < 0) {
-            Etop = 0;
-        }
-        int box_top = H - footer - (bl + 2);
-        int status_y = box_top - 1;
-        int tH = status_y;
-        g_tH = tH;
-
-        /* --- transcript --- */
-        int cw = W - 2;
-        int total = layout_all(cw);
-        if (g_last_total >= 0 && g_scroll > 0 && cw == g_last_cw && total > g_last_total) {
-            g_scroll += total - g_last_total; /* keep the view still while reading back */
-        }
-        g_last_total = total;
-        g_last_cw = cw;
-        int maxs = total > tH ? total - tH : 0;
-        if (g_scroll > maxs) {
-            g_scroll = maxs;
-        }
-        if (g_scroll < 0) {
-            g_scroll = 0;
-        }
-        int first = total > tH ? total - tH - g_scroll : 0;
-        int bi = 0, li = first;
-        while (bi < g_nb && li >= g_b[bi].L.n) {
-            li -= g_b[bi].L.n;
-            bi++;
-        }
-        for (int y = 0; y < tH; y++) {
-            rowb_t rb = {&cur[y], 0, W};
-            rb_fill(&rb, T.bg, 1);
-            if (bi < g_nb) {
-                const tline_t *l = &g_b[bi].L.l[li];
-                uint32_t fill = l->fill == TC_NONE ? T.bg : l->fill;
-                rb_line(&rb, l, T.bg);
-                rb_fill(&rb, fill, W - 1);
-                if (++li >= g_b[bi].L.n) {
-                    li = 0;
-                    bi++;
-                    while (bi < g_nb && g_b[bi].L.n == 0) {
-                        bi++;
-                    }
-                }
-            }
-            rb_fill(&rb, T.bg, W);
-        }
-
-        /* --- status line --- */
-        {
-            rowb_t rb = {&cur[status_y], 0, W};
-            rb_fill(&rb, T.bg, 1);
-            double t = now_s();
-            if (g_notice[0] && t < g_notice_until) {
-                rb_text(&rb, sty(T.muted, TA_ITALIC), T.bg, g_notice, tu_strwidth(g_notice, strlen(g_notice)));
-            } else if (g_busy && !g_await) {
-                int f = (int)((t - g_busy_t0) * 8) % 8;
-                char m[200];
-                rb_text(&rb, sty(T.accent, TA_BOLD), T.bg, SPIN[f], 1);
-                snprintf(m, sizeof(m), " %s…", g_busy_label);
-                rb_text(&rb, sty(T.accent, 0), T.bg, m, tu_strwidth(m, strlen(m)));
-                snprintf(m, sizeof(m), " (%ds · esc to interrupt)", (int)(t - g_busy_t0));
-                rb_text(&rb, sty(T.muted, 0), T.bg, m, tu_strwidth(m, strlen(m)));
-            }
-            if (g_scroll > 0) {
-                char m[96];
-                snprintf(m, sizeof(m), "↓ %d more lines · pgdn ", g_scroll);
-                int mw = tu_strwidth(m, strlen(m));
-                if (rb.w + mw + 2 <= W) {
-                    rb_fill(&rb, T.bg, W - mw);
-                    rb_text(&rb, sty(T.info, 0), T.bg, m, mw);
-                }
-            }
-            rb_fill(&rb, T.bg, W);
-        }
-
-        /* --- box --- */
-        uint32_t bc = g_await ? T.accent : T.surface;
-        tsty_t bs = sty(bc, 0);
-        int bx1 = box_x0() + box_w(); /* one past the box's right edge */
-        {
-            rowb_t rb = {&cur[box_top], 0, W};
-            rb_gutter(&rb, NULL, 0);
-            rb_text(&rb, bs, T.bg, "╭─", 2);
-            if (g_await && !g_chat && g_label[0]) {
-                tline_t lab = {.fill = TC_NONE};
-                tl_put(&lab, sty(T.text, TA_BOLD), " ", 1);
-                tl_put_trunc(&lab, sty(T.text, TA_BOLD), g_label, box_w() - 6);
-                tl_put(&lab, sty(T.text, TA_BOLD), " ", 1);
-                rb_line(&rb, &lab, T.bg);
-                for (int k = 0; k < lab.n; k++) {
-                    free(lab.r[k].t);
-                }
-                free(lab.r);
-            }
-            while (rb.w < bx1 - 1) {
-                rb_text(&rb, bs, T.bg, "─", 1);
-            }
-            rb_text(&rb, bs, T.bg, "╮", 1);
-            rb_fill(&rb, T.bg, W);
-        }
-        for (int i = 0; i < bl; i++) {
-            int r = Etop + i;
-            rowb_t rb = {&cur[box_top + 1 + i], 0, W};
-            rb_gutter(&rb, NULL, 0);
-            int bx0 = rb.w;
-            rb_text(&rb, bs, T.bg, "│", 1);
-            rb_text(&rb, sty(T.text, 0), T.user_bg, " ", 1);
-            if (r == 0) {
-                rb_text(&rb, sty(g_await ? T.accent : T.muted, TA_BOLD), T.user_bg, g_secret ? "⚿ " : "❯ ", 2);
-            } else {
-                rb_fill(&rb, T.user_bg, bx0 + 4);
-            }
-            if (E.len == 0 && r == 0) {
-                const char *ph = !g_await ? (g_busy ? "Botter is working… (type ahead; esc interrupts)" : "")
-                               : g_secret ? "hidden input"
-                               : g_chat   ? "Describe an agent to build, or ask anything"
-                                          : "type your answer";
-                rb_text(&rb, sty(T.muted, TA_ITALIC), T.user_bg, ph, tu_strwidth(ph, strlen(ph)));
-            } else if (g_secret) {
-                for (size_t k = v[r].a; k < v[r].b;) {
-                    int l;
-                    tu_decode(E.p + k, v[r].b - k, &l);
-                    rb_text(&rb, sty(T.text, 0), T.user_bg, "•", 1);
-                    k += (size_t)l;
-                }
-            } else {
-                char *seg = strndup(E.p + v[r].a, v[r].b - v[r].a);
-                if (seg) {
-                    rb_text(&rb, sty(T.text, 0), T.user_bg, seg, tu_strwidth(seg, strlen(seg)));
-                    free(seg);
-                }
-            }
-            rb_fill(&rb, T.user_bg, bx1 - 1);
-            rb_text(&rb, bs, T.bg, "│", 1);
-            rb_fill(&rb, T.bg, W);
-            if (r == crow) {
-                cury = box_top + 1 + i;
-                curx = bx0 + 4 + ccol;
-            }
-        }
-        {
-            rowb_t rb = {&cur[box_top + bl + 1], 0, W};
-            rb_gutter(&rb, NULL, 0);
-            rb_text(&rb, bs, T.bg, "╰", 1);
-            if (nvl > bl) {
-                char m[48];
-                snprintf(m, sizeof(m), "─ %d/%d ", crow + 1, nvl);
-                rb_text(&rb, bs, T.bg, m, tu_strwidth(m, strlen(m)));
-            }
-            /* mode label at the right end of the border: " Build " / " Plan " (tab switches) */
-            const char *ml = g_plan ? " Plan " : " Build ";
-            int mlw = (int)strlen(ml);
-            int lab = rb.w + mlw + 3 <= bx1 - 1;
-            while (rb.w < bx1 - 1 - (lab ? mlw + 1 : 0)) {
-                rb_text(&rb, bs, T.bg, "─", 1);
-            }
-            if (lab) {
-                rb_text(&rb, sty(g_plan ? T.purple : T.accent, TA_BOLD), T.bg, ml, mlw);
-                rb_text(&rb, bs, T.bg, "─", 1);
-            }
-            rb_text(&rb, bs, T.bg, "╯", 1);
-            rb_fill(&rb, T.bg, W);
-        }
-
-        /* --- footer --- */
-        if (footer) {
-            rowb_t rb = {&cur[H - 1], 0, W};
-            rb_fill(&rb, T.bg, 1);
-            const char *full = "enter send · tab plan/build · alt+enter newline · pgup/pgdn/wheel scroll · ctrl+o details · ctrl+c quit";
-            const char *mid = "enter send · tab plan/build · pgup/pgdn scroll";
-            const char *small = "ctrl+c quit";
-            int mw = g_model ? tu_strwidth(g_model, strlen(g_model)) + 2 : 0;
-            const char *h = tu_strwidth(full, strlen(full)) + mw + 2 <= W ? full
-                          : tu_strwidth(mid, strlen(mid)) + mw + 2 <= W ? mid
-                                                                         : small;
-            rb_text(&rb, sty(T.muted, 0), T.bg, h, tu_strwidth(h, strlen(h)));
-            if (g_model && rb.w + mw + 1 <= W) {
-                rb_fill(&rb, T.bg, W - mw);
-                rb_text(&rb, sty(T.purple, 0), T.bg, g_model, mw - 2);
-            }
-            rb_fill(&rb, T.bg, W);
-        }
-    }
-
-flush:;
     tsb_t o = {0};
-    tsb_str(&o, "\033[?2026h\033[?25l");
-    if (g_full || g_prevH != H) {
-        tsb_str(&o, "\033[0m\033[2J");
+    tlines_t L = {0};
+    int crow, ccol;
+    build_live(&L, &crow, &ccol);
+    tsb_str(&o, "\033[?25l");
+    if (g_live_up) {
+        tsb_fmt(&o, "\033[%dA", g_live_up);
     }
-    for (int y = 0; y < H; y++) {
-        if (!g_full && g_prevH == H && g_prev && g_prev[y].p && cur[y].p && strcmp(g_prev[y].p, cur[y].p) == 0) {
-            continue;
-        }
-        tsb_fmt(&o, "\033[%d;1H", y + 1);
-        if (cur[y].p) {
-            tsb_add(&o, cur[y].p, cur[y].len);
+    tsb_str(&o, "\r\033[J");
+    for (int i = 0; i < g_out.n; i++) {
+        put_line(&o, &g_out.l[i]);
+        tsb_str(&o, "\r\n");
+    }
+    tl_free(&g_out);
+    for (int i = 0; i < L.n; i++) {
+        put_line(&o, &L.l[i]);
+        if (i + 1 < L.n) {
+            tsb_str(&o, "\r\n");
         }
     }
-    tsb_str(&o, "\033[0m");
-    if (curx >= 0 && curx < W) {
-        tsb_fmt(&o, "\033[%d;%dH\033[?25h", cury + 1, curx + 1);
+    if (L.n - 1 - crow > 0) {
+        tsb_fmt(&o, "\033[%dA", L.n - 1 - crow);
     }
-    tsb_str(&o, "\033[?2026l");
-    for (size_t off = 0; off < o.len;) {
-        ssize_t w = write(g_tty, o.p + off, o.len - off);
-        if (w < 0 && errno == EINTR) {
-            continue;
-        }
-        if (w <= 0) {
-            break;
-        }
-        off += (size_t)w;
-    }
+    tsb_fmt(&o, "\r\033[%dC%s", ccol, g_await ? "\033[?25h" : "");
+    g_live_up = crow;
+    tl_free(&L);
+    write_all(o.p, o.len);
     tsb_free(&o);
-    if (g_prev) {
-        row_reset(g_prev, g_prevH);
-        free(g_prev);
-    }
-    g_prev = cur;
-    g_prevH = H;
-    g_full = 0;
     g_dirty = 0;
 }
 
 /* ================= events from the agent ================= */
 
-static void raw_text(const char *s, size_t n)
+static const char *jstr(const cJSON *j, const char *k)
 {
-    if (n == 0) {
-        return;
-    }
-    if (!g_raw_open || g_nb == 0 || g_b[g_nb - 1].kind != B_RAW) {
-        blk_add(B_RAW);
-        g_raw_open = 1;
-    }
-    blk_t *b = &g_b[g_nb - 1];
-    tsb_add(&b->text, s, n);
-    b->lw = -1;
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, k);
+    return cJSON_IsString(v) ? v->valuestring : "";
 }
 
 static void strip_sgr(const char *s, char *out, size_t cap)
@@ -1362,9 +826,7 @@ static void strip_sgr(const char *s, char *out, size_t cap)
     for (; *s && o + 1 < cap; s++) {
         if (*s == '\033') {
             if (s[1] == '[') {
-                s += 2;
-                while (*s && !(*s >= '@' && *s <= '~')) {
-                    s++;
+                for (s += 2; *s && !(*s >= '@' && *s <= '~'); s++) {
                 }
                 if (!*s) {
                     break;
@@ -1380,29 +842,18 @@ static void strip_sgr(const char *s, char *out, size_t cap)
     while (o > 0 && out[o - 1] == ' ') {
         out[--o] = '\0';
     }
-    size_t lead = strspn(out, " ");
-    memmove(out, out + lead, strlen(out + lead) + 1);
-}
-
-static const char *jstr(const cJSON *j, const char *k)
-{
-    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, k);
-    return cJSON_IsString(v) ? v->valuestring : "";
+    memmove(out, out + strspn(out, " "), strlen(out + strspn(out, " ")) + 1);
 }
 
 /* Ask botcore to switch Plan/Build (a command line; it answers with a "mode" event and a new prompt). */
 static void send_mode(int plan)
 {
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "line", plan ? "/plan" : "/build");
-    send_json(o);
-    cJSON_Delete(o);
-    g_await = 0;
+    send_line("line", plan ? "/plan" : "/build");
     g_plan_want = -1;
-    g_plan = plan; /* shown at once; the event confirms it */
+    g_plan = plan;
 }
 
-/* tab: toggle Plan/Build now, or at the next chat prompt if Botter is working or asking something. */
+/* tab: switch Plan/Build now, or at the next chat prompt if Botter is busy or asking something. */
 static void toggle_mode(void)
 {
     int want = !(g_plan_want >= 0 ? g_plan_want : g_plan);
@@ -1410,7 +861,7 @@ static void toggle_mode(void)
         send_mode(want);
     } else {
         g_plan_want = want;
-        notice(want ? "Plan mode after this turn" : "Build mode after this turn");
+        notice(want ? "plan mode after this turn" : "build mode after this turn");
     }
 }
 
@@ -1418,9 +869,8 @@ static void on_record(const char *json)
 {
     cJSON *j = cJSON_Parse(json);
     const char *ev = jstr(j, "ev");
-    g_raw_open = 0;
     if (!strcmp(ev, "prompt")) {
-        g_s_text = g_s_think = -1; /* a turn that failed sends no final text: close its stream here */
+        flush_raw();
         char lab[256];
         strip_sgr(jstr(j, "text"), lab, sizeof(lab));
         g_await = 1;
@@ -1428,6 +878,10 @@ static void on_record(const char *json)
         g_chat = !g_secret && strcmp(lab, ">>") == 0;
         snprintf(g_label, sizeof(g_label), "%s", g_chat ? "" : lab);
         if (g_chat) {
+            if (g_stream.len) { /* a turn that failed sends no final text: what came stays */
+                out_reply(g_stream.p);
+                tsb_free(&g_stream);
+            }
             if (g_stashed) {
                 ed_set(g_stash.p ? g_stash.p : "");
                 tsb_free(&g_stash);
@@ -1446,74 +900,55 @@ static void on_record(const char *json)
         }
     } else if (!strcmp(ev, "mode")) {
         g_plan = !strcmp(jstr(j, "mode"), "plan");
-        if (g_plan_want == g_plan) {
-            g_plan_want = -1;
-        }
+        g_plan_want = g_plan_want == g_plan ? -1 : g_plan_want;
     } else if (!strcmp(ev, "busy")) {
-        if (!g_busy) {
-            g_busy_t0 = now_s();
-        }
+        g_busy_t0 = g_busy ? g_busy_t0 : now_s();
         g_busy = 1;
         snprintf(g_busy_label, sizeof(g_busy_label), "%s", jstr(j, "label"));
     } else if (!strcmp(ev, "idle")) {
         g_busy = 0;
-    } else if (!strcmp(ev, "info")) {
-        free(g_model);
-        free(g_cwd);
-        g_model = strdup(jstr(j, "model"));
-        g_cwd = strdup(jstr(j, "cwd"));
-        for (int i = 0; i < g_nb; i++) {
-            if (g_b[i].kind == B_HEADER) {
-                g_b[i].lw = -1;
-            }
-        }
     } else if (!strcmp(ev, "delta")) {
-        /* streamed piece: append to the open block of its kind, or start one */
-        int think = !strcmp(jstr(j, "kind"), "thinking");
-        int *open = think ? &g_s_think : &g_s_text;
-        if (*open < 0 || *open >= g_nb) {
-            blk_add(think ? B_THINK : B_AGENT);
-            *open = g_nb - 1;
-        }
-        tsb_str(&g_b[*open].text, jstr(j, "text"));
-        g_b[*open].lw = -1;
-        if (think) {
-            g_s_text = -1; /* text after new reasoning starts a new block */
+        if (!strcmp(jstr(j, "kind"), "thinking")) {
+            tsb_str(&g_think, jstr(j, "text"));
+            snprintf(g_busy_label, sizeof(g_busy_label), "Thinking");
         } else {
+            tsb_str(&g_stream, jstr(j, "text"));
             snprintf(g_busy_label, sizeof(g_busy_label), "Writing");
         }
     } else if (!strcmp(ev, "thinking")) {
-        blk_text(B_THINK, jstr(j, "text"));
-    } else if (!strcmp(ev, "text") || !strcmp(ev, "reply")) {
-        /* the whole text: replaces what was streamed into the open block */
-        if (g_s_text >= 0 && g_s_text < g_nb) {
-            blk_t *b = &g_b[g_s_text];
-            tsb_free(&b->text);
-            tsb_str(&b->text, jstr(j, "text"));
-            b->lw = -1;
-        } else {
-            blk_text(B_AGENT, jstr(j, "text"));
+        out_think(jstr(j, "text"));
+        tsb_free(&g_think);
+    } else if (!strcmp(ev, "reply")) { /* the whole answer: replaces what was streamed */
+        flush_raw();
+        if (g_think.len) {
+            out_think(g_think.p);
+            tsb_free(&g_think);
         }
-        g_s_text = g_s_think = -1;
+        out_reply(jstr(j, "text"));
+        tsb_free(&g_stream);
+    } else if (!strcmp(ev, "text")) { /* words between tool calls, or a progress line: one bullet */
+        flush_raw();
+        tsb_free(&g_stream);
+        const char *t = jstr(j, "text");
+        if (t[strspn(t, " \n\t")]) {
+            out_text(t, sty(T.text, 0), sty(T.muted, 0), "  · ", "    ");
+        }
     } else if (!strcmp(ev, "tool")) {
-        g_s_text = g_s_think = -1;
-        blk_t *b = blk_add(B_TOOL);
-        const char *nm = jstr(j, "name");
-        tsb_add(&b->text, nm, strlen(nm) + 1); /* name NUL args */
-        tsb_str(&b->text, jstr(j, "args"));
-        b->state = TOOL_RUN;
         const char *st = jstr(j, "status");
         snprintf(g_busy_label, sizeof(g_busy_label), "%s", *st ? st : "Working");
+        if (g_expand) {
+            char line[400];
+            snprintf(line, sizeof(line), "%s %.300s", jstr(j, "name"), jstr(j, "args"));
+            out_text(line, sty(T.muted, 0), sty(T.muted, 0), "  ⏺ ", "    ");
+        }
     } else if (!strcmp(ev, "tool_result")) {
-        for (int i = g_nb - 1; i >= 0; i--) {
-            if (g_b[i].kind == B_TOOL && g_b[i].state == TOOL_RUN) {
-                const char *r = jstr(j, "text");
-                free(g_b[i].extra);
-                g_b[i].extra = strdup(r);
-                g_b[i].state = strncmp(r, "ERROR", 5) == 0 ? TOOL_ERR : TOOL_OK;
-                g_b[i].lw = -1;
-                break;
-            }
+        const char *r = jstr(j, "text");
+        int err = !strncmp(r, "ERROR", 5);
+        if (g_expand || err) {
+            char first[300];
+            snprintf(first, sizeof(first), "%.*s%s", (int)strcspn(r, "\n") > 200 ? 200 : (int)strcspn(r, "\n"), r,
+                     r[strcspn(r, "\n")] ? " …" : "");
+            out_text(first, sty(err ? T.err : T.muted, 0), sty(T.muted, 0), "    ⎿ ", "      ");
         }
         snprintf(g_busy_label, sizeof(g_busy_label), "Thinking");
     }
@@ -1521,20 +956,20 @@ static void on_record(const char *json)
     g_dirty = 1;
 }
 
-/* Split the child's output into ordinary text and "\x1e{json}\n" records. */
+/* Split the agent's output into plain text and "\x1e{json}\n" records. */
 static void process_rx(void)
 {
     size_t i = 0;
     while (i < g_rx.len) {
         char *rs = memchr(g_rx.p + i, '\x1e', g_rx.len - i);
         if (!rs) {
-            /* keep an incomplete UTF-8 tail for the next read */
-            size_t end = g_rx.len, k = end;
+            size_t end = g_rx.len, k = end; /* keep an unfinished UTF-8 character for the next read */
             while (k > i && end - k < 4 && is_cont((unsigned char)g_rx.p[k - 1])) {
                 k--;
             }
             if (k > i && end - k < 4 && (unsigned char)g_rx.p[k - 1] >= 0xC0) {
-                int need = ((unsigned char)g_rx.p[k - 1] >> 5) == 6 ? 2 : ((unsigned char)g_rx.p[k - 1] >> 4) == 14 ? 3 : 4;
+                unsigned char lead = (unsigned char)g_rx.p[k - 1];
+                int need = (lead >> 5) == 6 ? 2 : (lead >> 4) == 14 ? 3 : 4;
                 if ((int)(end - k + 1) < need) {
                     end = k - 1;
                 }
@@ -1547,7 +982,7 @@ static void process_rx(void)
         raw_text(g_rx.p + i, at - i);
         char *nl = memchr(rs, '\n', g_rx.len - at);
         if (!nl) {
-            i = at; /* incomplete record */
+            i = at; /* an unfinished record */
             break;
         }
         *nl = '\0';
@@ -1566,8 +1001,7 @@ static void process_rx(void)
 
 enum {
     K_NONE, K_ENTER, K_NEWLINE, K_BS, K_DEL, K_LEFT, K_RIGHT, K_UP, K_DOWN, K_HOME, K_END, K_WLEFT, K_WRIGHT,
-    K_WBS, K_WDEL, K_KILLEND, K_KILLSTART, K_PGUP, K_PGDN, K_SUP, K_SDOWN, K_TOP, K_BOTTOM, K_ESC, K_CTRLC,
-    K_CTRLD, K_CTRLL, K_CTRLO, K_WHEELUP, K_WHEELDN, K_TAB
+    K_WBS, K_WDEL, K_KILLEND, K_KILLSTART, K_ESC, K_CTRLC, K_CTRLD, K_CTRLL, K_CTRLO, K_TAB
 };
 
 static void submit(void)
@@ -1583,56 +1017,23 @@ static void submit(void)
         send_mode(text[1] == 'p');
         return;
     }
-    int is_msg = g_chat && text[strspn(text, " \n\t")] && text[strspn(text, " \t")] != '/';
-    cJSON *o = cJSON_CreateObject();
-    if (is_msg) { /* "[N] text": lets the model resolve "redo 3" to message/reply number 3 */
-        tsb_t tagged = {0};
-        tsb_fmt(&tagged, "[%d] ", g_cell + 1);
-        tsb_str(&tagged, text);
-        cJSON_AddStringToObject(o, "line", tagged.p);
-        explicit_bzero(tagged.p, tagged.len);
-        tsb_free(&tagged);
-    } else {
-        cJSON_AddStringToObject(o, "line", text);
-    }
-    send_json(o);
-    cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "line");
-    if (cJSON_IsString(v)) {
-        explicit_bzero(v->valuestring, strlen(v->valuestring));
-    }
-    cJSON_Delete(o);
-
     if (g_chat) {
-        if (is_msg) {
-            if (g_cell == 0) {
-                blk_clear_all();
-            }
-            blk_text(B_USER, text);
-        }
         if (text[strspn(text, " \n\t")]) {
+            out_blank();
+            out_text(text, sty(T.text, 0), sty(T.muted, 0), "│ ", "│ "); /* like the input box */
+            out_blank();
             hist_add(text);
         }
-    } else {
-        blk_t *b = blk_add(B_ASK);
-        tsb_str(&b->text, g_label);
-        b->state = g_secret;
-        b->extra = g_secret ? NULL : strdup(text);
+    } else if (g_label[0]) { /* a question and its answer */
+        char line[600];
+        snprintf(line, sizeof(line), "%s %s", g_label, g_secret ? "••••••" : text);
+        out_text(line, sty(T.muted, 0), sty(T.muted, 0), "  ", "  ");
     }
-    g_raw_open = 0;
+    send_line("line", text);
     free(g_draft);
     g_draft = NULL;
     g_hidx = -1;
     ed_clear();
-    g_await = 0;
-    g_scroll = 0;
-}
-
-static void scroll_by(int d)
-{
-    g_scroll += d;
-    if (g_scroll < 0) {
-        g_scroll = 0;
-    }
 }
 
 static void do_key(int k)
@@ -1656,10 +1057,9 @@ static void do_key(int k)
         }
         break;
     case K_TAB:
-        if (g_secret) {
-            break;
+        if (!g_secret) {
+            toggle_mode();
         }
-        toggle_mode();
         break;
     case K_BS:
         if (Epos > 0) {
@@ -1695,11 +1095,9 @@ static void do_key(int k)
     case K_END:
         Epos = v[r].b;
         break;
-    case K_KILLEND: {
-        size_t e = v[r].b;
-        ed_delete(Epos, e == Epos && e < E.len ? e + 1 : e);
+    case K_KILLEND:
+        ed_delete(Epos, v[r].b == Epos && v[r].b < E.len ? v[r].b + 1 : v[r].b);
         break;
-    }
     case K_KILLSTART:
         ed_delete(v[r].a, Epos);
         break;
@@ -1717,35 +1115,9 @@ static void do_key(int k)
             Epos = pos_at_col(v, r + 1, c);
         }
         break;
-    case K_PGUP:
-        scroll_by(g_tH > 3 ? g_tH - 2 : 1);
-        break;
-    case K_PGDN:
-        scroll_by(-(g_tH > 3 ? g_tH - 2 : 1));
-        break;
-    case K_SUP:
-        scroll_by(1);
-        break;
-    case K_SDOWN:
-        scroll_by(-1);
-        break;
-    case K_WHEELUP:
-        scroll_by(3);
-        break;
-    case K_WHEELDN:
-        scroll_by(-3);
-        break;
-    case K_TOP:
-        g_scroll = 1 << 30;
-        break;
-    case K_BOTTOM:
-        g_scroll = 0;
-        break;
     case K_ESC:
         if (g_busy && !g_await) {
             interrupt_child();
-        } else if (g_scroll) {
-            g_scroll = 0;
         }
         break;
     case K_CTRLC:
@@ -1753,7 +1125,7 @@ static void do_key(int k)
             if (g_chat && E.len) {
                 ed_clear();
             } else {
-                send_flag("intr");
+                send_line("intr", NULL);
                 ed_clear();
             }
         } else if (g_busy) {
@@ -1762,24 +1134,26 @@ static void do_key(int k)
         break;
     case K_CTRLD:
         if (g_await && E.len == 0) {
-            send_flag("eof");
+            send_line("eof", NULL);
         } else if (Epos < E.len) {
             ed_delete(Epos, ed_next(Epos));
         }
         break;
-    case K_CTRLL:
-        g_full = 1;
+    case K_CTRLL: /* a clean screen; the scrollback keeps what was said */
+        write_all("\033[H\033[2J", 7);
+        g_live_up = 0;
         break;
     case K_CTRLO:
         g_expand = !g_expand;
-        notice(g_expand ? "details: tool calls and full thinking" : "details hidden");
+        notice(g_expand ? "details on: tool calls and reasoning are shown from now on" : "details off");
         break;
     }
     g_dirty = 1;
 }
 
-/* Paste: CR/CRLF -> LF, tabs -> spaces, other control chars dropped. */
-static int    g_pasting;
+/* Paste: CR/CRLF -> LF, tabs -> spaces, other control characters dropped. */
+static int g_pasting;
+
 static void paste_text(const char *s, size_t n)
 {
     tsb_t t = {0};
@@ -1787,38 +1161,26 @@ static void paste_text(const char *s, size_t n)
         unsigned char ch = (unsigned char)s[i];
         if (ch == '\r') {
             tsb_add(&t, "\n", 1);
-            if (i + 1 < n && s[i + 1] == '\n') {
-                i++;
-            }
+            i += i + 1 < n && s[i + 1] == '\n';
         } else if (ch == '\t') {
             tsb_add(&t, "    ", 4);
-        } else if (ch == '\n' || ch >= 0x20) {
-            if (ch != 0x7f && !(g_secret && ch == '\n')) {
-                tsb_add(&t, (const char *)&s[i], 1);
-            }
+        } else if ((ch == '\n' && !g_secret) || (ch >= 0x20 && ch != 0x7f)) {
+            tsb_add(&t, (const char *)&s[i], 1);
         }
     }
     if (t.len) {
         ed_insert(t.p, t.len);
-    }
-    if (t.p) {
         explicit_bzero(t.p, t.len);
     }
     tsb_free(&t);
     g_dirty = 1;
 }
 
-static int csi_mod(const int *p, int np)
-{
-    return np >= 2 ? p[1] : 1; /* 2 shift, 3 alt, 5 ctrl */
-}
-
-/* Decode one key from s[0..n). Returns bytes consumed, 0 = incomplete (wait for more). */
+/* Decode one key from s[0..n). Returns bytes used, 0 = unfinished (wait for more). */
 static size_t parse_input(const unsigned char *s, size_t n, int final)
 {
     if (g_pasting) {
-        static const char END[] = "\033[201~";
-        const unsigned char *e = memmem(s, n, END, 6);
+        const unsigned char *e = memmem(s, n, "\033[201~", 6);
         if (e) {
             paste_text((const char *)s, (size_t)(e - s));
             g_pasting = 0;
@@ -1835,9 +1197,8 @@ static size_t parse_input(const unsigned char *s, size_t n, int final)
         if (n == 1) {
             if (final) {
                 do_key(K_ESC);
-                return 1;
             }
-            return 0;
+            return final;
         }
         if (s[1] == '[') {
             size_t i = 2;
@@ -1850,65 +1211,33 @@ static size_t parse_input(const unsigned char *s, size_t n, int final)
             if (i >= n) {
                 if (final) {
                     do_key(K_ESC);
-                    return 1;
                 }
-                return 0;
+                return final;
             }
-            unsigned char fin = s[i];
-            size_t len = i + 1;
-            int mouse = s[2] == '<';
             int p[8] = {0}, np = 0;
-            for (size_t k = mouse ? 3 : 2; k < i && np < 8;) {
-                int val = 0, any = 0;
+            for (size_t k = 2; k < i && np < 8;) {
+                int val = 0;
                 while (k < i && isdigit(s[k])) {
                     val = val * 10 + (s[k++] - '0');
-                    any = 1;
                 }
-                p[np++] = any ? val : 0;
+                p[np++] = val;
                 if (k < i && (s[k] == ';' || s[k] == ':')) {
                     k++;
                 } else {
                     break;
                 }
             }
-            if (mouse) {
-                if (fin == 'M' && np >= 1) {
-                    if (p[0] == 64) {
-                        do_key(K_WHEELUP);
-                    } else if (p[0] == 65) {
-                        do_key(K_WHEELDN);
-                    }
-                }
-                return len;
-            }
-            int m = csi_mod(p, np);
-            switch (fin) {
-            case 'A':
-                do_key(m == 2 ? K_SUP : K_UP);
-                break;
-            case 'B':
-                do_key(m == 2 ? K_SDOWN : K_DOWN);
-                break;
-            case 'C':
-                do_key(m == 5 || m == 3 ? K_WRIGHT : K_RIGHT);
-                break;
-            case 'D':
-                do_key(m == 5 || m == 3 ? K_WLEFT : K_LEFT);
-                break;
-            case 'H':
-                do_key(m == 5 ? K_TOP : K_HOME);
-                break;
-            case 'F':
-                do_key(m == 5 ? K_BOTTOM : K_END);
-                break;
+            int m = np >= 2 ? p[1] : 1; /* 2 shift, 3 alt, 5 ctrl */
+            switch (s[i]) {
+            case 'A': do_key(K_UP); break;
+            case 'B': do_key(K_DOWN); break;
+            case 'C': do_key(m == 5 || m == 3 ? K_WRIGHT : K_RIGHT); break;
+            case 'D': do_key(m == 5 || m == 3 ? K_WLEFT : K_LEFT); break;
+            case 'H': do_key(K_HOME); break;
+            case 'F': do_key(K_END); break;
+            case 'Z': do_key(K_TAB); break; /* shift+tab */
             case 'u': /* kitty keyboard protocol: code;mods */
-                if (p[0] == 13 && m > 1) {
-                    do_key(K_NEWLINE);
-                } else if (p[0] == 13) {
-                    do_key(K_ENTER);
-                } else if (p[0] == 27) {
-                    do_key(K_ESC);
-                }
+                do_key(p[0] == 13 ? (m > 1 ? K_NEWLINE : K_ENTER) : p[0] == 27 ? K_ESC : K_NONE);
                 break;
             case '~':
                 if (p[0] == 200) {
@@ -1916,19 +1245,15 @@ static size_t parse_input(const unsigned char *s, size_t n, int final)
                 } else if (p[0] == 27 && np >= 3 && p[2] == 13) { /* xterm modifyOtherKeys */
                     do_key(p[1] > 1 ? K_NEWLINE : K_ENTER);
                 } else if (p[0] == 1 || p[0] == 7) {
-                    do_key(m == 5 ? K_TOP : K_HOME);
+                    do_key(K_HOME);
                 } else if (p[0] == 4 || p[0] == 8) {
-                    do_key(m == 5 ? K_BOTTOM : K_END);
+                    do_key(K_END);
                 } else if (p[0] == 3) {
                     do_key(m == 5 ? K_WDEL : K_DEL);
-                } else if (p[0] == 5) {
-                    do_key(K_PGUP);
-                } else if (p[0] == 6) {
-                    do_key(K_PGDN);
                 }
                 break;
             }
-            return len;
+            return i + 1;
         }
         if (s[1] == 'O') {
             if (n < 3) {
@@ -1936,34 +1261,29 @@ static size_t parse_input(const unsigned char *s, size_t n, int final)
             }
             static const char keys[] = "ABCDHF";
             static const int map[] = {K_UP, K_DOWN, K_RIGHT, K_LEFT, K_HOME, K_END};
-            const char *f = strchr(keys, s[2]);
-            if (f && s[2]) {
+            const char *f = s[2] ? strchr(keys, s[2]) : NULL;
+            if (f) {
                 do_key(map[f - keys]);
             }
             return 3;
         }
-        /* Alt + key */
-        if (s[1] == '\r' || s[1] == '\n') {
-            do_key(K_NEWLINE);
-        } else if (s[1] == 0x7f || s[1] == 8) {
-            do_key(K_WBS);
-        } else if (s[1] == 'b') {
-            do_key(K_WLEFT);
-        } else if (s[1] == 'f') {
-            do_key(K_WRIGHT);
-        } else if (s[1] == 'd') {
-            do_key(K_WDEL);
-        } else if (s[1] == 0x1b) {
-            do_key(K_ESC);
-            return 1;
+        switch (s[1]) { /* alt + key */
+        case '\r':
+        case '\n': do_key(K_NEWLINE); break;
+        case 0x7f:
+        case 8: do_key(K_WBS); break;
+        case 'b': do_key(K_WLEFT); break;
+        case 'f': do_key(K_WRIGHT); break;
+        case 'd': do_key(K_WDEL); break;
+        case 0x1b: do_key(K_ESC); return 1;
         }
         return 2;
     }
     if (ch < 0x20 || ch == 0x7f) {
         static const int ctl[32] = {
-            [1] = K_HOME,    [2] = K_LEFT,   [3] = K_CTRLC, [4] = K_CTRLD,  [5] = K_END,      [6] = K_RIGHT,
-            [8] = K_BS,      [9] = K_TAB,    [10] = K_NEWLINE, [11] = K_KILLEND, [12] = K_CTRLL, [13] = K_ENTER,
-            [14] = K_DOWN,   [15] = K_CTRLO, [16] = K_UP,   [21] = K_KILLSTART, [23] = K_WBS,
+            [1] = K_HOME, [2] = K_LEFT,     [3] = K_CTRLC,    [4] = K_CTRLD,  [5] = K_END,   [6] = K_RIGHT,
+            [8] = K_BS,   [9] = K_TAB,      [10] = K_NEWLINE, [11] = K_KILLEND, [12] = K_CTRLL, [13] = K_ENTER,
+            [14] = K_DOWN, [15] = K_CTRLO,  [16] = K_UP,      [21] = K_KILLSTART, [23] = K_WBS,
         };
         do_key(ch == 0x7f ? K_BS : ctl[ch]);
         return 1;
@@ -1979,7 +1299,7 @@ static size_t parse_input(const unsigned char *s, size_t n, int final)
         g_dirty = 1;
         return need;
     }
-    size_t k = 0; /* run of printable ASCII */
+    size_t k = 0; /* a run of printable ASCII */
     while (k < n && s[k] >= 0x20 && s[k] < 0x7f) {
         k++;
     }
@@ -1988,14 +1308,16 @@ static size_t parse_input(const unsigned char *s, size_t n, int final)
     return k;
 }
 
-/* ================= payload / child process ================= */
+/* ================= the embedded agent ================= */
+
+static const char TRAILER_MAGIC[8] = {'B', 'O', 'T', 'T', 'U', 'I', '0', '1'};
+#define TRAILER_LEN 24 /* u64 payload offset, u64 payload length, magic */
 
 static int copy_range(int dst, int src, off_t off, uint64_t len)
 {
     char buf[1 << 16];
     while (len > 0) {
-        size_t want = len < sizeof(buf) ? (size_t)len : sizeof(buf);
-        ssize_t r = pread(src, buf, want, off);
+        ssize_t r = pread(src, buf, len < sizeof(buf) ? (size_t)len : sizeof(buf), off);
         if (r < 0 && errno == EINTR) {
             continue;
         }
@@ -2059,8 +1381,7 @@ static int find_payload(int self, uint64_t *off, uint64_t *len, uint64_t *self_l
 /* `botter-tui --bundle <agent.bot> <out>`: this program + the agent + trailer. */
 static int bundle(const char *agent, const char *out)
 {
-    int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    int ag = open(agent, O_RDONLY | O_CLOEXEC);
+    int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC), ag = open(agent, O_RDONLY | O_CLOEXEC);
     uint64_t off, len, self_len;
     struct stat st;
     if (self < 0 || ag < 0 || fstat(ag, &st) != 0) {
@@ -2090,8 +1411,8 @@ static int load_agent(int argc, char **argv)
     int src;
     uint64_t off = 0, len = 0, self_len;
     if (argc > 1) {
-        src = open(argv[1], O_RDONLY | O_CLOEXEC);
         struct stat st;
+        src = open(argv[1], O_RDONLY | O_CLOEXEC);
         if (src < 0 || fstat(src, &st) != 0) {
             fprintf(stderr, "botter: cannot open %s: %s\n", argv[1], strerror(errno));
             return -1;
@@ -2142,10 +1463,6 @@ static int spawn_agent(int fd)
     return 0;
 }
 
-#ifndef BOTTER_VERSION
-#define BOTTER_VERSION "dev"
-#endif
-
 int main(int argc, char **argv)
 {
     if (argc == 4 && strcmp(argv[1], "--bundle") == 0) {
@@ -2166,7 +1483,7 @@ int main(int argc, char **argv)
     if (fd < 0) {
         return 1;
     }
-    const char *term = getenv("TERM"), *want = getenv("BOTTER_TUI");
+    const char *term = getenv("TERM"), *want = getenv("BOTTER_TUI"), *ct = getenv("COLORTERM");
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO) || (term && strcmp(term, "dumb") == 0) ||
         (want && strcmp(want, "0") == 0)) {
         char *av[] = {"botter", NULL};
@@ -2174,12 +1491,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "botter: cannot start the agent: %s\n", strerror(errno));
         return 1;
     }
-    const char *ct = getenv("COLORTERM");
-    g_truecolor = ct && (strstr(ct, "truecolor") || strstr(ct, "24bit"));
-    if (!g_truecolor && term && (strstr(term, "kitty") || strstr(term, "ghostty") || strstr(term, "wezterm") ||
-                                 strstr(term, "alacritty") || strstr(term, "foot") || strstr(term, "direct"))) {
-        g_truecolor = 1;
-    }
+    g_truecolor = (ct && (strstr(ct, "truecolor") || strstr(ct, "24bit"))) ||
+                  (term && (strstr(term, "kitty") || strstr(term, "ghostty") || strstr(term, "wezterm") ||
+                            strstr(term, "alacritty") || strstr(term, "foot") || strstr(term, "direct")));
     g_tty = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
     if (pipe2(g_sigpipe, O_CLOEXEC | O_NONBLOCK) != 0 || spawn_agent(fd) != 0) {
         fprintf(stderr, "botter: cannot start the agent: %s\n", strerror(errno));
@@ -2191,8 +1505,7 @@ int main(int argc, char **argv)
         kill(g_child, SIGTERM);
         return 1;
     }
-    theme_init(tty_is_light());
-    blk_add(B_HEADER);
+    out_header();
 
     unsigned char ib[8192];
     size_t ibn = 0;
@@ -2202,7 +1515,8 @@ int main(int argc, char **argv)
         if (g_winch) {
             g_winch = 0;
             tty_size();
-            g_full = 1;
+            write_all("\033[H\033[2J", 7); /* the old live area was reflowed: start clean (scrollback stays) */
+            g_live_up = 0;
             g_dirty = 1;
         }
         double t = now_s();
@@ -2210,16 +1524,11 @@ int main(int argc, char **argv)
             g_notice[0] = '\0';
             g_dirty = 1;
         }
-        if (g_busy && !g_await) {
-            g_dirty = 1; /* spinner */
-        }
-        if (g_dirty || g_full) {
+        int spinning = g_busy && !g_await;
+        if (g_dirty || spinning) {
             render();
         }
-        int timeout = -1;
-        if (g_busy && !g_await) {
-            timeout = 100;
-        }
+        int timeout = spinning ? 100 : -1;
         if (g_notice[0]) {
             int ms = (int)((g_notice_until - t) * 1000) + 10;
             timeout = timeout < 0 || ms < timeout ? ms : timeout;
@@ -2258,7 +1567,7 @@ int main(int argc, char **argv)
         if (pr > 0 && (p[0].revents & POLLIN)) {
             ssize_t r = read(STDIN_FILENO, ib + ibn, sizeof(ib) - ibn);
             if (r == 0) {
-                break; /* terminal gone */
+                break; /* the terminal is gone */
             }
             if (r > 0) {
                 ibn += (size_t)r;
@@ -2279,7 +1588,7 @@ int main(int argc, char **argv)
         memmove(ib, ib + used, ibn - used);
         ibn -= used;
         if (ibn == sizeof(ib)) {
-            ibn = 0; /* garbage: drop */
+            ibn = 0; /* garbage: drop it */
         }
     }
 
@@ -2288,7 +1597,13 @@ int main(int argc, char **argv)
         kill(g_child, SIGTERM);
     }
     waitpid(g_child, &status, 0);
-    tty_restore(); /* back to the terminal as it was: the conversation is not left on screen */
+    flush_raw();
+    if (g_stream.len) {
+        out_reply(g_stream.p);
+    }
+    g_await = 0;
+    render(); /* the last words go into the scrollback */
+    tty_restore();
     if (E.p) {
         explicit_bzero(E.p, E.cap);
     }

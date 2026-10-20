@@ -1291,9 +1291,10 @@ if command -v tmux >/dev/null 2>&1; then
     tmux kill-server 2>/dev/null
     check "Ctrl-C cancels an in-flight LLM request within a second" "$T/tmux.txt" "\\(interrupted\\)"
 
-    # Botter's TUI: messages are chat tagged [N]; the header goes with the first one
+    # Botter's TUI: inline; what was said goes to the scrollback, the input box stays at the bottom
     stub_start
-    tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "env BOTTER_THEME=dark $BOTTER"
+    tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "$BOTTER"
+    tmux set-option -t botter-test remain-on-exit on >/dev/null
     sleep 0.8
     for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
         tmux send-keys -t botter-test "$k"
@@ -1304,16 +1305,23 @@ if command -v tmux >/dev/null 2>&1; then
     sleep 1
     tmux send-keys -t botter-test "second message" Enter
     sleep 1.2
-    tmux capture-pane -t botter-test -p >"$T/tui.txt"
+    tmux capture-pane -t botter-test -p -S - >"$T/tui.txt"
+    tmux send-keys -t botter-test C-d
+    sleep 0.8
+    tmux capture-pane -t botter-test -p -S - >"$T/tui-end.txt"
     tmux kill-server 2>/dev/null
-    check "TUI: messages reach the model tagged with their number" "$T/rec/user.txt" "^\\[2\\] second message"
-    check "TUI: the model is told what the numbers mean" "$T/rec/system.txt" "numbers each user message and your reply"
-    check_not "TUI: header is gone after the first message" "$T/tui.txt" "the agent that builds agents"
-    check "TUI: the first message is number 1" "$T/rec/user_all.txt" "^\\[1\\] first message"
+    check "TUI: a message reaches the model as typed" "$T/rec/user.txt" "^second message$"
+    check_not "TUI: the model is not told about message numbers" "$T/rec/system.txt" "numbers each user message"
+    check "TUI: the logo header is in the scrollback" "$T/tui.txt" "the agent that builds agents"
+    check "TUI: a sent message has the input box's bar" "$T/tui.txt" "^│ first message"
+    check "TUI: the reply is printed below it" "$T/tui.txt" "^  done"
+    check "TUI: the input box is drawn" "$T/tui.txt" "^│ > "
+    check "TUI: the conversation stays after exit" "$T/tui-end.txt" "^│ second message"
+    check_not "TUI: the input box is gone after exit" "$T/tui-end.txt" "^╰─"
 
     # TUI after a tool call: streamed reply shown once, tool internals hidden
     stub_start --tool shell_exec --args '{"command":"echo hi"}'
-    tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "env BOTTER_THEME=dark $BOTTER"
+    tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "$BOTTER"
     sleep 0.8
     for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
         tmux send-keys -t botter-test "$k"
@@ -1322,7 +1330,7 @@ if command -v tmux >/dev/null 2>&1; then
     sleep 0.8
     tmux send-keys -t botter-test "run it" Enter
     sleep 1.5
-    tmux capture-pane -t botter-test -p >"$T/tui.txt"
+    tmux capture-pane -t botter-test -p -S - >"$T/tui.txt"
     tmux kill-server 2>/dev/null
     n=$(grep -c "^ *done *$" "$T/tui.txt")
     if [ "$n" -eq 1 ]; then pass "TUI: a streamed reply is shown once"; else fail "TUI: a streamed reply is shown once" "seen $n times"; fi

@@ -1,4 +1,4 @@
-/* Text layout for the botter TUI: wrapping, markdown, code highlighting, tables, logo. */
+/* Text layout for the botter TUI: wrapping, markdown, tables, logo. */
 #define _GNU_SOURCE
 #include "tui.h"
 #include "logo.h"
@@ -9,27 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const ttheme_t THEME_DARK = {
-    .bg = TC_NONE, .surface = 0x5C7057, .muted = 0x89A482, .text = 0xE4EEE2,
-    .accent = 0xACC5A6, .err = 0xD98C80, .ok = 0xACC5A6, .info = 0xB9D3C9, .purple = 0xC2B8A3,
-    .code_bg = 0x222A21, .user_bg = 0x283126,
-    .kw = 0xD9A57E, .str = 0xACC5A6, .num = 0x9DBBCF, .com = 0x72836D, .fn = 0xD1EDD3,
-    .in_label = 0xACC5A6, .out_label = 0xD9A57E,
-};
-static const ttheme_t THEME_LIGHT = {
-    .bg = TC_NONE, .surface = 0x89A482, .muted = 0x5C7057, .text = 0x27311F,
-    .accent = 0x4A5E45, .err = 0xA8483C, .ok = 0x4E7A47, .info = 0x3F6A5E, .purple = 0x7A6A4F,
-    .code_bg = 0xEEF4EC, .user_bg = 0xE6F2E5,
-    .kw = 0x9A5A30, .str = 0x4E7A47, .num = 0x3D6787, .com = 0x8A9786, .fn = 0x2E4A2A,
-    .in_label = 0x4A5E45, .out_label = 0x9A5A30,
+const ttheme_t T = {
+    .text = TC_NONE, .muted = TC_DIM, .accent = TC_NONE, .err = TC_ANSI(1), .ok = TC_ANSI(2),
+    .info = TC_ANSI(6), .quote = TC_DIM, .code_bg = TC_NONE,
 };
 
-ttheme_t T = THEME_DARK;
-
-void theme_init(int light)
-{
-    T = light ? THEME_LIGHT : THEME_DARK;
-}
 
 /* ---------------- string builder ---------------- */
 
@@ -611,209 +595,26 @@ static void lay_inline(tlines_t *L, const char *s, size_t n, tsty_t base, int wi
     tc_free(c);
 }
 
-/* ---------------- code highlighting ---------------- */
+/* ---------------- code blocks ---------------- */
 
-enum { LG_NONE, LG_C, LG_HASH, LG_DASH, LG_DIFF, LG_JSON, LG_MD };
-
-static int lang_of(const char *l, size_t n)
-{
-    char b[24];
-    if (n >= sizeof(b)) {
-        n = sizeof(b) - 1;
-    }
-    for (size_t i = 0; i < n; i++) {
-        b[i] = (char)tolower((unsigned char)l[i]);
-    }
-    b[n] = '\0';
-    static const char *const cl[] = {"c", "h", "cpp", "c++", "cc", "hpp", "js", "javascript", "ts", "typescript",
-                                     "jsx", "tsx", "java", "go", "rust", "rs", "swift", "kotlin", "kt", "cs",
-                                     "csharp", "php", "css", "scss", "scala", "dart", "zig", "proto", NULL};
-    static const char *const hl[] = {"py", "python", "sh", "bash", "zsh", "shell", "console", "rb", "ruby", "yaml",
-                                     "yml", "toml", "make", "makefile", "dockerfile", "r", "perl", "pl", "ini",
-                                     "conf", "nix", "elixir", "ex", "fish", "ps1", "powershell", NULL};
-    static const char *const dl[] = {"sql", "lua", "haskell", "hs", "elm", NULL};
-    for (int i = 0; cl[i]; i++) {
-        if (!strcmp(b, cl[i])) {
-            return LG_C;
-        }
-    }
-    for (int i = 0; hl[i]; i++) {
-        if (!strcmp(b, hl[i])) {
-            return LG_HASH;
-        }
-    }
-    for (int i = 0; dl[i]; i++) {
-        if (!strcmp(b, dl[i])) {
-            return LG_DASH;
-        }
-    }
-    if (!strcmp(b, "diff") || !strcmp(b, "patch")) {
-        return LG_DIFF;
-    }
-    if (!strcmp(b, "json") || !strcmp(b, "jsonc") || !strcmp(b, "json5")) {
-        return LG_JSON;
-    }
-    if (!strcmp(b, "md") || !strcmp(b, "markdown")) {
-        return LG_MD;
-    }
-    return LG_NONE;
-}
-
-static const char *const KEYWORDS[] = {
-    "if", "else", "for", "while", "do", "return", "break", "continue", "switch", "case", "default", "goto",
-    "struct", "union", "enum", "typedef", "static", "const", "extern", "void", "int", "char", "long", "short",
-    "unsigned", "signed", "float", "double", "bool", "true", "false", "null", "NULL", "nullptr", "sizeof",
-    "def", "class", "import", "from", "as", "with", "try", "except", "finally", "raise", "lambda", "yield",
-    "pass", "in", "is", "not", "and", "or", "None", "True", "False", "self", "async", "await", "let", "var",
-    "function", "new", "this", "typeof", "instanceof", "export", "package", "func", "go", "chan", "map",
-    "range", "defer", "type", "interface", "fn", "impl", "pub", "mod", "use", "match", "mut", "ref", "trait",
-    "where", "loop", "echo", "fi", "then", "elif", "esac", "done", "local", "readonly", "catch", "throw",
-    "throws", "public", "private", "protected", "final", "abstract", "extends", "implements", "select",
-    "insert", "update", "delete", "create", "table", "values", "into", "SELECT", "FROM", "WHERE", "INSERT",
-    "UPDATE", "DELETE", "CREATE", "TABLE", "VALUES", "INTO", "JOIN", "ON", "AND", "OR", "NOT", "inline",
-    "volatile", "register", "auto", "of", "end", "nil", "elseif", "unless", "until", "begin", "module",
-    "require", "include", "#include", "#define", "#if", "#ifdef", "#ifndef", "#endif", "#else", "#pragma",
-    "string", "str", "u8", "u16", "u32", "u64", "i32", "i64", "usize", "size_t", "uint32_t", "uint64_t",
-    "int32_t", "int64_t", "uint8_t", "global", "nonlocal", "assert", "del", "print", "export", "source", NULL};
-
-static int is_kw(const char *s, size_t n)
-{
-    for (int i = 0; KEYWORDS[i]; i++) {
-        if (strlen(KEYWORDS[i]) == n && memcmp(KEYWORDS[i], s, n) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int id_char(char ch) { return isalnum((unsigned char)ch) || ch == '_' || (unsigned char)ch >= 0x80; }
-
-/* One source line -> cells. *blk: inside a C block comment. */
-static void code_line(tcells_t *c, const char *s, size_t n, int lang, int *blk)
-{
-    uint32_t B = T.code_bg;
-    tsty_t plain = sty_bg(T.text, B, 0), kw = sty_bg(T.kw, B, 0), str = sty_bg(T.str, B, 0),
-           num = sty_bg(T.num, B, 0), com = sty_bg(T.com, B, TA_ITALIC), fn = sty_bg(T.fn, B, 0);
-    if (lang == LG_DIFF) {
-        tsty_t d = plain;
-        if (n && s[0] == '+') {
-            d = sty_bg(T.ok, B, 0);
-        } else if (n && s[0] == '-') {
-            d = sty_bg(T.err, B, 0);
-        } else if (n > 1 && s[0] == '@' && s[1] == '@') {
-            d = sty_bg(T.info, B, 0);
-        }
-        tc_add(c, s, n, d);
-        return;
-    }
-    if (lang == LG_NONE || lang == LG_MD) {
-        tc_add(c, s, n, plain);
-        return;
-    }
-    size_t i = 0;
-    while (i < n) {
-        if (*blk) {
-            const char *e = NULL;
-            for (size_t j = i; j + 1 < n; j++) {
-                if (s[j] == '*' && s[j + 1] == '/') {
-                    e = s + j;
-                    break;
-                }
-            }
-            size_t end = e ? (size_t)(e - s) + 2 : n;
-            tc_add(c, s + i, end - i, com);
-            i = end;
-            if (e) {
-                *blk = 0;
-            }
-            continue;
-        }
-        char ch = s[i];
-        if ((lang == LG_C && ch == '/' && i + 1 < n && s[i + 1] == '/') ||
-            (lang == LG_HASH && ch == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t')) ||
-            (lang == LG_DASH && ch == '-' && i + 1 < n && s[i + 1] == '-')) {
-            if (!(lang == LG_HASH && i + 1 < n && s[i + 1] == '!' && i == 0)) {
-                tc_add(c, s + i, n - i, com);
-                return;
-            }
-        }
-        if (lang == LG_C && ch == '/' && i + 1 < n && s[i + 1] == '*') {
-            *blk = 1;
-            continue;
-        }
-        if (ch == '"' || ch == '\'' || (ch == '`' && lang == LG_C)) {
-            size_t j = i + 1;
-            while (j < n && s[j] != ch) {
-                j += s[j] == '\\' ? 2 : 1;
-            }
-            if (j > n) {
-                j = n;
-            }
-            size_t end = j < n ? j + 1 : n;
-            int key = lang == LG_JSON && ch == '"';
-            if (key) { /* JSON: keys in the function colour, values as strings */
-                size_t k = end;
-                while (k < n && s[k] == ' ') {
-                    k++;
-                }
-                key = k < n && s[k] == ':';
-            }
-            tc_add(c, s + i, end - i, key ? fn : str);
-            i = end;
-            continue;
-        }
-        if (isdigit((unsigned char)ch) && (i == 0 || !id_char(s[i - 1]))) {
-            size_t j = i;
-            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '.' || s[j] == '_')) {
-                j++;
-            }
-            tc_add(c, s + i, j - i, num);
-            i = j;
-            continue;
-        }
-        if (id_char(ch) || (ch == '#' && lang == LG_C)) {
-            size_t j = i + 1;
-            while (j < n && id_char(s[j])) {
-                j++;
-            }
-            size_t k = j;
-            while (k < n && s[k] == ' ') {
-                k++;
-            }
-            tsty_t st = is_kw(s + i, j - i) ? kw : (k < n && s[k] == '(') ? fn : plain;
-            tc_add(c, s + i, j - i, st);
-            i = j;
-            continue;
-        }
-        int l;
-        tu_decode(s + i, n - i, &l);
-        tc_add(c, s + i, (size_t)l, plain);
-        i += (size_t)l;
-    }
-}
-
+/* A fenced block: its lines as they are, behind a dim bar (the language, if given, on top). */
 static void lay_code(tlines_t *L, const char *lang, size_t langn, const char *const *lines, const size_t *lens,
                      int nl, int width)
 {
-    int lg = lang_of(lang, langn);
-    tsty_t pad = sty_bg(T.text, T.code_bg, 0);
-    tline_t *h = tl_new(L, T.code_bg);
-    tl_put(h, pad, " ", 1);
+    tsty_t bar = sty(T.muted, 0);
     if (langn) {
-        char lb[40];
-        snprintf(lb, sizeof(lb), "%.*s", (int)(langn < 30 ? langn : 30), lang);
-        tl_put(h, sty_bg(T.muted, T.code_bg, TA_ITALIC), lb, strlen(lb));
+        tline_t *h = tl_new(L, TC_NONE);
+        tl_put(h, bar, "│ ", strlen("│ "));
+        tl_put(h, sty(T.muted, TA_ITALIC), lang, langn < 30 ? langn : 30);
     }
-    int blk = 0;
     for (int i = 0; i < nl; i++) {
         tcells_t *c = tc_new();
-        code_line(c, lines[i], lens[i], lg, &blk);
+        tc_add(c, lines[i], lens[i], sty(T.text, 0));
         int from = L->n;
-        tc_flow(c, L, width - 2, T.code_bg, 0);
+        tc_flow(c, L, width - 2, TC_NONE, 0);
         tc_free(c);
-        tl_prefix(L, from, pad, " ", pad, " ");
+        tl_prefix(L, from, bar, "│ ", bar, "│ ");
     }
-    tl_new(L, T.code_bg);
 }
 
 /* ---------------- tables ---------------- */
@@ -1173,7 +974,7 @@ void lay_markdown(tlines_t *L, const char *md, int width)
                 lay_inline(L, u, (size_t)(ue - u), sty(T.text, TA_ITALIC), width - 2, TC_NONE);
                 i++;
             }
-            tl_prefix(L, from, sty(T.purple, 0), "▌ ", sty(T.purple, 0), "▌ ");
+            tl_prefix(L, from, sty(T.quote, 0), "▌ ", sty(T.quote, 0), "▌ ");
             continue;
         }
 

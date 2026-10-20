@@ -11,10 +11,13 @@
 #define TA_UNDER  4
 #define TA_STRIKE 8
 
-#define TC_NONE 0xFF000000u /* no colour of its own: line fill / screen background */
+/* Colours: the terminal's own, so the UI follows its theme. Plain 0xRRGGBB is used by the logo alone. */
+#define TC_NONE    0xFF000000u            /* the terminal's default colour */
+#define TC_DIM     0xFE000000u            /* default colour, dimmed */
+#define TC_ANSI(n) (0xFD000000u | (n))     /* one of the terminal's 16 colours (0-15) */
 
 typedef struct {
-    uint32_t fg, bg; /* 0xRRGGBB; bg may be TC_NONE */
+    uint32_t fg, bg; /* TC_* or 0xRRGGBB */
     uint8_t  at;
 } tsty_t;
 
@@ -36,17 +39,12 @@ typedef struct {
     int      n, cap;
 } tlines_t;
 
-/* Sage palette (colorhunt 5C7057 89A482 ACC5A6 D1EDD3) on the terminal's own background:
- * bg is TC_NONE, so nothing is painted behind text; theme_init picks the light or dark set. */
+/* What each kind of text looks like: terminal colours only, never a background. */
 typedef struct {
-    uint32_t bg, surface, muted, text;
-    uint32_t accent, err, ok, info, purple; /* purple: secondary accent (thinking, model name) */
-    uint32_t code_bg, user_bg, kw, str, num, com, fn;
-    uint32_t in_label, out_label;           /* notebook "In [n]:" / "Out[n]:" */
+    uint32_t text, muted, accent, err, ok, info, quote, code_bg;
 } ttheme_t;
 
-extern ttheme_t T;
-void theme_init(int light);
+extern const ttheme_t T;
 
 typedef struct {
     char  *p;
@@ -88,9 +86,9 @@ int       tc_width(const tcells_t *c);                             /* widest har
 void      tc_free(tcells_t *c);
 
 void lay_text(tlines_t *L, const char *text, size_t n, tsty_t s, int width, uint32_t fill);
-void lay_markdown(tlines_t *L, const char *md, int width);
+void lay_markdown(tlines_t *L, const char *md, int width); /* code blocks: a dim bar, no highlighting */
 void lay_ansi(tlines_t *L, const char *text, size_t n, int width); /* SGR-coloured output */
-void lay_logo(tlines_t *L);                                         /* tui logo, half blocks */
+void lay_logo(tlines_t *L);                                         /* the logo (its own colours), half blocks */
 int  logo_width(void);
 
 #endif

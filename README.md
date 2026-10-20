@@ -277,12 +277,12 @@ Those last two rows are interpreters doing *nothing*, before a single framework 
 
 ```sh
 make                          # builds ./botter; needs gcc and musl-gcc (Fedora: dnf install musl-gcc musl-libc-static)
-make test                     # 282 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
+make test                     # 356 tests: functions, batch mode, sandbox, sub-agents, MCP, A2A, ACP, vault, HTTPS, TUI... (needs python3; tmux for the UI tests)
 BOTTER_TEST_NET=1 make test   # adds real providers and TLS failure cases
 make dist                     # release tarball + sha256
 ```
 
-`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` is Botter's build program (it lands in `skills/build-agent/scripts/`), and `tui/` is Botter's full-screen UI. `AGENT.md`, `config.json`, `functions/` and `skills/` in the repo root are Botter itself.
+`tools/src/botcore` is the runtime, `tools/src/packer` is the packer that appends an agent's files to it, `tools/src/agent_tools` is Botter's build program (it lands in `skills/build-agent/scripts/`), and `tui/` is Botter's terminal UI (inline: the conversation goes into the terminal's scrollback, in its own colours). `AGENT.md`, `config.json`, `functions/` and `skills/` in the repo root are Botter itself.
 
 ## License
 
