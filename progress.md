@@ -1,7 +1,7 @@
 # BOTCORE + BOTTER: SPEC + STATUS (AI-consumed; terse by design)
 
 Updated: 2026-10-21 | Version 0.2.0 (released; binary refreshed in place) | Lang: C (gnu11) | Target: x86_64 Linux (dev: Fedora 44, kernel 7.2, SELinux enforcing, Landlock + userns on, musl-gcc)
-State: sub-agents, MCP (both directions, URL + command), A2A, ACP, sealed vault, Lua functions, --run: done and pushed. §12 architecture rebuild IN PROGRESS (steps 1-5 + run 13-17 fixes committed; §13 simplification + inline TUI committed locally, NOT pushed: 361 tests pass). Start the next session at §13 "NEXT SESSION".
+State: sub-agents, MCP (both directions, URL + command), A2A, ACP, sealed vault, Lua functions, --run: done and pushed. §12 architecture rebuild IN PROGRESS (steps 1-5 + run 13-17 fixes committed; §13 simplification + inline TUI pushed 2026-10-21: 361 tests pass). Start the next session at §13 "NEXT SESSION".
 Legend: [D] = owner decided
 
 ## 1. PRODUCT [D]
@@ -239,7 +239,7 @@ Step 5 bot.llm DONE: bot.llm(prompt) -> text; bot.llm{prompt, system?, schema?, 
 
 ## 13. SIMPLIFICATION + NEXT [D 2026-10-20]
 Owner [D]: dead simple to understand, extremely optimized while running; think long term (the Oct 24 hackathon is a deadline to improve Botter, not the target). Keep: sealed vault (future key-in-binary path if keyring support goes for cross-platform; .env is for Botter only, built agents should not need one), A2A/ACP/MCP both ways, the TUI (simplified, below).
-Done (361 tests pass; commits 212e81c run 17 fixes, 074debc removals, 4cb8d4e TUI, 50fa82d retries/exit status; local only, not pushed):
+Done (361 tests pass; commits 212e81c run 17 fixes, 074debc removals, 4cb8d4e TUI, 50fa82d retries/exit status; pushed 2026-10-21):
 - cron removed (cron.c, cron_set/list/delete, the REPL idle/tick plumbing in term.c and front.c): a scheduled agent = the system's cron + --run. get_time moved to tools.c.
 - on_turn_end hook removed (FLOW.lua covers it). note tool removed (never called in runs 10-18); recall stays for archived results.
 - --eval removed: --run JSON lines now carry "tools" (the tools the task called); checks are the caller's Lua (Botter's examples scorer, bot.test).
@@ -257,5 +257,5 @@ NEXT SESSION [owner: "we will continue in the next session"]:
 1 Owner tries the new TUI (`./botter`) and gives feedback; adjust.
 2 Discuss, then build item 2 (pipeline ideas a-d) and item 3 (generated FLOW.lua for batch agents); per-role model if a stronger model is affordable.
 3 Run 19 on gemini-3.1-flash-lite (owner switches with /provider; free tier 500 req/day) in test2/by-botter19 with the same command as runs 13-18; compare calls, tokens, honest score (Botter's own examples.lua) with runs 13-17.
-4 Push the local commits when the owner asks.
+4 Commit and push when the owner asks.
 
