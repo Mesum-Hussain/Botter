@@ -25,12 +25,9 @@ static void restore_tty(void)
 }
 
 static volatile sig_atomic_t g_intr = 0;
-static int (*g_idle)(void);
-static char *g_stash; /* text typed when an idle TICK interrupted the prompt */
 
 int term_interrupted(void) { return g_intr; }
 void term_clear_interrupt(void) { g_intr = 0; }
-void term_set_idle(int (*cb)(void)) { g_idle = cb; }
 
 static void on_int(int sig)
 {
@@ -272,29 +269,11 @@ static int edit_line(const char *prompt, char **out)
         goto done;
     }
     e.b[0] = '\0';
-    if (g_stash) {
-        ed_set(&e, g_stash);
-        free(g_stash);
-        g_stash = NULL;
-    }
     ed_refresh(&e, prompt, plen);
 
     for (;;) {
         unsigned char c;
-        int r;
-        if (g_idle) {
-            r = rd_byte(&c, 1000);
-            if (r == 2) {
-                if (g_idle()) { /* the caller has work to do now */
-                    g_stash = strdup(e.b);
-                    result = TERM_TICK;
-                    break;
-                }
-                continue;
-            }
-        } else {
-            r = rd_byte(&c, -1);
-        }
+        int r = rd_byte(&c, -1);
         if (r < 0) {
             result = (errno == EINTR) ? TERM_INTR : TERM_EOF;
             break;
@@ -417,9 +396,6 @@ done:
     if (result == TERM_LINE || result == TERM_INTR) {
         fputs("\n", stdout);
         fflush(stdout);
-    } else if (result == TERM_TICK) {
-        fputs("\r\033[0K", stdout); /* wipe the prompt line; the caller reprints it */
-        fflush(stdout);
     }
     free(draft);
     if (result == TERM_LINE) {
@@ -438,7 +414,7 @@ int term_readline(const char *prompt, int secret, char **out)
 
     *out = NULL;
     if (front_active()) {
-        return front_readline(prompt, secret, g_idle, out);
+        return front_readline(prompt, secret, out);
     }
     if (!secret && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
         int er = edit_line(prompt, out);

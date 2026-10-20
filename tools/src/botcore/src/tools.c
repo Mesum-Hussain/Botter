@@ -7,6 +7,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+static bool get_time(const cJSON *in, char *result, size_t rl)
+{
+    (void)in;
+    time_t    now = time(NULL);
+    struct tm tm;
+    strftime(result, rl, "%A %Y-%m-%d %H:%M:%S %Z (UTC%z)", localtime_r(&now, &tm));
+    return true;
+}
+
+static const tool_t TOOLS_TIME[] = {
+    {"get_time", "Get the current local date, time and timezone.", "{\"type\":\"object\",\"properties\":{}}", get_time},
+};
 
 typedef struct {
     const tool_t *t;
@@ -18,7 +32,7 @@ static table_t tables(int i)
     switch (i) {
     case 0: return (table_t){TOOLS_FS, TOOLS_FS_N};
     case 1: return (table_t){TOOLS_SHELL, TOOLS_SHELL_N};
-    case 2: return (table_t){TOOLS_CRON, TOOLS_CRON_N};
+    case 2: return (table_t){TOOLS_TIME, 1};
     case 3: return (table_t){TOOLS_MEM, TOOLS_MEM_N};
     case 4: return (table_t){TOOLS_SKILL, sk_count() ? TOOLS_SKILL_N : 0};
     default: return (table_t){NULL, 0};

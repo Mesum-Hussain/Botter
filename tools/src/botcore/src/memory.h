@@ -9,10 +9,9 @@
  *   - archive: past FADE_HIGH bytes, tool results and long tool-call arguments older than the recent
  *     window become one-line stubs with an id, in one batch (so provider prompt caching holds between
  *     batches); recall(id) brings one back.
- *   - working memory: the model's own notes (note tool), capped.
  *   - file ledger: every file written this session (size, lines, Lua check, tools it defines).
  *   - data profiles: fs_read of a big CSV/TSV returns a profile (rows, columns, types, samples), kept here.
- * Notes, ledger and profiles are shown to the model at the end of the latest message of each request.
+ * The ledger and profiles are shown to the model at the end of the latest message of each request.
  */
 
 /* History size that starts a batch of archiving, and what stays raw at the end. */
@@ -33,7 +32,7 @@ size_t mem_msg_bytes(const cJSON *m);
 int    mem_compact(cJSON *hist, cJSON *archive);
 
 /* The memory block for the end of the next request, or NULL when there is nothing to show. malloc'd. */
-char  *mem_state(const cJSON *notes, const cJSON *archive);
+char  *mem_state(const cJSON *archive);
 
 /* A file was written (path as resolved; check = its Lua check in a few words, or NULL to keep the last). */
 void   mem_file_written(const char *res, const char *check);

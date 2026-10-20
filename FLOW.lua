@@ -12,8 +12,8 @@ BOTTER = BOTTER or {}
 local DIR = ".botter"
 local TRIES = 3            -- attempts per task before the stuck policy
 local SCORE_ROUNDS = 5     -- fix rounds on the examples score
-local READ = { "fs_list", "fs_read", "shell_exec", "note", "recall" }
-local CODE = { "fs_list", "fs_read", "shell_exec", "fs_write", "fs_edit", "run_tests", "note", "recall" }
+local READ = { "fs_list", "fs_read", "shell_exec", "recall" }
+local CODE = { "fs_list", "fs_read", "shell_exec", "fs_write", "fs_edit", "run_tests", "recall" }
 
 local history = {} -- the last exchanges with the person, for the lead
 
@@ -151,7 +151,7 @@ local function design(correction)
     system = DESIGNER,
     context = job_context(),
     task = task,
-    tools = list({ "fs_list", "fs_read", "note" },
+    tools = list({ "fs_list", "fs_read", "recall" },
       { "design_kind", "design_function", "design_model_step", "design_skill", "design_cover", "design_drop",
         "design_check", "job_rule" }),
     writes = {},

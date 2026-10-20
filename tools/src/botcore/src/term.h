@@ -15,7 +15,6 @@
 #define TERM_LINE   1
 #define TERM_EOF    0
 #define TERM_INTR  (-1)
-#define TERM_TICK   2   /* idle callback asked the caller to run something; typed text is kept */
 
 /* Install signal handlers; restores tty echo on exit/termination. */
 void term_init(void);
@@ -31,13 +30,6 @@ int  term_readline(const char *prompt, int secret, char **out);
 /* Ctrl-C flag, set by the SIGINT handler. Long-running work polls it. */
 int  term_interrupted(void);
 void term_clear_interrupt(void);
-
-/*
- * While a prompt is waiting for a key (about once a second) cb() is called;
- * a nonzero return makes term_readline return TERM_TICK. Pass NULL to disable.
- * Only the line editor (tty input) honours it.
- */
-void term_set_idle(int (*cb)(void));
 
 /* Remember a line for Up/Down recall in the line editor (RAM only). */
 void term_history_add(const char *line);

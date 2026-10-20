@@ -22,7 +22,6 @@ The project root is the folder the user started botter in. The built file is nam
     functions/<name>.lua  OPTIONAL: Lua tools that exist only while the skill is loaded
   secrets.vault        OPTIONAL: the agent's keys, encrypted with the user's password. Written only by vault_seal (see build-agent)
   agents/<name>/AGENT.md   OPTIONAL sub-agents: a frontmatter (--- description: one sentence ---) and then that sub-agent's persona
-  evals/                OPTIONAL: test cases for ./<name>.bot --eval, never embedded
   artifacts/            build-time inputs (not embedded), e.g. a cloned repo you wrap
 ```
 
@@ -30,13 +29,13 @@ The project root is the folder the user started botter in. The built file is nam
 AGENT.md, FLOW.lua, config.json, secrets.vault, functions/*.lua, skills/** (without functions/tests), agents/**; when config.json lists "skills", only those skills
 
 ## What is NOT embedded
-functions/tests, skills/*/functions/tests, evals, artifacts, hidden files (names starting with a dot), symlinks, everything else (README, .git, notes, test data).
+functions/tests, skills/*/functions/tests, artifacts, hidden files (names starting with a dot), symlinks, everything else (README, .git, notes, test data).
 
 ## Rules
 - AGENT.md is the system prompt. If missing, the agent runs with a generic default prompt (build warns). The agent's model drives every conversation from it: how the agent works, step by step, goes in AGENT.md (or in a skill for a longer procedure).
 - The old layout stops the build with a message saying where things go: agent.md (now AGENT.md), tools/bin and tools/doc (programs are skill scripts now), FLOW.fwl.
 - There is no manifest: at start-up the runtime lists the skills (name + frontmatter description) in the system prompt; the model loads one with the skill tool, which gives it SKILL.md, the real path of the skill's files, and the skill's Lua tools. Tool schemas come from the functions' doc comments. So skill and function descriptions must be accurate and short.
-- What the whole agent depends on (its core functions, a hook such as on_turn_end, access to its data store) goes in the top-level functions/, always loaded. A skill is an on-demand capability. Keep the top-level documented functions few: each is a tool the model sees on every request.
+- What the whole agent depends on (its core functions, FLOW.lua, access to its data store) goes in the top-level functions/, always loaded. A skill is an on-demand capability. Keep the top-level documented functions few: each is a tool the model sees on every request.
 - The build checks every skill: name = folder, a description under 1024 characters, links in SKILL.md that resolve, references/ files that something points to, no placeholder words ("TODO", "FIXME", "TBD"), SKILL.md over 500 lines is a warning.
 - Sub-agents (agents/<name>/AGENT.md) are for a job that needs its own persona and a fresh conversation (a researcher, a reviewer, a writer). A sub-agent has the agent's tools and model, sees only the task it is handed, cannot ask the user anything and cannot delegate further; only its final reply comes back. The model hands it work with the delegate tool; a function can with bot.agent("name", task). For a recurring task the agent does itself, write a skill instead: it is cheaper.
 - A built agent also answers over three standard protocols, with nothing to add to the project: ./<name>.bot --mcp as an MCP server with one tool, ask, for any MCP client that starts a command (a coding agent such as Claude Code or opencode; --mcp 8080 serves it over HTTP, with MCP_TOKEN as the token); ./<name>.bot --acp inside an editor that speaks the Agent Client Protocol (Zed and others start it themselves), and ./<name>.bot --a2a 8080 to be called by other agents (A2A; put A2A_TOKEN=<secret> in .env, required when it listens beyond this machine: --a2a 0.0.0.0:8080). There is no user to type there: the model connection is the saved one or BOTTER_BASE_URL / BOTTER_API_KEY / BOTTER_MODEL in .env, and risky actions are asked through the editor (ACP) or refused (A2A, MCP).
@@ -46,7 +45,7 @@ functions/tests, skills/*/functions/tests, evals, artifacts, hidden files (names
 - An agent with only AGENT.md and config.json is a complete agent.
 
 ## Every agent also has these built-in tools (no work needed)
-fs_list, fs_read, fs_write, fs_edit (files in the working directory; fs_read of a big CSV returns a profile: rows, columns, types, first rows), image_view (shows a PNG/JPEG/GIF/WEBP to the model: scans, receipts, screenshots), shell_exec (sandboxed; online unless the agent is offline), note and recall (working memory: older tool results are archived as the conversation grows), cron_set / cron_list / cron_delete (schedules that live only while the agent runs), get_time, and skill (loads one of the agent's skills; only when it has skills).
+fs_list, fs_read, fs_write, fs_edit (files in the working directory; fs_read of a big CSV returns a profile: rows, columns, types, first rows), image_view (shows a PNG/JPEG/GIF/WEBP to the model: scans, receipts, screenshots), shell_exec (sandboxed; online unless the agent is offline), recall (older tool results are archived as the conversation grows; recall brings one back), get_time, and skill (loads one of the agent's skills; only when it has skills).
 
 ## Runtime facts the agent author should know
 - The agent connects to an OpenAI-compatible LLM endpoint chosen by the user at every start (provider, API key, model). Nothing is saved to disk: no config, no logs, no memory between runs.

@@ -315,10 +315,10 @@ static void remember_profile(const char *path, long long bytes, long rows, const
     snprintf(p->cols, sizeof(p->cols), "%s", cols);
 }
 
-char *mem_state(const cJSON *notes, const cJSON *archive)
+char *mem_state(const cJSON *archive)
 {
-    int nn = cJSON_GetArraySize(notes), na = cJSON_GetArraySize(archive);
-    if (!nn && !na && !g_nfiles && !g_nprofiles) {
+    int na = cJSON_GetArraySize(archive);
+    if (!na && !g_nfiles && !g_nprofiles) {
         return NULL;
     }
     out_t o = {malloc(16384), 0, 16384};
@@ -327,15 +327,6 @@ char *mem_state(const cJSON *notes, const cJSON *archive)
     }
     o.p[0] = '\0';
     add(&o, "[Memory, kept for you by the harness (not part of the message above)]");
-    if (nn) {
-        add(&o, "\nYour notes (note tool):");
-        int i = 1;
-        const cJSON *n;
-        cJSON_ArrayForEach(n, notes)
-        {
-            add(&o, "\n%d. %s", i++, cJSON_IsString(n) ? n->valuestring : "");
-        }
-    }
     if (g_nfiles) {
         add(&o, "\nFiles written this session:");
         for (int i = 0; i < g_nfiles; i++) {
@@ -618,53 +609,8 @@ int mem_profile(const char *res, const char *path, long long size, char *result,
     return 1;
 }
 
-/* ---- tools: note, recall ---------------------------------------------------- */
+/* ---- tool: recall ----------------------------------------------------------- */
 
-#define NOTES_MAX     24
-#define NOTE_MAX_LEN  400
-
-static bool note_tool(const cJSON *in, char *result, size_t rl)
-{
-    chat_t *c = chat_current();
-    const cJSON *text = cJSON_GetObjectItemCaseSensitive(in, "text");
-    const cJSON *forget = cJSON_GetObjectItemCaseSensitive(in, "forget");
-    if (!c) {
-        snprintf(result, rl, "no conversation is running");
-        return false;
-    }
-    if (!c->notes) {
-        c->notes = cJSON_CreateArray();
-    }
-    int n = cJSON_GetArraySize(c->notes);
-    if (cJSON_IsNumber(forget)) {
-        int i = forget->valueint;
-        if (i < 1 || i > n) {
-            snprintf(result, rl, "there is no note %d (you have %d)", i, n);
-            return false;
-        }
-        cJSON_DeleteItemFromArray(c->notes, i - 1);
-        n--;
-    }
-    if (cJSON_IsString(text) && *text->valuestring) {
-        if (strlen(text->valuestring) > NOTE_MAX_LEN) {
-            snprintf(result, rl, "a note is at most %d characters: keep the fact, drop the detail", NOTE_MAX_LEN);
-            return false;
-        }
-        if (n >= NOTES_MAX) {
-            snprintf(result, rl, "memory is full (%d notes): forget one that is done or no longer true first", NOTES_MAX);
-            return false;
-        }
-        char t[NOTE_MAX_LEN + 1];
-        one_line(t, sizeof(t), text->valuestring, NOTE_MAX_LEN);
-        cJSON_AddItemToArray(c->notes, cJSON_CreateString(t));
-        n++;
-    } else if (!cJSON_IsNumber(forget)) {
-        snprintf(result, rl, "give 'text' to keep a note, or 'forget' with a note's number");
-        return false;
-    }
-    snprintf(result, rl, "ok: %d note%s in memory, shown to you every turn", n, n == 1 ? "" : "s");
-    return true;
-}
 
 static bool recall_tool(const cJSON *in, char *result, size_t rl)
 {
@@ -692,13 +638,6 @@ static bool recall_tool(const cJSON *in, char *result, size_t rl)
 }
 
 const tool_t TOOLS_MEM[] = {
-    {"note",
-     "Keep a short fact, decision or open question in your working memory: notes are shown to you every turn, "
-     "while older tool results get archived. Save what you will need later (rules from the task, file layouts, "
-     "decisions, what is left). forget=N removes note N (done or no longer true).",
-     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"The note, one line\"},"
-     "\"forget\":{\"type\":\"integer\",\"description\":\"Number of a note to remove\"}}}",
-     note_tool},
     {"recall",
      "Show an archived tool result or file content again, by the id in its [archived #id ...] stub.",
      "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"]}", recall_tool},

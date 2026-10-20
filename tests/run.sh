@@ -770,63 +770,7 @@ drive "$T/fn.bot" "$T/fnws"
 check "bot.tool: the tool's answer comes back to the function" "$T/rec/tool.txt" "seen-by-tool.txt"
 rm "$T/fn/functions/viatool.lua"; build "$T/fn" "$T/fn.bot"
 
-# --eval: cases in evals/*.json against the model, graded by expectations or the agent's own Lua check
-mkdir -p "$T/ev/functions" "$T/ev/evals"; echo "x" >"$T/ev/AGENT.md"
-cat >"$T/ev/functions/judge.lua" <<'EOF'
-function says_done(run)
-  local r = bot.json.decode(run)
-  if r.reply ~= "done" then
-    return "expected done, got " .. r.reply .. " (case data: " .. tostring(r.data and r.data.note) .. ")"
-  end
-end
-function says_more(run)
-  return "the reply is too short"
-end
-EOF
-build "$T/ev" "$T/ev.bot"
-cat >"$T/ev/evals/cases.json" <<'EOF'
-[
-  {"name": "answers", "input": "list it", "expect": {"contains": ["done"], "tools_used": ["fs_list"], "regex": "^d.ne$"}},
-  {"name": "wrong text", "input": "list it", "expect": {"not_contains": ["done"], "equals": "finished"}},
-  {"name": "too many calls", "input": "list it", "expect": {"max_tool_calls": 0, "tools_not_used": ["fs_list"]}},
-  {"name": "lua judge", "input": "list it", "check": "says_done", "data": {"note": "n1"}},
-  {"name": "lua judge fails", "input": "list it", "check": "says_more"},
-  {"name": "cannot fail", "input": "list it"}
-]
-EOF
-tool_call fs_list '{}'
-printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/ev/.env"
-(cd "$T/ev" && timeout 60 "$T/ev.bot" --eval >"$T/out" 2>"$T/err"; echo "exit $?" >>"$T/err")
-check "--eval: one JSON line per case, a passing one" "$T/out" '"name":"answers","passed":true'
-check "--eval: contains/equals failures say what" "$T/out" 'the reply contains \\"done\\".*the reply is not exactly \\"finished\\"'
-check "--eval: tool-call limits are graded" "$T/out" 'fs_list was called.*1 tool calls, at most 0 expected'
-check "--eval: the agent's Lua check passes" "$T/out" '"name":"lua judge","passed":true'
-check "--eval: a check's reason comes back" "$T/out" 'says_more: the reply is too short'
-check "--eval: a case that could never fail is refused" "$T/out" 'could never fail'
-check "--eval: the summary and the usage on stderr" "$T/err" '^eval: 2/6 passed$'
-check "--eval: a failing case fails the run" "$T/err" '^exit 1$'
-rm -f "$T/ev/.env"
 
-# on_turn_end: an agent's hook sends the model back to work, until it says the turn may end
-mkdir -p "$T/hook/functions" "$T/hookws"; echo "x" >"$T/hook/AGENT.md"
-cat >"$T/hook/functions/hook.lua" <<'EOF'
-function on_turn_end(reply)
-  if bot.fs.exists("nudged.txt") then
-    return nil
-  end
-  bot.fs.write("nudged.txt", reply)
-  return "One item is still open: finish it."
-end
-EOF
-build "$T/hook" "$T/hook.bot"
-check "on_turn_end: the build names the hook" "$T/build.log" "hook: on_turn_end"
-stub_start
-drive "$T/hook.bot" "$T/hookws"
-check "on_turn_end: its text goes back to the model as the next message" "$T/rec/user_all.txt" "^One item is still open: finish it.$"
-check "on_turn_end: the user sees that it continues" "$T/out" "\(continuing: One item is still open"
-check "on_turn_end: the hook got the model's reply" "$T/hookws/nudged.txt" "^done$"
-n=$(grep -c "One item is still open" "$T/rec/user_all.txt")
-[ "$n" -eq 1 ] && pass "on_turn_end: nil ends the turn" || fail "on_turn_end: nil ends the turn" "sent $n times"
 
 # batch mode: one task (reply alone on stdout), or one task per line (JSON lines), each in a fresh conversation
 stub_start
@@ -837,10 +781,14 @@ check "--run TASK: the model is told nobody is there" "$T/rec/system.txt" "runni
 check "--run TASK: token usage on stderr" "$T/err" 'usage: \{"model":"stub","calls":1,"input_tokens":11,"output_tokens":7\}'
 check "--run: streaming asks for usage" "$T/rec/sampling.txt" "usage=True"
 (cd "$T/fnws" && printf 'first task\n\nsecond task\n' | timeout 60 "$T/fn.bot" --run >"$T/out" 2>"$T/err")
-check "--run: one JSON line per task" "$T/out" '^\{"input":"second task","reply":"done"\}$'
+check "--run: one JSON line per task" "$T/out" '^\{"input":"second task","reply":"done","tools":\[\]\}$'
 if [ "$(wc -l <"$T/out")" -eq 2 ]; then pass "--run: blank lines are not tasks"; else fail "--run: blank lines are not tasks" "$(cat "$T/out")"; fi
 check "--run: each task starts a fresh conversation" "$T/rec/user.txt" "^second task$"
 check_not "--run: nothing else on stdout" "$T/out" "Connected|Using"
+tool_call fs_list '{}'
+printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/fnws/.env"
+(cd "$T/fnws" && printf 'list it\n' | timeout 60 "$T/fn.bot" --run >"$T/out" 2>"$T/err")
+check "--run: each line names the tools the task called" "$T/out" '"reply":"done","tools":\["fs_list"\]'
 rm -f "$T/fnws/.env"
 (cd "$T/fnws" && timeout 30 "$T/fn.bot" --run "say hi" >"$T/out" 2>"$T/err"; echo "exit $?" >>"$T/err")
 check "--run without a model connection says how to give one" "$T/err" "No saved model connection, and nobody to ask here"
@@ -889,13 +837,6 @@ check "the memory block says results are archived" "$T/rec/tool.txt" "are archiv
 stub_start --tool fs_write --args '{"path":"long.txt","content":"'"$(printf 'y%.0s' $(seq 1 10000))"'"}' --repeat 9
 drive "$CORE" "$T/memws"
 check "long tool-call arguments are archived too" "$T/rec/request.json" 'content\\":\\"\[archived #[0-9]+: 9.8 KB; recall\([0-9]+\)\]'
-tool_call note '{"text": "amounts are in INR"}'
-drive "$CORE" "$T/memws"
-check "note: kept" "$T/rec/tool.txt" "^ok: 1 note in memory"
-check "note: shown in the memory block" "$T/rec/tool.txt" "^1\. amounts are in INR$"
-tool_call note '{"forget": 3}'
-drive "$CORE" "$T/memws"
-check "note: forgetting a note that does not exist says so" "$T/rec/tool.txt" "there is no note 3"
 mkdir -p "$T/memws/functions"
 tool_call fs_write '{"path":"functions/add.lua","content":"--- Add.\n---@param a number\n---@param b number\nfunction add(a, b)\n  return a + b\nend\n"}'
 drive "$CORE" "$T/memws"

@@ -14,12 +14,6 @@ void        fn_skill_schema_append(const char *skill, cJSON *arr); /* skills/<sk
 int         fn_is(const char *name);
 char       *fn_call(const char *name, const char *args_json); /* malloc'd result text */
 int         fn_count(void);
-/* The agent's on_turn_end(reply) hook, if its functions define one: what to tell the model next (malloc'd),
- * or NULL when the turn may end. */
-char       *fn_turn_end(const char *reply);
-/* An eval case's check: the global Lua function name(json_of_the_run) -> NULL when it passes, else why
- * (malloc'd); "ERROR: no such function" when the agent has none of that name. */
-char       *fn_check(const char *name, const char *run_json);
 /* FLOW.lua (progress.md §12.3): when the agent has one, every incoming job goes to flow(input) instead of the
  * model. fn_flow returns NULL and the reply (malloc'd, may be NULL), or a malloc'd error. */
 int         fn_has_flow(void);

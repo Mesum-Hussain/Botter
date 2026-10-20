@@ -19,7 +19,6 @@ typedef struct {
     int    want_thoughts; /* the UI shows reasoning (chat_set_events) */
     int    no_stream;     /* endpoint refused "stream": true; plain responses from now on */
     cJSON *images;        /* content parts image_view attached during this turn, sent before the next request */
-    cJSON *notes;         /* working memory: the model's notes (note tool), shown every request */
     cJSON *archive;       /* archived tool results / arguments; recall(id) = archive[id - 1] (memory.h) */
     int    max_rounds;    /* model<->tool round trips per turn; 0 = CHAT_MAX_TOOL_ROUNDS */
 } chat_t;
@@ -64,7 +63,7 @@ void chat_set_tools(chat_t *c, cJSON *tools, char *(*cb)(void *, const char *, c
  */
 void chat_set_events(chat_t *c, void (*cb)(void *, int, const char *), void *ud, int thoughts);
 
-/* Forget the conversation, notes and archive (the system prompt stays). */
+/* Forget the conversation and archive (the system prompt stays). */
 void chat_clear(chat_t *c);
 
 /* Set (or, with NULL/"", clear) the system prompt. Never trimmed from history. */

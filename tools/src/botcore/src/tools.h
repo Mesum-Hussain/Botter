@@ -21,14 +21,12 @@ typedef struct {
 
 #define TOOL_RESULT_MAX (32 * 1024)
 
-/* Built-in tool tables (defined in tool_*.c / cron.c). */
+/* Built-in tool tables (defined in tool_*.c, memory.c, skills.c; get_time in tools.c). */
 extern const tool_t TOOLS_FS[];
 extern const size_t TOOLS_FS_N;
 extern const tool_t TOOLS_SHELL[];
 extern const size_t TOOLS_SHELL_N;
-extern const tool_t TOOLS_CRON[];
-extern const size_t TOOLS_CRON_N;
-extern const tool_t TOOLS_MEM[]; /* note, recall (memory.c) */
+extern const tool_t TOOLS_MEM[]; /* recall (memory.c) */
 extern const size_t TOOLS_MEM_N;
 extern const tool_t TOOLS_SKILL[]; /* skill (skills.c); registered only when the agent has skills */
 extern const size_t TOOLS_SKILL_N;
@@ -48,10 +46,6 @@ double tool_now_s(void);
 /* Startup probe: how shell_exec / tool children are cut off from the network. */
 enum { NET_ISOLATION_NONE = 0, NET_ISOLATION_NETNS = 1, NET_ISOLATION_SECCOMP = 2 };
 int    tool_shell_probe(void);
-
-/* RAM-only scheduler (cron.c). Entries live for the session only. */
-int    cron_due(void);                               /* 1 if any entry is due now */
-int    cron_take_due(char *action, size_t action_len); /* pops one due entry -> id, or 0 */
 
 const tool_t *tools_find_builtin(const char *name);
 

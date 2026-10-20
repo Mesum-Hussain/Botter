@@ -25,7 +25,7 @@ int         guard_offline(void);
 
 /*
  * Plan / Build mode. Build (the default) works as before. Plan
- * is read-only: fs_write and cron_set refuse, shell_exec and tools run with the
+ * is read-only: fs_write refuses, shell_exec and tools run with the
  * working directory read-only in Landlock (only /tmp-style scratch dirs stay
  * writable), privileged commands are refused, and agent tools not marked
  * "readonly": true in their descriptor ask the user first.

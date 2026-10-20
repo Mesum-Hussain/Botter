@@ -322,8 +322,7 @@ static const item_t *find_item(const char *path)
 static int known_tool(const char *name)
 {
     static const char *const builtin[] = {"fs_list",  "fs_read",  "fs_write",  "fs_edit",     "shell_exec", "skill",
-                                          "note",     "recall",   "get_time",  "cron_set",    "cron_list",  "cron_delete",
-                                          "image_view", NULL};
+                                          "recall",   "get_time", "image_view", NULL};
     for (int i = 0; builtin[i]; i++) {
         if (strcmp(builtin[i], name) == 0) {
             return 1;
@@ -601,16 +600,10 @@ static void check_functions(void)
         size_t l = strlen(line);
         snprintf(line + l, sizeof(line) - l, "%s%s (%s)", l ? ", " : "", f->name, f->uses[0] ? f->uses : "pure");
     }
-    int hooks = 0;
-    char **hook = bl_globals(s, "on_turn_end", &hooks);
-    for (int i = 0; i < hooks; i++) {
-        free(hook[i]);
-    }
-    free(hook);
     if (line[0]) {
-        fprintf(stderr, "packer: functions: %s%s%s\n", line, hooks ? "; hook: on_turn_end" : "", flow ? "; FLOW.lua: flow" : "");
-    } else if (hooks || flow) {
-        fprintf(stderr, "packer: functions: no tools%s%s\n", hooks ? "; hook: on_turn_end" : "", flow ? "; FLOW.lua: flow" : "");
+        fprintf(stderr, "packer: functions: %s%s\n", line, flow ? "; FLOW.lua: flow" : "");
+    } else if (flow) {
+        fprintf(stderr, "packer: functions: no tools; FLOW.lua: flow\n");
     } else {
         warn("%s", "functions/: no function has a --- doc comment directly above it, so the model can call none of "
                    "them (see the write-functions skill)");

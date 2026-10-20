@@ -333,19 +333,10 @@ void fn_init(void)
 
 int fn_count(void) { return bl_count(g_bl); }
 
-char *fn_turn_end(const char *reply) { return bl_call_hook(g_bl, "on_turn_end", reply); }
 
 int fn_has_flow(void) { return vfs_find("FLOW.lua") && bl_has_global(g_bl, "flow"); }
 
 char *fn_flow(const char *input, char **reply) { return bl_call_flow(g_bl, input, reply); }
-
-char *fn_check(const char *name, const char *run_json)
-{
-    if (!g_bl) {
-        return strdup("ERROR: this agent has no functions, so no check function");
-    }
-    return bl_call_hook(g_bl, name, run_json);
-}
 
 void fn_schema_append(cJSON *arr) { bl_schema_append(g_bl, arr, "functions/"); }
 

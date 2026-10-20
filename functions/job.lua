@@ -5,8 +5,7 @@ BOTTER = BOTTER or {}
 
 local KINDS = { chat = true, batch = true, service = true, scheduled = true, producer = true }
 local BUILTIN = { fs_list = true, fs_read = true, fs_write = true, fs_edit = true, shell_exec = true,
-  image_view = true, note = true, recall = true, skill = true, cron_set = true, cron_list = true,
-  cron_delete = true, get_time = true, delegate = true, vault_seal = true }
+  image_view = true, recall = true, skill = true, get_time = true, delegate = true, vault_seal = true }
 
 function botter_reset_job()
   BOTTER.job = { goal = "", inputs = {}, outputs = {}, rules = {}, examples = {}, success = {}, edges = {}, skipped = {},
@@ -242,7 +241,7 @@ function job_edge(text)
 end
 
 --- Say what kind of agent this is.
----@param kind "chat"|"batch"|"service"|"scheduled"|"producer"  chat = talks with a person; batch = one task per input line (--run), e.g. one record of a CSV; service = answers other programs; scheduled = runs on a timer; producer = writes output files
+---@param kind "chat"|"batch"|"service"|"scheduled"|"producer"  chat = talks with a person; batch = one task per input line (--run), e.g. one record of a CSV; service = answers other programs; scheduled = started by the system's timer (cron) with --run; producer = writes output files
 ---@param why string  one sentence
 ---@return string  confirmation
 function design_kind(kind, why)

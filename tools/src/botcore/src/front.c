@@ -36,13 +36,12 @@ static char       *g_acc;                 /* A2A: the answer so far */
 static char        g_host[200];
 static const char *g_task;                /* --run "task": the only one */
 static char       *g_input, *g_err;       /* --run: the task in flight, and why it failed */
-static const char *g_eval_dir;            /* --eval: where the cases are */
+static cJSON      *g_tools;               /* --run: the tools the task in flight called */
 
 int front_remote(void) { return g_on >= F_ACP; }
 
 int front_batch(void) { return g_on == F_RUN; }
 
-const char *front_eval_dir(void) { return g_eval_dir; }
 
 void front_result(const char *line)
 {
@@ -155,13 +154,6 @@ int front_init(int argc, char **argv)
         g_on = F_MCP;
         return 1;
     }
-    if (argc > 1 && !strcmp(argv[1], "--eval")) { /* the agent's eval cases, against the real model */
-        g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
-        dup2(STDERR_FILENO, STDOUT_FILENO);
-        g_eval_dir = argc > 2 ? argv[2] : "evals";
-        g_on = F_RUN;
-        return 1;
-    }
     if (argc > 1 && !strcmp(argv[1], "--run")) { /* batch: tasks in, results out, nobody to ask */
         g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
         dup2(STDERR_FILENO, STDOUT_FILENO); /* stdout carries the results only; notes go to stderr */
@@ -269,6 +261,8 @@ static void remote_event(const cJSON *o)
         if (!strcmp(ev, "reply")) { /* the result is the final answer, not the notes before tool calls */
             free(g_acc);
             g_acc = strdup(text);
+        } else if (!strcmp(ev, "tool")) {
+            cJSON_AddItemToArray(g_tools ? g_tools : (g_tools = cJSON_CreateArray()), cJSON_CreateString(jstr(o, "name")));
         }
     } else if (g_on == F_A2A || g_on == F_MCP) {
         if ((!strcmp(ev, "reply") || !strcmp(ev, "text")) && *text) { /* the answer is the text, whole */
@@ -372,6 +366,8 @@ static void finish_request(void)
             cJSON *o = cJSON_CreateObject();
             cJSON_AddStringToObject(o, "input", g_input);
             cJSON_AddItemToObject(o, "reply", g_acc ? cJSON_CreateString(g_acc) : cJSON_CreateNull());
+            cJSON_AddItemToObject(o, "tools", g_tools ? g_tools : cJSON_CreateArray());
+            g_tools = NULL;
             if (!g_acc || g_err) {
                 cJSON_AddStringToObject(o, "error", g_err ? g_err : "no answer");
             }
@@ -381,6 +377,8 @@ static void finish_request(void)
             free(line);
             cJSON_Delete(o);
         }
+        cJSON_Delete(g_tools);
+        g_tools = NULL;
         free(g_input);
         g_input = NULL;
         free(g_err);
@@ -536,14 +534,11 @@ static char *mcp_request(const cJSON *j, cJSON **reply, char sess[100])
 }
 
 /* MCP over stdio: the client started the agent and writes one JSON-RPC message per line. */
-static int mcp_next(int (*idle)(void), char **out)
+static int mcp_next(char **out)
 {
     for (;;) {
         char *line = NULL, sess[100], *text;
-        int r = read_line(idle ? 1000 : -1, &line);
-        if (r == 1 && idle && idle()) {
-            return TERM_TICK;
-        }
+        int r = read_line(-1, &line);
         if (r == 1 || r == -2) {
             continue;
         }
@@ -563,14 +558,11 @@ static int mcp_next(int (*idle)(void), char **out)
     }
 }
 
-static int acp_next(int (*idle)(void), char **out)
+static int acp_next(char **out)
 {
     for (;;) {
         char *line = NULL;
-        int r = read_line(idle ? 1000 : -1, &line);
-        if (r == 1 && idle && idle()) {
-            return TERM_TICK;
-        }
+        int r = read_line(-1, &line);
         if (r == 1 || r == -2) {
             continue;
         }
@@ -673,15 +665,11 @@ static const char *acp_permission(int always)
 }
 
 /* A2A: wait for the next caller; answer everything but a message on the spot. */
-static int a2a_next(int (*idle)(void), char **out)
+static int a2a_next(char **out)
 {
     for (;;) {
         struct pollfd pf = {g_lsock, POLLIN, 0};
-        int r = poll(&pf, 1, idle ? 1000 : -1);
-        if (r == 0 && idle && idle()) {
-            return TERM_TICK;
-        }
-        if (r <= 0) {
+        if (poll(&pf, 1, -1) <= 0) {
             continue;
         }
         int c = accept4(g_lsock, NULL, NULL, SOCK_CLOEXEC);
@@ -838,7 +826,7 @@ static int run_next(char **out)
     }
 }
 
-static int remote_readline(const char *prompt, int (*idle)(void), char **out)
+static int remote_readline(const char *prompt, char **out)
 {
     if (!strstr(prompt, ">>")) { /* not the chat prompt */
         if (strstr(prompt, "Allow?")) { /* a risky action: the editor's user decides; a remote caller cannot */
@@ -858,7 +846,7 @@ static int remote_readline(const char *prompt, int (*idle)(void), char **out)
     if (g_on == F_RUN) {
         return run_next(out);
     }
-    return g_on == F_ACP ? acp_next(idle, out) : g_on == F_MCP && g_lsock < 0 ? mcp_next(idle, out) : a2a_next(idle, out);
+    return g_on == F_ACP ? acp_next(out) : g_on == F_MCP && g_lsock < 0 ? mcp_next(out) : a2a_next(out);
 }
 
 static void emit(cJSON *o)
@@ -944,11 +932,11 @@ static int read_line(int timeout_ms, char **line)
     }
 }
 
-int front_readline(const char *prompt, int secret, int (*idle)(void), char **out)
+int front_readline(const char *prompt, int secret, char **out)
 {
     *out = NULL;
     if (g_on >= F_ACP) {
-        return remote_readline(prompt, idle, out);
+        return remote_readline(prompt, out);
     }
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "ev", "prompt");
@@ -959,11 +947,8 @@ int front_readline(const char *prompt, int secret, int (*idle)(void), char **out
 
     for (;;) {
         char *line = NULL;
-        int r = read_line(idle ? 1000 : -1, &line);
+        int r = read_line(-1, &line);
         if (r == 1) {
-            if (idle && idle()) {
-                return TERM_TICK;
-            }
             continue;
         }
         if (r == -2) {

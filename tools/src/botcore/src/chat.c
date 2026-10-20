@@ -199,7 +199,6 @@ void chat_free(chat_t *c)
     cJSON_Delete(c->hist);
     cJSON_Delete(c->tools);
     cJSON_Delete(c->images);
-    cJSON_Delete(c->notes);
     cJSON_Delete(c->archive);
     memset(c, 0, sizeof(*c));
 }
@@ -457,9 +456,8 @@ void chat_clear(chat_t *c)
     while (cJSON_GetArraySize(c->hist) > keep) {
         cJSON_DeleteItemFromArray(c->hist, keep);
     }
-    cJSON_Delete(c->notes);
     cJSON_Delete(c->archive);
-    c->notes = c->archive = NULL;
+    c->archive = NULL;
     mem_reset();
 }
 
@@ -902,7 +900,7 @@ static int send_turn(chat_t *c, const char *user, char **reply, char **err);
  */
 static char *print_with_memory(chat_t *c, cJSON *root)
 {
-    char *state = mem_state(c->notes, c->archive);
+    char *state = mem_state(c->archive);
     cJSON *last = cJSON_GetArrayItem(c->hist, cJSON_GetArraySize(c->hist) - 1);
     cJSON *lc = cJSON_GetObjectItemCaseSensitive(last, "content"), *part = NULL;
     const cJSON *role = cJSON_GetObjectItemCaseSensitive(last, "role");
