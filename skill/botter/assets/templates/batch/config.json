@@ -1,0 +1,10 @@
+{
+  "name": "{{name}}",
+  "display_name": "{{name}}",
+  "version": "0.1.0",
+  "description": "One sentence: which records it reads and what it writes.",
+  "internet": true,
+  "skills": [],
+  "requires": [],
+  "temperature": 0
+}

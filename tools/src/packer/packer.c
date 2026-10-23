@@ -606,7 +606,8 @@ static void check_functions(void)
         fprintf(stderr, "packer: functions: no tools; FLOW.lua: flow\n");
     } else {
         warn("%s", "functions/: no function has a --- doc comment directly above it, so the model can call none of "
-                   "them (see the write-functions skill)");
+                   "them (a batch agent calls them from FLOW.lua instead; see the Botter skill's "
+                   "references/lua-api.md)");
     }
     bl_close(s);
     if (errors) {
@@ -1429,7 +1430,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
         char *old = join(dir, flows[i]);
         if (access(old, F_OK) == 0) {
             err("%s is no longer used: write how the agent works in AGENT.md (or a skill it loads), and exact, "
-                "repeatable steps as Lua in functions/ (see the write-functions skill)%s", old, "");
+                "repeatable steps as Lua in functions/ (see the Botter skill's references/lua-api.md)%s", old, "");
         }
         free(old);
     }

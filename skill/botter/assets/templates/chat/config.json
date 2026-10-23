@@ -1,0 +1,9 @@
+{
+  "name": "{{name}}",
+  "display_name": "{{name}}",
+  "version": "0.1.0",
+  "description": "One sentence: what this agent does and for whom.",
+  "internet": true,
+  "skills": [],
+  "requires": []
+}

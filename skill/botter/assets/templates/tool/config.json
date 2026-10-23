@@ -1,0 +1,9 @@
+{
+  "name": "{{name}}",
+  "display_name": "{{name}}",
+  "version": "0.1.0",
+  "description": "One sentence: what callers ask it for.",
+  "internet": true,
+  "skills": [],
+  "requires": []
+}
