@@ -49,6 +49,7 @@ int  front_init(int argc, char **argv); /* 1 if a front end is on */
 int  front_active(void);
 int  front_remote(void);          /* --acp, --a2a, --mcp or --run */
 int  front_batch(void);           /* --run */
+const char *front_call(void);     /* --call NAME: the Lua function every input line goes to, else NULL */
 void front_result(const char *line); /* --run: one line on the results stream (stdout) */
 int  front_take_cmd(void);        /* 1 if the line just read is the front end's own command (/new) */
 void front_set_card(void *card);  /* cJSON: name, description, version, skills (takes it) */

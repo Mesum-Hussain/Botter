@@ -35,12 +35,15 @@ static const char *g_token;
 static char       *g_acc;                 /* A2A: the answer so far */
 static char        g_host[200];
 static const char *g_task;                /* --run "task": the only one */
+static const char *g_call;                /* --call NAME: each input line (JSON) goes to the Lua function NAME */
 static char       *g_input, *g_err;       /* --run: the task in flight, and why it failed */
 static cJSON      *g_tools;               /* --run: the tools the task in flight called */
 
 int front_remote(void) { return g_on >= F_ACP; }
 
 int front_batch(void) { return g_on == F_RUN; }
+
+const char *front_call(void) { return g_call; }
 
 
 void front_result(const char *line)
@@ -159,6 +162,18 @@ int front_init(int argc, char **argv)
         dup2(STDERR_FILENO, STDOUT_FILENO); /* stdout carries the results only; notes go to stderr */
         setvbuf(stdout, NULL, _IOLBF, 0);   /* in order with stderr, not all at exit */
         g_task = argc > 2 ? argv[2] : NULL;
+        g_on = F_RUN;
+        return 1;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--call")) { /* batch, straight into Lua: JSON lines in, JSON lines out */
+        if (argc < 3 || !argv[2][0]) {
+            fprintf(stderr, "--call wants the name of a global Lua function, e.g. --call solve_case\n");
+            exit(2);
+        }
+        g_out = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+        dup2(STDERR_FILENO, STDOUT_FILENO);
+        setvbuf(stdout, NULL, _IOLBF, 0);
+        g_call = argv[2];
         g_on = F_RUN;
         return 1;
     }
@@ -363,6 +378,18 @@ static void finish_request(void)
         if (g_task) { /* one task: the answer as it is */
             out_all(g_acc ? g_acc : "");
             out_all("\n");
+        } else if (g_call) { /* --call: the input and the function's result, as JSON values */
+            cJSON *o = cJSON_CreateObject(), *in = cJSON_Parse(g_input), *res = g_acc && !g_err ? cJSON_Parse(g_acc) : NULL;
+            cJSON_AddItemToObject(o, "input", in ? in : cJSON_CreateString(g_input));
+            cJSON_AddItemToObject(o, "result", res ? res : cJSON_CreateNull());
+            if (!res) {
+                cJSON_AddStringToObject(o, "error", g_err ? g_err : "no result");
+            }
+            char *line = cJSON_PrintUnformatted(o);
+            out_all(line ? line : "{}");
+            out_all("\n");
+            free(line);
+            cJSON_Delete(o);
         } else { /* one JSON line per task */
             cJSON *o = cJSON_CreateObject();
             cJSON_AddStringToObject(o, "input", g_input);

@@ -18,6 +18,8 @@ int         fn_count(void);
  * model. fn_flow returns NULL and the reply (malloc'd, may be NULL), or a malloc'd error. */
 int         fn_has_flow(void);
 char       *fn_flow(const char *input, char **reply);
+/* --call NAME: call a global Lua function with a JSON value; the result as one line of JSON (or NULL). */
+char       *fn_call_json(const char *name, const char *input, char **reply);
 
 /* What main.c gives the functions for orchestration (bot.worker, bot.ask, bot.say). */
 typedef struct {

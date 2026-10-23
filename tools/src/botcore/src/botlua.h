@@ -104,6 +104,9 @@ char        *bl_call(bl_state *s, const char *name, const char *args_json);
 /* FLOW.lua: call flow(input) with no time limit (Ctrl-C still stops it). *reply = what it returned (malloc'd,
  * NULL for nil); returns NULL, or a malloc'd error message. */
 char        *bl_call_flow(bl_state *s, const char *input, char **reply);
+/* Call a global function with one argument, no time limit. json: input is a JSON text, passed as a Lua value,
+ * and the result comes back as one line of JSON; else input is passed as a string. As bl_call_flow. */
+char        *bl_call_global(bl_state *s, const char *name, const char *input, int json, char **reply);
 int          bl_has_global(bl_state *s, const char *name);
 /* Call a global function with no arguments (tests): NULL = it returned, else a malloc'd error message. */
 char        *bl_call_plain(bl_state *s, const char *name);

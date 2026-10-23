@@ -1215,7 +1215,7 @@ static int run_turn(chat_t *chat, const char *text, char **out)
 
     /* Tell the model when the mode changed since its last turn (the kernel enforces Plan mode anyway). */
     char *sent = NULL;
-    if (g_mode_told != guard_plan()) {
+    if (g_mode_told != guard_plan() && !front_call()) {
         const char *note = guard_plan() ? PLAN_NOTE : BUILD_NOTE;
         sent = malloc(strlen(note) + strlen(text) + 1);
         if (sent) {
@@ -1228,7 +1228,13 @@ static int run_turn(chat_t *chat, const char *text, char **out)
     term_clear_interrupt();
     front_event("busy", "label", "Thinking", (char *)NULL);
     int r;
-    if (fn_has_flow()) { /* FLOW.lua runs the job: it calls the model through its workers */
+    if (front_call()) { /* --call NAME: the input line (JSON) straight into a Lua function */
+        err = fn_call_json(front_call(), text, &reply);
+        r = err ? (term_interrupted() ? CHAT_ERR_ABORT : CHAT_ERR_OTHER) : CHAT_OK;
+        if (!err && !reply) {
+            reply = strdup("null");
+        }
+    } else if (fn_has_flow()) { /* FLOW.lua runs the job: it calls the model through its workers */
         err = fn_flow(text, &reply);
         r = err ? (term_interrupted() ? CHAT_ERR_ABORT : CHAT_ERR_OTHER) : CHAT_OK;
         if (!err && !reply) {
@@ -1339,7 +1345,9 @@ static int handle_command(chat_t *chat, const char *line)
     }
     if (strcmp(line, "/new") == 0) {
         chat_clear(chat);
-        puts(ANSI_DIM "(new conversation)" ANSI_RESET);
+        if (!front_call()) { /* --call has no conversation */
+            puts(ANSI_DIM "(new conversation)" ANSI_RESET);
+        }
         return 1;
     }
     if (strcmp(line, "/plan") == 0 || strcmp(line, "/build") == 0 || strcmp(line, "/mode") == 0) {
@@ -1403,6 +1411,29 @@ int main(int argc, char **argv)
             printf("%s %s\n", meta_str("name"), meta_str("version") ? meta_str("version") : "(no version)");
         }
         printf("botcore %s (TLS: BearSSL; https://github.com/Mesum-Hussain/botter)\n", BC_VERSION_TAG + 16);
+        return 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--about") == 0) { /* what this file is, without running it */
+        if (vfs_init() != 0 || !meta_str("name")) {
+            printf("not a Botter agent: no agent pack inside (botcore %s)\n", BC_VERSION_TAG + 16);
+            return 1;
+        }
+        printf("agent        %s\n", meta_str("name"));
+        printf("version      %s\n", meta_str("version") ? meta_str("version") : "(none)");
+        if (meta_str("description")) {
+            printf("description  %s\n", meta_str("description"));
+        }
+        const cJSON *req = cJSON_GetObjectItemCaseSensitive(agent_meta(NULL), "requires");
+        printf("requires     ");
+        int n = 0;
+        for (const cJSON *r = cJSON_IsArray(req) ? req->child : NULL; r; r = r->next) {
+            if (cJSON_IsString(r)) {
+                printf("%s%s", n++ ? ", " : "", r->valuestring);
+            }
+        }
+        printf("%s\n", n ? "" : "nothing (runs on any x86-64 Linux)");
+        printf("runtime      botcore %s (built with Botter)\n", BC_VERSION_TAG + 16);
         return 0;
     }
 
@@ -1472,12 +1503,18 @@ int main(int argc, char **argv)
         int auth;
         saved = url_ok(base) && model ? try_connect(&chat, provider_name(base), base, key ? key : "", model, &auth) : 0;
     }
-    if (saved == 0 && front_remote()) { /* nobody to pick a provider: say how, and fail (a batch run must not look fine) */
+    if (saved == 0 && front_call()) { /* code may never need the model; bot.llm fails at once if it does */
+        if (chat_init(&chat, "http://127.0.0.1:1/v1", "", "none") != 0) {
+            return 1;
+        }
+        fprintf(stderr, "(no model connection: bot.llm and workers will fail; run the agent once in a terminal, or put "
+                        "BOTTER_BASE_URL, BOTTER_API_KEY and BOTTER_MODEL in .env)\n");
+    } else if (saved == 0 && front_remote()) { /* nobody to pick a provider: say how, and fail (a batch run must not look fine) */
         fprintf(stderr, "No saved model connection, and nobody to ask here: run the agent once in a terminal, or put "
                         "BOTTER_BASE_URL, BOTTER_API_KEY and BOTTER_MODEL in .env\n");
         return 1;
     }
-    if (saved < 0 || (saved == 0 && !connect_flow(&chat))) {
+    if (saved < 0 || (saved == 0 && !front_call() && !connect_flow(&chat))) {
         return 0;
     }
 
@@ -1560,7 +1597,9 @@ int main(int argc, char **argv)
     free(sys);
 
     front_event("info", "model", chat.model, "cwd", cwd, (char *)NULL);
-    puts(ANSI_BOLD_BLUE "Connected" ANSI_RESET);
+    if (!(front_call() && saved == 0)) {
+        puts(ANSI_BOLD_BLUE "Connected" ANSI_RESET);
+    }
     show_mode();
     if (!landlock) {
         puts(ANSI_DIM "(note: Landlock unavailable; shell commands and tools are not confined to the working directory)" ANSI_RESET);

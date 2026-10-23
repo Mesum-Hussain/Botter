@@ -1934,28 +1934,43 @@ int bl_has_global(bl_state *s, const char *name)
     return f;
 }
 
-char *bl_call_flow(bl_state *s, const char *input, char **reply)
+char *bl_call_global(bl_state *s, const char *name, const char *input, int json, char **reply)
 {
     int top = lua_gettop(s->L);
     char *err = NULL;
     *reply = NULL;
-    if (lua_getglobal(s->L, "flow") != LUA_TFUNCTION) {
+    if (lua_getglobal(s->L, name) != LUA_TFUNCTION) {
         lua_settop(s->L, top);
-        return strdup("FLOW.lua has no function flow(input)");
+        if (!strcmp(name, "flow")) {
+            return strdup("FLOW.lua has no function flow(input)");
+        }
+        return asprintf(&err, "no global Lua function %s (define it in FLOW.lua or functions/)", name) < 0 ? NULL : err;
     }
-    lua_pushstring(s->L, input ? input : "");
+    if (json) { /* --call: each input line is a JSON value, given to the function as a Lua value */
+        cJSON *in = cJSON_Parse(input ? input : "");
+        if (!in) {
+            lua_settop(s->L, top);
+            return strdup("the input line is not JSON");
+        }
+        push_json(s->L, in);
+        cJSON_Delete(in);
+    } else {
+        lua_pushstring(s->L, input ? input : "");
+    }
     if (pcall_limited(s, 1, 1, 0) != LUA_OK) {
         err = strdup(lua_tostring(s->L, -1) ? lua_tostring(s->L, -1) : "failed");
-    } else if (lua_type(s->L, -1) == LUA_TSTRING || lua_type(s->L, -1) == LUA_TNUMBER) {
+    } else if (!json && (lua_type(s->L, -1) == LUA_TSTRING || lua_type(s->L, -1) == LUA_TNUMBER)) {
         *reply = strdup(lua_tostring(s->L, -1));
-    } else if (lua_type(s->L, -1) == LUA_TTABLE) {
+    } else if (lua_type(s->L, -1) != LUA_TNIL) {
         cJSON *j = to_json(s->L, -1, 0);
-        *reply = j ? cJSON_Print(j) : NULL;
+        *reply = j ? (json ? cJSON_PrintUnformatted(j) : cJSON_Print(j)) : NULL;
         cJSON_Delete(j);
     }
     lua_settop(s->L, top);
     return err;
 }
+
+char *bl_call_flow(bl_state *s, const char *input, char **reply) { return bl_call_global(s, "flow", input, 0, reply); }
 
 char *bl_call_hook(bl_state *s, const char *name, const char *arg)
 {

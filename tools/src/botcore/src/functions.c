@@ -338,6 +338,11 @@ int fn_has_flow(void) { return vfs_find("FLOW.lua") && bl_has_global(g_bl, "flow
 
 char *fn_flow(const char *input, char **reply) { return bl_call_flow(g_bl, input, reply); }
 
+char *fn_call_json(const char *name, const char *input, char **reply)
+{
+    return g_bl ? bl_call_global(g_bl, name, input, 1, reply) : strdup("this agent has no Lua (no FLOW.lua or functions/)");
+}
+
 void fn_schema_append(cJSON *arr) { bl_schema_append(g_bl, arr, "functions/"); }
 
 void fn_skill_schema_append(const char *skill, cJSON *arr)
