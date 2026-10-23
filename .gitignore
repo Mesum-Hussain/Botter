@@ -3,8 +3,6 @@
 /skills/build-agent/scripts/agent_tools
 /tools/src/agent_tools/agent_tools
 /graphify-out/
-tui/botter-tui
-tui/botter-tui-dev
 /dist/
 /tools/src/botcore/botcore
 /tools/src/botcore/botcore-static

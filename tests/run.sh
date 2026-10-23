@@ -9,7 +9,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TESTS=$ROOT/tests
 PACK=$ROOT/artifacts/packer
 CORE=$ROOT/artifacts/botcore
-BOTTER=$ROOT/botter
+BOTTER=$ROOT/botter                    # the CLI
+BUILDER=$ROOT/artifacts/botter.bot     # the old agent that builds agents (until progress.md §14 removes it)
 T=$(mktemp -d "${TMPDIR:-/tmp}/botter-test.XXXXXX")
 PASS=0 FAIL=0 SKIP=0
 STUB= REMOTE= A2A=
@@ -37,7 +38,7 @@ check() { if grep -Eq -- "$3" "$2" 2>/dev/null; then pass "$1"; else fail "$1" "
 check_not() { if grep -Eq -- "$3" "$2" 2>/dev/null; then fail "$1" "unexpected /$3/"; else pass "$1"; fi; }
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-for f in "$PACK" "$CORE" "$BOTTER"; do
+for f in "$PACK" "$CORE" "$BOTTER" "$BUILDER"; do
     [ -x "$f" ] || { echo "missing $f: run make first"; exit 2; }
 done
 
@@ -532,7 +533,7 @@ check "runs with no curl (or anything) on PATH" "$T/rec/tool.txt" "no-curl-neede
 
 mkdir -p "$T/proj" && echo "You are built by the test." >"$T/proj/AGENT.md"
 tool_call agent_build '{}'
-drive "$BOTTER" "$T/proj" BOTTER_TUI=0
+drive "$BUILDER" "$T/proj"
 check "botter: agent_build builds a .bot from inside the sandbox" "$T/rec/tool.txt" "wrote .*proj\\.bot"
 mkdir -p "$T/proj2" && echo "You are built by the plain runtime." >"$T/proj2/AGENT.md"
 drive "$ROOT/artifacts/botter.bot" "$T/proj2"
@@ -544,7 +545,7 @@ mkdir -p "$T/sealproj" && echo "You are sealed." >"$T/sealproj/AGENT.md"
 echo '{"name": "sealproj", "version": "1.0.0", "description": "Carries its keys.", "mcp": {"docs": {"url": "https://example.invalid/mcp", "token": "DOCS_TOKEN"}}}' >"$T/sealproj/config.json"
 tool_call vault_seal '{}'
 (cd "$T/sealproj" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nn\n6\nhttp://127.0.0.1:%s/v1\nsk-sealed-123\nstub\ndocs-secret-9\n\nshort\ncorrect horse 1\nsomething else 2\ncorrect horse 1\ncorrect horse 1\n' "$PORT" "$PORT" |
-    timeout 90 env BOTTER_TUI=0 "$BOTTER" >"$T/out" 2>&1)
+    timeout 90 "$BUILDER" >"$T/out" 2>&1)
 check "vault: Botter says what the LLM key is for" "$T/out" "The model the agent thinks with"
 check "vault: each MCP token is asked for by name, with its purpose" "$T/out" 'MCP server "docs".*example.invalid'
 check "vault: the A2A serving token is explained, and that ACP needs none" "$T/out" "ACP, needs no key"
@@ -1204,6 +1205,93 @@ check "pipeline: the report says how the skill came out" "$T/out" "^Skills: haik
 check "pipeline: the built agent carries the skill" "$T/list.log" "skills/haiku/references/form.md"
 
 # ---------------------------------------------------------------------------
+section "botter CLI: new, check, build, inspect, run, eval, skill"
+
+"$BOTTER" version >"$T/cli.txt" 2>&1
+check "cli: version names botter and the runtime it carries" "$T/cli.txt" "^botter .* \(botcore "
+"$BOTTER" >"$T/cli.txt" 2>&1
+check "cli: no arguments prints the help" "$T/cli.txt" "botter new <name>"
+rm -rf "$T/cli" && mkdir -p "$T/cli"
+for k in chat batch tool; do
+    (cd "$T/cli" && "$BOTTER" new "k-$k" --kind "$k" >/dev/null 2>&1 && cd "k-$k" && "$BOTTER" check >"$T/cli-$k.txt" 2>&1)
+    check "cli: botter new --kind $k makes a project that passes check" "$T/cli-$k.txt" "check passed: k-$k, 0 warning"
+done
+check "cli: new fills in the agent's name" "$T/cli/k-chat/config.json" '"name": "k-chat"'
+(cd "$T/cli" && "$BOTTER" new k-chat >"$T/cli.txt" 2>&1)
+check "cli: new refuses a folder that exists" "$T/cli.txt" "already exists"
+(cd "$T/cli" && "$BOTTER" new "Bad Name" >"$T/cli.txt" 2>&1)
+check "cli: new refuses a name that cannot be a file name" "$T/cli.txt" "not a valid agent name"
+(cd "$T/cli/k-tool" && "$BOTTER" build >"$T/cli.txt" 2>&1)
+check "cli: build writes ./<name from config.json>" "$T/cli.txt" "built ./k-tool "
+check "cli: build says a Markdown + Lua agent runs anywhere" "$T/cli.txt" "runs anywhere: yes"
+[ -x "$T/cli/k-tool/k-tool" ] && pass "cli: the built agent is executable" || fail "cli: the built agent is executable"
+"$T/cli/k-tool/k-tool" --about >"$T/cli.txt" 2>&1
+check "agent --about: its name" "$T/cli.txt" "^agent +k-tool"
+check "agent --about: what it needs on the machine" "$T/cli.txt" "^requires +nothing"
+(cd "$T/cli/k-tool" && "$BOTTER" inspect k-tool >"$T/cli.txt" 2>&1)
+check "cli: inspect lists the embedded files" "$T/cli.txt" "functions/tools.lua"
+sed -i 's/"requires": \[\]/"requires": ["python3"]/' "$T/cli/k-tool/config.json"
+(cd "$T/cli/k-tool" && "$BOTTER" build >"$T/cli.txt" 2>&1)
+check "cli: build says when an agent needs programs on the machine" "$T/cli.txt" "runs anywhere: no, it needs python3"
+echo "notes, not an agent" >"$T/cli/k-chat/k-chat"
+(cd "$T/cli/k-chat" && "$BOTTER" build >"$T/cli.txt" 2>&1)
+check "cli: build never overwrites a file that is not an agent" "$T/cli.txt" "refusing to overwrite"
+echo 'function test_bad() assert(word_count("a b") == 3, "wrong count") end' >"$T/cli/k-tool/functions/tests/bad.lua"
+(cd "$T/cli/k-tool" && "$BOTTER" check >"$T/cli.txt" 2>&1; echo "exit $?" >>"$T/cli.txt")
+check "cli: a failing test fails check" "$T/cli.txt" "^exit 1"
+check "cli: check names the failing test" "$T/cli.txt" "test test_bad FAILED: .*wrong count"
+rm "$T/cli/k-tool/functions/tests/bad.lua"
+(cd "$T/cli" && "$BOTTER" skill sk >"$T/cli.txt" 2>&1)
+[ -f "$T/cli/sk/botter/SKILL.md" ] && [ -f "$T/cli/sk/botter/references/lua-api.md" ] &&
+    pass "cli: skill installs SKILL.md and its references" || fail "cli: skill installs SKILL.md and its references"
+check "cli: the installed skill has its frontmatter" "$T/cli/sk/botter/SKILL.md" "^name: botter$"
+
+# A scorer project: solve_case over solved examples
+E=$T/cli/orders
+mkdir -p "$E/data"
+echo "You price orders." >"$E/AGENT.md"
+echo '{"name": "orders", "version": "0.1.0", "description": "Prices orders.", "temperature": 0}' >"$E/config.json"
+cat >"$E/FLOW.lua" <<'EOF'
+function flow(input) return "use --call" end
+function solve_case(case)
+  if case.id == "o4" then error("no price list for o4") end
+  local total = tonumber(case.qty) * tonumber(case.price)
+  bot.say("total for " .. case.id .. " is " .. total)
+  return {total = total, label = total > 100 and "big" or "small", parts = "a:" .. case.qty .. "|b:2", note = "computed"}
+end
+EOF
+printf 'id,qty,price\n' >"$E/data/orders.csv"
+cat >"$E/data/sample_orders.csv" <<'EOF'
+id,qty,price,total,label,parts,note
+o1,2,10,20.3,small,a:2|b:2,"A long explanation of why this order costs what it does, written by a person."
+o2,20,10,200,big,a:20|b:3,"Another long explanation of why this order costs what it does, written by a person."
+o3,5,30,150,small,a:5|b:2,"A third long explanation of why this order costs what it does, written by a person."
+o4,1,1,1,small,a:1|b:2,"A fourth long explanation of why this order costs what it does, written by a person."
+EOF
+(cd "$E" && "$BOTTER" eval data/sample_orders.csv >"$T/eval.txt" 2>&1; echo "exit $?" >>"$T/eval.txt")
+check "eval: the input columns come from the CSV next to the examples" "$T/eval.txt" "inputs = the columns of data/orders.csv"
+check "eval: numbers match within 2% (20 for 20.3)" "$T/eval.txt" "^total +3/4"
+check "eval: words are compared exactly" "$T/eval.txt" "^label +2/4"
+check "eval: lists are compared item by item" "$T/eval.txt" "^parts +2/4"
+check "eval: whole rows" "$T/eval.txt" "^whole rows +1/4"
+check "eval: a long free-text column is shown, not scored" "$T/eval.txt" "not scored \(free text\): note"
+check "eval: each wrong value is listed" "$T/eval.txt" "o3: label: got big, want small"
+check "eval: a case that raises an error is reported" "$T/eval.txt" "o4: ERROR .*no price list for o4"
+check "eval: an error makes the run fail" "$T/eval.txt" "^exit 1"
+(cd "$E" && "$BOTTER" eval data/sample_orders.csv --case o2 >"$T/eval.txt" 2>&1)
+check "eval --case: the agent's notes are shown" "$T/eval.txt" "total for o2 is 200"
+check "eval --case: each column, right or wrong" "$T/eval.txt" "✗ parts"
+(cd "$E" && "$BOTTER" eval data/sample_orders.csv --answers total --tol 0 --json >"$T/eval.json" 2>&1)
+check "eval --json --answers --tol 0: exact numbers only" "$T/eval.json" '"total":[[:space:]]*2'
+(cd "$E" && "$BOTTER" run --about >"$T/cli.txt" 2>&1)
+check "cli: run starts the project from source" "$T/cli.txt" "^agent +orders"
+printf '{"id":"o1","qty":"2","price":"10"}\nnot json\n' | (cd "$E" && "$BOTTER" run --call solve_case >"$T/call.txt" 2>"$T/call.err"; echo "exit $?" >>"$T/call.txt")
+check "agent --call: one JSON line per input, with the result" "$T/call.txt" '"result":\{.*"total":20'
+check "agent --call: input that is not JSON is an error line" "$T/call.txt" '"error":"the input line is not JSON"'
+check "agent --call: a failed line makes the run fail" "$T/call.txt" "^exit 1"
+check "agent --call: runs without a model connection, and says so" "$T/call.err" "no model connection"
+
+# ---------------------------------------------------------------------------
 section "Pack integrity"
 
 shell_call "echo intact"
@@ -1296,50 +1384,6 @@ if command -v tmux >/dev/null 2>&1; then
     tmux kill-server 2>/dev/null
     check "Ctrl-C cancels an in-flight LLM request within a second" "$T/tmux.txt" "\\(interrupted\\)"
 
-    # Botter's TUI: inline; what was said goes to the scrollback, the input box stays at the bottom
-    stub_start
-    tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "$BOTTER"
-    tmux set-option -t botter-test remain-on-exit on >/dev/null
-    sleep 0.8
-    for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
-        tmux send-keys -t botter-test "$k"
-        sleep 0.3
-    done
-    sleep 0.8
-    tmux send-keys -t botter-test "first message" Enter
-    sleep 1
-    tmux send-keys -t botter-test "second message" Enter
-    sleep 1.2
-    tmux capture-pane -t botter-test -p -S - >"$T/tui.txt"
-    tmux send-keys -t botter-test C-d
-    sleep 0.8
-    tmux capture-pane -t botter-test -p -S - >"$T/tui-end.txt"
-    tmux kill-server 2>/dev/null
-    check "TUI: a message reaches the model as typed" "$T/rec/user.txt" "^second message$"
-    check_not "TUI: the model is not told about message numbers" "$T/rec/system.txt" "numbers each user message"
-    check "TUI: the logo header is in the scrollback" "$T/tui.txt" "the agent that builds agents"
-    check "TUI: a sent message has the input box's bar" "$T/tui.txt" "^│ first message"
-    check "TUI: the reply is printed below it" "$T/tui.txt" "^  done"
-    check "TUI: the input box is drawn" "$T/tui.txt" "^│ > "
-    check "TUI: the conversation stays after exit" "$T/tui-end.txt" "^│ second message"
-    check_not "TUI: the input box is gone after exit" "$T/tui-end.txt" "^╰─"
-
-    # TUI after a tool call: streamed reply shown once, tool internals hidden
-    stub_start --tool shell_exec --args '{"command":"echo hi"}'
-    tmux new-session -d -s botter-test -x 100 -y 30 -c "$T/ws" "$BOTTER"
-    sleep 0.8
-    for k in 6 Enter "http://127.0.0.1:$PORT/v1" Enter Enter stub Enter; do
-        tmux send-keys -t botter-test "$k"
-        sleep 0.3
-    done
-    sleep 0.8
-    tmux send-keys -t botter-test "run it" Enter
-    sleep 1.5
-    tmux capture-pane -t botter-test -p -S - >"$T/tui.txt"
-    tmux kill-server 2>/dev/null
-    n=$(grep -c "^ *done *$" "$T/tui.txt")
-    if [ "$n" -eq 1 ]; then pass "TUI: a streamed reply is shown once"; else fail "TUI: a streamed reply is shown once" "seen $n times"; fi
-    check_not "TUI: tool names are hidden unless ctrl+o" "$T/tui.txt" "shell_exec"
 else
     skip "Ctrl-C test" "tmux not installed"
 fi

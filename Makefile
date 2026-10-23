@@ -1,16 +1,15 @@
-# Build the botter agent (this project is itself an agent project: AGENT.md, config.json, functions/, skills/;
-# the C sources of the runtime, packer and TUI live in tools/src and tui/, never embedded).
+# Build botter: the CLI that checks, runs, scores and builds agents (docs/cli-design.md).
 #
-#   make            -> ./botter     (static x86-64 executable: the TUI front end with the agent
-#                                    artifacts/botter.bot = botcore + embedded pack, appended)
-#   make tools      -> skills/build-agent/scripts/agent_tools (static musl; the packer, run by Botter's agent_build)
+#   make            -> ./botter     (static x86-64 executable: the CLI + packer, with the botcore runtime and
+#                                    the Botter skill (skill/botter) embedded)
 #   make artifacts  -> artifacts/botcore (static runtime) + artifacts/packer (packer)
-#   make tui        -> tui/botter-tui (botter-only full-screen UI; agents built by botter never get it)
+#   make builder    -> artifacts/botter.bot: the old agent that builds agents (repo root: AGENT.md, FLOW.lua,
+#                      functions/, skills/). Kept until the CLI's acceptance test passes (progress.md §14).
 #   make test       -> tests/run.sh (stub LLM, sandbox, functions, batch mode, HTTP client; BOTTER_TEST_NET=1 adds internet tests)
 #   make dist       -> dist/botter-<VERSION>-linux-x86_64.tar.gz (+ .sha256): botter, README, licences
 #   make clean
 #
-# Build-time only; none of this is embedded. Needs gcc and musl-gcc (Fedora: musl-gcc musl-libc-static).
+# Build-time only. Needs gcc and musl-gcc (Fedora: musl-gcc musl-libc-static).
 
 # also drop compiler notes (Fedora annobin adds ~15KB) that plain strip keeps
 VERSION     := $(shell sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' config.json 2>/dev/null)
@@ -27,18 +26,25 @@ BOTLUA      = $(BOTCORE_DIR)/src/botlua.c $(BOTCORE_DIR)/src/botlua.h
 
 AGENT_FILES = $(shell find AGENT.md FLOW.lua config.json skills functions -type f ! -path '$(BUILD_PROG)' 2>/dev/null)
 
-# The TUI runs the agent from a memfd, so the agent's own executable (which agent_build
-# uses as the runtime for new agents) is plain botcore + pack, without the TUI.
-botter: tui/botter-tui artifacts/botter.bot
-	tui/botter-tui --bundle artifacts/botter.bot $@
+SKILL_FILES = $(shell find skill/botter -type f 2>/dev/null | sort)
+CLI_SRC     = tools/src/cli/botter.c
+
+botter: $(CLI_SRC) $(PACK_DIR)/packer.c $(BOTLUA) $(CJSON)/cJSON.c $(LUA_SRCS) artifacts/botcore artifacts/skill.bin
+	musl-gcc -Os -static -std=gnu11 -Wall -Wextra -Wno-unused-function -Wno-format-truncation -I$(CJSON) -I$(LUA) \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections -DBOTTER_VERSION='"$(VERSION)"' \
+		-DBOTTER_RUNTIME_FILE='"artifacts/botcore"' -DBOTTER_SKILL_FILE='"artifacts/skill.bin"' \
+		-o $@ $(CLI_SRC) $(CJSON)/cJSON.c $(LUA_SRCS) -lm
+	strip $(STRIP_NOTES) $@
+
+# The skill, one file: "path\nsize\n" + bytes per file (read by botter skill / botter new).
+artifacts/skill.bin: $(SKILL_FILES)
+	@mkdir -p artifacts
+	@cd skill && for f in $$(find botter -type f | sort); do printf '%s\n%s\n' "$$f" "$$(stat -c %s "$$f")"; cat "$$f"; done > ../$@
+
+builder: artifacts/botter.bot
 
 artifacts/botter.bot: artifacts/botcore artifacts/packer $(BUILD_PROG) $(AGENT_FILES)
 	artifacts/packer build . artifacts/botcore $@
-
-tui: tui/botter-tui
-
-tui/botter-tui: $(wildcard tui/*.c tui/*.h) $(CJSON)/cJSON.c
-	$(MAKE) -C tui
 
 tools: $(BUILD_PROG)
 
@@ -65,7 +71,7 @@ $(BUILD_PROG): $(AGENT_TOOLS)
 	@mkdir -p $(dir $@)
 	cp $< $@
 
-test: botter
+test: botter artifacts/botter.bot
 	sh tests/run.sh
 
 DIST = dist/botter-$(VERSION)-linux-x86_64
@@ -82,7 +88,6 @@ dist: botter
 
 clean:
 	rm -rf artifacts botter $(BUILD_PROG) $(AGENT_TOOLS) dist
-	$(MAKE) -C tui clean
 	$(MAKE) -C $(BOTCORE_DIR) clean
 
-.PHONY: tools artifacts tui test dist clean
+.PHONY: tools artifacts builder test dist clean
