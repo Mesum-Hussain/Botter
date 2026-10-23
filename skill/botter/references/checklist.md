@@ -5,6 +5,8 @@
 - [ ] Every rule the brief states plainly is implemented as written, not tuned to score better on the
       examples; any conflict between the brief and the examples is in the report.
 - [ ] The logic lives in the Lua project only (no second copy in another language left in the folder).
+- [ ] config.json `"requires"` is empty unless a step truly cannot be done in Lua (then shell first; Python
+      or Node last), and every program the agent runs is listed there.
 - [ ] Model readings are typed (`schema`), validated in code, cached, and spot-checked on real cases.
 - [ ] Data texts and images are treated as untrusted data in every prompt.
 - [ ] `botter check`: 0 errors, 0 warnings, tests for each rule with real rows.

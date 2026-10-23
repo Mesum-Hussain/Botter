@@ -40,16 +40,17 @@ Data
 
 Files (inside the working folder only)
 - `bot.fs.read(path)`, `bot.fs.write(path, text)`, `bot.fs.append(path, text)`, `bot.fs.exists(path)`,
-  `bot.fs.list(dir)`
+  `bot.fs.list(dir)` (names, sorted; folders end with "/")
 
 The model
 - `bot.llm(prompt)` -> text: one request to the agent's own model.
-- `bot.llm{prompt = ..., system = ..., schema = {...}, images = {"path.png"}}` -> a Lua table. `schema`
+- `bot.llm{prompt = ..., system = ..., schema = {...}, images = {"path.png"}, audio = {"note.mp3"}}` -> a Lua table. `schema`
   describes the JSON object you want, field by field, e.g.
   `{topic = "billing|delivery|refund|other", amount = "number or null", due = "YYYY-MM-DD or null"}`.
   The runtime asks for exactly that object, checks every field is present, asks once more if not, and
-  errors after that. Images are files in the working folder (PNG, JPEG, WEBP, GIF). Validate the values in
-  code (types, enums, dates) before using them.
+  errors after that. Images (PNG, JPEG, WEBP, GIF) and audio (MP3, WAV, OGG, FLAC, M4A) are files in the
+  working folder. Validate the values in code (types, enums, dates) before using them. For many records use
+  `read_items` (functions/read.lua in a batch project): batches, cache and checks done.
 - `bot.worker{task = ..., tools = {"fs_read", ...}, writes = {"out/"}, skills = {...}, max_rounds = 20}`
   -> text: a fresh model conversation with tools for an open-ended part (research, writing a document).
   `writes` limits what it may change. Workers cannot start workers.

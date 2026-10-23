@@ -18,8 +18,11 @@ botter eval data/samples.csv --answers priority,team --id ticket_id --tol 1%
   table is compared with the answers, column by column.
 - Answer columns: the columns not in the input file next to the examples (e.g. tickets.csv), or
   `--inputs FILE`, or `--answers a,b`. Long free-text answers (explanations) are shown, not scored.
-- Numbers match within `--tol` (default 2%, at least one cent); dates and words exactly; lists (`a|b`,
-  `date:amount`) item by item.
+- Numbers match within `--tol` (default 2%, at least one cent); words and dates exactly, in any case
+  (`Replied` = `replied`); lists (`a|b` or `a;b`) item by item in any order, each item's `:` parts too.
+- Cases are named by the first column when it is a short unique id, else by row number (`--case 3`).
+- When the project defines `prepare(cases)`, eval calls it once with every example first (so model readings
+  are batched and cached), then `solve_case` for each.
 - Output: right per column, whole rows, the mean column score, then every wrong value
   (`id: column: got X, want Y`), then the model use. `--case <id>` shows one example in full with every
   `bot.say` note the agent printed: add `bot.say` lines for intermediate values while you debug.
