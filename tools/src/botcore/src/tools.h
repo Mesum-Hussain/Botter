@@ -35,9 +35,6 @@ extern const size_t TOOLS_SKILL_N;
 int    tool_sandbox_apply(int cpu_s, int net);
 /* Startup: Landlock ABI (0 = unavailable) and rlimit values for children. */
 int    tool_sandbox_probe(void);
-/* Builder agents (config.json "builder"): shell children get this agent's own executable as fd 3
- * (BOTCORE_RUNTIME_FD=3), so a build script can put a new agent on the runtime. */
-void   tool_shell_pass_runtime(int on);
 /* Parent, around fork(): approved paths for the next child; no_landlock for approved sudo. */
 void   tool_sandbox_grants(const char *const *paths, int n, int no_landlock);
 double tool_now_s(void);
@@ -51,6 +48,7 @@ const tool_t *tools_find_builtin(const char *name);
 
 /* An image file inside the working directory: bytes (malloc'd) and MIME type. 0 ok, -1 (result says why). */
 int fs_load_image(const char *path, unsigned char **data, size_t *len, const char **mime, char *result, size_t rl);
+int fs_load_audio(const char *path, unsigned char **data, size_t *len, const char **format, char *result, size_t rl);
 
 /* OpenAI "tools" array for every registered tool (caller owns the result). */
 cJSON *tools_schema(void);

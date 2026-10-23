@@ -489,6 +489,47 @@ int fs_load_image(const char *path, unsigned char **data, size_t *len, const cha
     return 0;
 }
 
+/* A sound file from the working directory for bot.llm{audio = ...}: its bytes and format (mp3 wav ogg flac m4a). */
+int fs_load_audio(const char *path, unsigned char **data, size_t *len, const char **format, char *result, size_t rl)
+{
+    char res[PATH_MAX];
+    *data = NULL;
+    if (access_path("bot.llm", path, "read", res, result, rl) != 0) {
+        return -1;
+    }
+    FILE *f = fopen(res, "rb");
+    struct stat st;
+    if (!f || fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
+        snprintf(result, rl, "cannot open '%s': %s", path, f ? "not a regular file" : strerror(errno));
+        if (f) {
+            fclose(f);
+        }
+        return -1;
+    }
+    if ((size_t)st.st_size > IMAGE_MAX) {
+        fclose(f);
+        snprintf(result, rl, "'%s' is larger than %u MB", path, IMAGE_MAX >> 20);
+        return -1;
+    }
+    unsigned char *d = malloc((size_t)st.st_size + 1);
+    size_t n = d ? fread(d, 1, (size_t)st.st_size, f) : 0;
+    fclose(f);
+    *format = n >= 3 && (!memcmp(d, "ID3", 3) || (d[0] == 0xff && (d[1] & 0xe0) == 0xe0)) ? "mp3"
+              : n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WAVE", 4)              ? "wav"
+              : n >= 4 && !memcmp(d, "OggS", 4)                                             ? "ogg"
+              : n >= 4 && !memcmp(d, "fLaC", 4)                                             ? "flac"
+              : n >= 8 && !memcmp(d + 4, "ftyp", 4)                                         ? "m4a"
+                                                                                            : NULL;
+    if (!*format) {
+        free(d);
+        snprintf(result, rl, "'%s' is not an MP3, WAV, OGG, FLAC or M4A sound file", path);
+        return -1;
+    }
+    *data = d;
+    *len = n;
+    return 0;
+}
+
 /* Show a picture to the model: the bytes go into the conversation for this turn (chat_attach_image). */
 static bool image_view(const cJSON *in, char *result, size_t rl)
 {

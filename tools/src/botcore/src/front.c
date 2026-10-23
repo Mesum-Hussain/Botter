@@ -19,7 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { F_OFF, F_UI, F_ACP, F_A2A, F_MCP, F_RUN };
+enum { F_OFF, F_ACP, F_A2A, F_MCP, F_RUN };
 static int g_on; /* F_* */
 
 /* --acp / --a2a: the request being answered and the conversation it belongs to */
@@ -177,16 +177,7 @@ int front_init(int argc, char **argv)
         g_on = F_RUN;
         return 1;
     }
-    const char *v = getenv("BOTCORE_FRONTEND");
-    if (!v || strcmp(v, "1") != 0) {
-        return 0;
-    }
-    unsetenv("BOTCORE_FRONTEND");
-    dup2(STDOUT_FILENO, STDERR_FILENO); /* one ordered stream for the UI */
-    setvbuf(stdout, NULL, _IONBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
-    g_on = F_UI;
-    return 1;
+    return 0;
 }
 
 int front_active(void) { return g_on != F_OFF; }
@@ -877,17 +868,6 @@ static int remote_readline(const char *prompt, char **out)
     return g_on == F_ACP ? acp_next(out) : g_on == F_MCP && g_lsock < 0 ? mcp_next(out) : a2a_next(out);
 }
 
-static void emit(cJSON *o)
-{
-    char *s = cJSON_PrintUnformatted(o);
-    if (s) {
-        fputc('\x1e', stdout);
-        fputs(s, stdout);
-        fputc('\n', stdout);
-        free(s);
-    }
-}
-
 void front_event(const char *ev, ...)
 {
     if (!g_on) {
@@ -906,11 +886,7 @@ void front_event(const char *ev, ...)
         cJSON_AddStringToObject(o, k, v ? v : "");
     }
     va_end(ap);
-    if (g_on == F_UI) {
-        emit(o);
-    } else {
-        remote_event(o);
-    }
+    remote_event(o);
     cJSON_Delete(o);
 }
 
@@ -962,45 +938,7 @@ static int read_line(int timeout_ms, char **line)
 
 int front_readline(const char *prompt, int secret, char **out)
 {
+    (void)secret;
     *out = NULL;
-    if (g_on >= F_ACP) {
-        return remote_readline(prompt, out);
-    }
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "ev", "prompt");
-    cJSON_AddStringToObject(o, "text", prompt);
-    cJSON_AddBoolToObject(o, "secret", secret);
-    emit(o);
-    cJSON_Delete(o);
-
-    for (;;) {
-        char *line = NULL;
-        int r = read_line(-1, &line);
-        if (r == 1) {
-            continue;
-        }
-        if (r == -2) {
-            return TERM_INTR;
-        }
-        if (r < 0) {
-            return TERM_EOF;
-        }
-        cJSON *j = cJSON_Parse(line);
-        explicit_bzero(line, strlen(line));
-        free(line);
-        const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, "line");
-        int rc = TERM_EOF;
-        if (cJSON_IsString(v)) {
-            *out = strdup(v->valuestring);
-            explicit_bzero(v->valuestring, strlen(v->valuestring));
-            rc = *out ? TERM_LINE : TERM_EOF;
-        } else if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "intr"))) {
-            rc = TERM_INTR;
-        } else if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "eof"))) {
-            cJSON_Delete(j);
-            continue; /* unknown message: ignore */
-        }
-        cJSON_Delete(j);
-        return rc;
-    }
+    return remote_readline(prompt, out);
 }

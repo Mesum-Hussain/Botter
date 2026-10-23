@@ -2,30 +2,8 @@
 #define BC_FRONT_H
 
 /*
- * Frontend protocol: lets a separate UI program drive botcore over pipes.
- * Enabled only when the process starts with BOTCORE_FRONTEND=1 (the variable is
- * removed so tools never see it). Without it nothing changes: plain REPL.
- *
- * botcore -> UI (stdout; stderr is merged into it so order is kept):
- *   ordinary output as before (may contain SGR colour codes), interleaved with
- *   records "\x1e" + one-line JSON object + "\n". Records:
- *     {"ev":"prompt","text":<prompt>,"secret":bool}   waiting for one input line
- *     {"ev":"busy","label":<text>} / {"ev":"idle"}    work in progress / done
- *     {"ev":"info","model":..,"cwd":..}                session details
- *     {"ev":"thinking","text":..}                      model reasoning
- *     {"ev":"text","text":..}                          assistant text sent alongside tool calls
- *     {"ev":"reply","text":..}                         final answer (markdown)
- *     {"ev":"tool","name":..,"args":..,"status":..} / {"ev":"tool_result","text":..}
- *     {"ev":"delta","kind":"text"|"thinking","text":..}  streamed piece of a reply
- *     {"ev":"mode","mode":"plan"|"build"}             Plan/Build mode
- * UI -> botcore (stdin, one JSON object per line, answers a prompt):
- *     {"line":<text>} | {"eof":true} | {"intr":true}
- *   Interrupting work = SIGINT to the botcore process.
- */
-
-/*
- * Two more front ends speak standard protocols instead (same hooks, so the agent itself does
- * not change; neither starts a process, and only --a2a listens, because being called needs it):
+ * Front ends: standard protocols and batch mode on the same hooks, so the agent itself does not change
+ * (none starts a process; only --a2a and --mcp PORT listen, because being called needs it):
  *   --acp              Agent Client Protocol: an editor starts the agent and talks JSON-RPC over
  *                      stdin/stdout (initialize, session/new, session/prompt, session/update,
  *                      session/request_permission, session/cancel).
@@ -55,7 +33,7 @@ int  front_take_cmd(void);        /* 1 if the line just read is the front end's 
 void front_set_card(void *card);  /* cJSON: name, description, version, skills (takes it) */
 /* Emit a record: event name, then key/value string pairs, NULL-terminated. */
 void front_event(const char *ev, ...) __attribute__((sentinel));
-/* term_readline() replacement used in frontend mode (same return codes). */
+/* term_readline() in a front end (same return codes): the next request, or a protocol answer. */
 int  front_readline(const char *prompt, int secret, char **out);
 
 #endif

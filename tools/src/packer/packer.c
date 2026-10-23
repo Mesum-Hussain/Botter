@@ -328,7 +328,7 @@ static int known_tool(const char *name)
             return 1;
         }
     }
-    if (strcmp(name, "vault_seal") == 0 || strcmp(name, "delegate") == 0) { /* builders' sealing; sub-agents */
+    if (strcmp(name, "delegate") == 0) { /* sub-agents */
         return 1;
     }
     const cJSON *srv; /* a tool of an MCP server: <server>_<tool>; which tools it has is known only at run time */
@@ -739,14 +739,14 @@ static int in_cfg_list(const char *key, const char *name)
  * config.json: how to build and run the agent.
  *   {"name": "lead-outreach", "display_name": "Lead Outreach", "version": "0.1.0",
  *    "description": "...", "internet": true, "skills": [...], "tools": [...],
- *    "requires": ["python3"], "builder": false}
+ *    "requires": ["python3"]}
  * Read before the files are collected: "skills" / "tools" choose what is compiled in.
  */
 static void load_config(const char *dir)
 {
     char *old = join(dir, "agent.json");
     if (access(old, F_OK) == 0) {
-        err("%s: agent.json is now config.json; rename it (see the project-layout skill for its fields)%s", old, NULL);
+        err("%s: agent.json is now config.json; rename it (its fields: the Botter skill's references/layout.md)%s", old, NULL);
     }
     free(old);
     char *f = join(dir, "config.json");
@@ -754,7 +754,7 @@ static void load_config(const char *dir)
     char *d = access(f, F_OK) == 0 ? slurp(f, &n) : NULL;
     free(f);
     if (!d) {
-        warn("no config.json: add one with the agent's %s (see the project-layout skill)", "name, version and description");
+        warn("no config.json: add one with the agent's %s (the Botter skill's references/layout.md)", "name, version and description");
         return;
     }
     g_cfg = cJSON_ParseWithLength(d, n);
@@ -766,10 +766,16 @@ static void load_config(const char *dir)
         return;
     }
     static const char *const strs[] = {"name", "display_name", "version", "description", NULL};
-    static const char *const bools[] = {"internet", "builder", NULL};
+    static const char *const bools[] = {"internet", NULL};
     static const char *const lists[] = {"skills", "requires", NULL};
+    if (cJSON_GetObjectItemCaseSensitive(g_cfg, "builder")) {
+        cfg_err("\"builder\" is gone: remove it (keys are sealed with botter seal, for any agent)%s", "");
+    }
     for (const cJSON *x = g_cfg->child; x; x = x->next) {
         int known = 0;
+        if (!strcmp(x->string, "builder")) {
+            continue;
+        }
         for (int k = 0; strs[k]; k++) {
             if (!strcmp(x->string, strs[k])) {
                 known = 1;
@@ -859,7 +865,7 @@ static void load_config(const char *dir)
         }
         if (!known) {
             cfg_warn("unknown key \"%.60s\" (known: name, display_name, version, description, internet, skills, tools, "
-                     "requires, builder, mcp, agents, temperature, seed)", x->string);
+                     "requires, mcp, agents, temperature, seed)", x->string);
         }
     }
     const cJSON *nm = cJSON_GetObjectItemCaseSensitive(g_cfg, "name");
@@ -1400,7 +1406,7 @@ static int cmd_build(const char *dir, const char *botcore, const char *out)
     add_root_file(dir, "AGENT.md");
     add_root_file(dir, "FLOW.lua"); /* optional orchestration (progress.md §12.3) */
     add_root_file(dir, "config.json");
-    add_root_file(dir, "secrets.vault"); /* opt-in: the agent's keys, encrypted with a password (vault_seal) */
+    add_root_file(dir, "secrets.vault"); /* opt-in: the agent's keys, encrypted with a password (botter seal) */
     add_tree(dir, "skills", K_DATA, 0);
     add_tree(dir, "agents", K_DATA, 0);
     add_functions(dir);

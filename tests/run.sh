@@ -10,7 +10,6 @@ TESTS=$ROOT/tests
 PACK=$ROOT/artifacts/packer
 CORE=$ROOT/artifacts/botcore
 BOTTER=$ROOT/botter                    # the CLI
-BUILDER=$ROOT/artifacts/botter.bot     # the old agent that builds agents (until progress.md §14 removes it)
 T=$(mktemp -d "${TMPDIR:-/tmp}/botter-test.XXXXXX")
 PASS=0 FAIL=0 SKIP=0
 STUB= REMOTE= A2A=
@@ -38,7 +37,7 @@ check() { if grep -Eq -- "$3" "$2" 2>/dev/null; then pass "$1"; else fail "$1" "
 check_not() { if grep -Eq -- "$3" "$2" 2>/dev/null; then fail "$1" "unexpected /$3/"; else pass "$1"; fi; }
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-for f in "$PACK" "$CORE" "$BOTTER" "$BUILDER"; do
+for f in "$PACK" "$CORE" "$BOTTER"; do
     [ -x "$f" ] || { echo "missing $f: run make first"; exit 2; }
 done
 
@@ -76,8 +75,6 @@ build() { "$PACK" build "$1" "$CORE" "$2" >"$T/build.log" 2>&1; }
 # ---------------------------------------------------------------------------
 section "Packaging"
 
-"$PACK" check "$ROOT" "$CORE" >"$T/self.log" 2>&1
-check "botter's own project builds with 0 warnings" "$T/self.log" "check passed.* 0 warning"
 
 # the flow languages are gone: an old flow file says what to do instead and stops the build
 for old in FLOW.fwl FLOW.md SQNC.md; do
@@ -531,36 +528,30 @@ shell_call "echo no-curl-needed"
 drive "$T/on.bot" "$T/ws" PATH=/nonexistent
 check "runs with no curl (or anything) on PATH" "$T/rec/tool.txt" "no-curl-needed"
 
-mkdir -p "$T/proj" && echo "You are built by the test." >"$T/proj/AGENT.md"
-tool_call agent_build '{}'
-drive "$BUILDER" "$T/proj"
-check "botter: agent_build builds a .bot from inside the sandbox" "$T/rec/tool.txt" "wrote .*proj\\.bot"
-mkdir -p "$T/proj2" && echo "You are built by the plain runtime." >"$T/proj2/AGENT.md"
-drive "$ROOT/artifacts/botter.bot" "$T/proj2"
-check "botter: agent_build also works run as a plain .bot from a folder the sandbox hides" "$T/rec/tool.txt" "wrote .*proj2\\.bot"
-[ -x "$T/proj/proj.bot" ] && pass "botter: the built agent is executable" || fail "botter: the built agent is executable"
-
-# Sealed vault (opt-in): Botter asks for the keys and a password itself; the built agent asks only for the password
+# Sealed vault (opt-in): botter seal asks for the keys and a password; the built agent asks only for the password
 mkdir -p "$T/sealproj" && echo "You are sealed." >"$T/sealproj/AGENT.md"
 echo '{"name": "sealproj", "version": "1.0.0", "description": "Carries its keys.", "mcp": {"docs": {"url": "https://example.invalid/mcp", "token": "DOCS_TOKEN"}}}' >"$T/sealproj/config.json"
-tool_call vault_seal '{}'
-(cd "$T/sealproj" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\ngo\nn\n6\nhttp://127.0.0.1:%s/v1\nsk-sealed-123\nstub\ndocs-secret-9\n\nshort\ncorrect horse 1\nsomething else 2\ncorrect horse 1\ncorrect horse 1\n' "$PORT" "$PORT" |
-    timeout 90 "$BUILDER" >"$T/out" 2>&1)
-check "vault: Botter says what the LLM key is for" "$T/out" "The model the agent thinks with"
+printf '[]' >"$T/seal.json"
+stub_start --script "$T/seal.json"
+(cd "$T/sealproj" && printf '6\nhttp://127.0.0.1:%s/v1\n\nstub\nn\n6\nhttp://127.0.0.1:%s/v1\nsk-sealed-123\nstub\ndocs-secret-9\n\nshort\ncorrect horse 1\nsomething else 2\ncorrect horse 1\ncorrect horse 1\n' "$PORT" "$PORT" |
+    timeout 90 "$BOTTER" seal >"$T/out" 2>&1)
+check "vault: botter seal says what the LLM key is for" "$T/out" "The model the agent thinks with"
 check "vault: each MCP token is asked for by name, with its purpose" "$T/out" 'MCP server "docs".*example.invalid'
 check "vault: the A2A serving token is explained, and that ACP needs none" "$T/out" "ACP, needs no key"
 check "vault: a short password is refused" "$T/out" "Too short"
 check "vault: the password is typed twice and must match" "$T/out" "The two do not match"
 check "vault: the user is told the password is the whole login, offline" "$T/out" "That is the whole login"
-check "vault: the model learns what was sealed, not the keys" "$T/rec/tool_all.txt" "Sealed into secrets.vault: the LLM key .*, the MCP token for docs"
-check_not "vault: no key reaches the model" "$T/rec/tool_all.txt" "sk-sealed|docs-secret|correct horse"
+check "vault: it says what was sealed, never the keys" "$T/out" "Sealed into secrets.vault: the LLM key .*, the MCP token for docs"
+check_not "vault: no key is printed" "$T/out" "sk-sealed|docs-secret|correct horse"
 check_not "vault: the file holds no key in the clear" "$T/sealproj/secrets.vault" "sk-sealed|docs-secret|127.0.0.1"
 build "$T/sealproj" "$T/sealed.bot"
 rm -rf "$T/sealws"; mkdir -p "$T/sealws"
 (cd "$T/sealws" && printf 'not the password\ncorrect horse 1\ngo\n/exit\n' | timeout 60 "$T/sealed.bot" >"$T/out" 2>&1)
 check "vault: a wrong password is refused" "$T/out" "Wrong password\\."
 check "vault: the right password is the whole login" "$T/out" "Connected"
-check "vault: an ordinary agent cannot seal anything" "$T/rec/tool.txt" "unknown tool 'vault_seal'"
+mkagent "$T/oldbuilder" '{"name": "oldbuilder", "version": "1.0.0", "description": "Old.", "builder": true}'
+build "$T/oldbuilder" "$T/oldbuilder.bot"
+check "packer: config.json \"builder\" is an error that says what replaced it" "$T/build.log" "builder.* is gone: .*botter seal"
 check_not "vault: a sealed agent does not ask for a provider or key" "$T/out" "Select an OpenAI-compatible provider"
 check "vault: the sealed LLM key is the one used" "$T/rec/auth.txt" "Bearer sk-sealed-123"
 (cd "$T/sealws" && printf 'a\nb\nc\n' | timeout 60 "$T/sealed.bot" >"$T/out" 2>&1)
@@ -961,6 +952,8 @@ check "FLOW.lua: documented functions there are a warning (not tools)" "$T/build
 mkflow fllm 'function flow(input)
   if input == "plain" then return "said: " .. bot.llm("Say something.") end
   if input == "image" then return bot.llm{prompt = "What is in it?", images = {"pic.png"}} end
+  if input == "audio" then return bot.llm{prompt = "What is said?", audio = {"note.mp3"}} end
+  if input == "notaudio" then return bot.llm{prompt = "What is said?", audio = {"pic.png"}} end
   local t = bot.llm{prompt = "Read: " .. input, schema = {amount = "number", essential = "boolean"}}
   return "amount=" .. t.amount .. " essential=" .. tostring(t.essential)
 end'
@@ -986,6 +979,14 @@ check "bot.llm: a plain prompt gives text" "$T/out" "^said: hello there$"
 cp "$T/fnws/pic.png" "$T/flws/pic.png"
 flowrun fllm image
 check "bot.llm: images go with the prompt" "$T/rec/parts.txt" "^text text image_url$"
+printf 'ID3\003\000\000\000\000\000\000fake mp3 frames' >"$T/flws/note.mp3"
+printf '[{"text": "hello"}]' >"$T/llm5.json"
+stub_start --script "$T/llm5.json"
+flowrun fllm audio
+check "bot.llm: audio goes with the prompt (input_audio)" "$T/rec/parts.txt" "^text text input_audio$"
+check "bot.llm: the audio part names its format" "$T/rec/audio.txt" "^mp3$"
+flowrun fllm notaudio
+check "bot.llm: a file that is not sound is refused for audio" "$T/err" "is not an MP3, WAV, OGG, FLAC or M4A sound file"
 # bot.test: the project in the working folder, loaded fresh, its tests run
 mkflow fltest 'function flow(input)
   local r = bot.test(input ~= "all" and input or nil)
@@ -1007,202 +1008,6 @@ printf 'function test_save()\n  save("hi")\n  assert(bot.fs.exists("out/saved.cs
 flowrun fltest "functions/tests/add.lua"
 check "bot.test: a test's writes stay in memory and read back" "$T/out" '^1/0$'
 [ ! -e "$T/flws/out/saved.csv" ] && pass "bot.test: a test never writes the folder" || fail "bot.test: a test never writes the folder"
-
-# ---------------------------------------------------------------------------
-section "Botter's build pipeline (FLOW.lua, scripted stub LLM)"
-rm -rf "$T/pipe" && mkdir -p "$T/pipe"
-printf '# Adder\nWrite an agent that adds a and b of each row of data.csv.\n## Sums\nsum = a + b\n## Submission\nSend it in.\n' >"$T/pipe/brief.md"
-printf 'a,b\n1,2\n3,4\n' >"$T/pipe/data.csv"
-printf 'x\n1\n' >"$T/pipe/extra.csv"
-python3 - "$T/pipe.json" <<'PY'
-import json, sys
-test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
-idle = 'function test_add()\n  local result = 3\n  assert(result == 3, "made up")\nend\n'
-invented = 'function test_add()\n  local row = "row7"\n  assert(add_row(1, 2) == 3, row)\nend\n'
-wrong = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a - b\nend\n'
-right = wrong.replace("a - b", "a + b")
-steps = [
-  {"tool": "start_build", "args": {"request": "build the adder from brief.md"}},
-  {"text": "Starting."},
-  {"tool": "job_goal", "args": {"text": "Add a and b of each row."}},
-  {"tool": "job_input", "args": {"path": "data.csv", "description": "columns a, b"}},
-  {"tool": "job_input", "args": {"path": "nope.csv", "description": "a file that is not there"}},
-  {"tool": "job_output", "args": {"path": "out.csv", "columns": "sum", "description": "one sum per row"}},
-  {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md", "kind": "exact"}},
-  {"tool": "job_rule", "args": {"text": "Sum = a + b.", "source": "brief.md", "kind": "exact"}},
-  {"tool": "job_success", "args": {"text": "every sum is right"}},
-  {"text": "1 rule recorded"},
-  {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief.md: Sums", "kind": "exact"}},
-  {"tool": "job_skip_section", "args": {"section": "Submission", "why": "how to hand it in"}},
-  {"tool": "job_skip_file", "args": {"path": "extra.csv", "why": "not used by the adder"}},
-  {"text": "sections done"},
-  {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
-  {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number",
-                                        "purpose": "adds a and b; the caller writes out.csv", "rules": ""}},
-  {"tool": "design_model_step", "args": {"name": "adds", "purpose": "the model adds the numbers", "rules": "R1"}},
-  {"text": "planned"},
-  {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number: the sum",
-                                        "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
-  {"text": "planned again"},
-  {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": idle}},
-  {"text": "tests written"},
-  {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": invented}},
-  {"text": "tests written"},
-  {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}},
-  {"text": "tests written"},
-  {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": wrong}},
-  {"text": "written"},
-  {"tool": "run_tests", "args": {"path": "functions/tests/add_row.lua"}},
-  {"tool": "fs_write", "args": {"path": "functions/add_row.lua", "content": right}},
-  {"text": "fixed"},
-  {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You add numbers. For each line, call add_row with a and b and reply with the sum.\n"}},
-  {"text": "AGENT.md written"},
-]
-json.dump(steps, open(sys.argv[1], "w"))
-PY
-stub_start --script "$T/pipe.json"
-printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/pipe/.env"
-(cd "$T/pipe" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the agent described in brief.md" >"$T/out" 2>"$T/err")
-check "pipeline: the lead hands the build over" "$T/err" "^Starting\.$"
-check "pipeline: the job is recorded and readable" "$T/pipe/.botter/job.md" "^R1\. \[exact\] sum = a \+ b \(brief.md; brief.md: Sums\)$"
-check "pipeline: the analyst must account for every section of the brief" "$T/rec/requests.jsonl" "sections of the brief no rule comes from: brief.md: Sums; brief.md: Submission"
-check "pipeline: a section without rules is recorded as such" "$T/pipe/.botter/job.md" "^- Submission$"
-check "pipeline: a rule recorded twice is not added again" "$T/rec/requests.jsonl" "already recorded as R1"
-check_not "pipeline: the job holds no duplicate rule" "$T/pipe/.botter/job.md" "^R2\."
-check "pipeline: an exact rule left to the model is sent back" "$T/rec/requests.jsonl" "exact or hybrid but only a model step or skill covers: R1"
-check "pipeline: a recording tool checks on the spot" "$T/rec/requests.jsonl" "nope.csv does not exist"
-check "pipeline: the design is recorded" "$T/pipe/.botter/design.md" "^- add_row\(a number, b number\) -> number"
-check "pipeline: the analyst gets its role and only its tools" "$T/rec/requests.jsonl" "\"system\": \"You are Botter.s analyst.*\"tools\": \[[^]]*\"job_rule\""
-check "pipeline: the designer works from the pinned job" "$T/rec/requests.jsonl" "You are Botter.s designer.*What you must follow \(the job\):.*R1\. \[exact\] sum = a"
-check "pipeline: tests are written before the code, by another worker" "$T/pipe/functions/tests/add_row.lua" "add_row\(1, 2\) == 3"
-check "pipeline: a failed check sends the task back with the failure" "$T/rec/requests.jsonl" "did not pass the check.*test_add FAILED"
-check "pipeline: the code passes its tests in the end" "$T/pipe/functions/add_row.lua" "return a \+ b"
-check "pipeline: the design check wants every output column made" "$T/rec/requests.jsonl" "out.csv: no function returns \(and no model step writes\) sum"
-check "pipeline: the job lists the output's columns" "$T/pipe/.botter/job.md" "^- out.csv: columns sum\. "
-check "pipeline: tests on invented ids are sent back" "$T/rec/requests.jsonl" "uses ids that no data file holds: row7"
-check "pipeline: a test that never calls its function is sent back" "$T/rec/requests.jsonl" "test_add never calls add_row: every test_ function calls add_row"
-check "pipeline: every data file must be accounted for" "$T/rec/requests.jsonl" "data files the job does not mention: extra.csv"
-check "pipeline: a data file the agent does not use is recorded as such" "$T/pipe/.botter/job.md" "^- extra.csv: not used by the adder$"
-check "pipeline: workers run the tests with run_tests" "$T/rec/requests.jsonl" "0 passed, 1 failed.*test_add FAILED"
-check "pipeline: the cost of each phase is logged" "$T/pipe/.botter/log.md" "^- cost of add_row: [0-9]+ calls, [0-9]+ input tokens"
-check "pipeline: the report says what the build cost" "$T/out" "^Model use for this build: [0-9]+ calls"
-check "pipeline: config.json is written by code" "$T/pipe/config.json" '"temperature": ?0'
-check "pipeline: the agent is built" "$T/out" "^Built .*pipe\.bot"
-check "pipeline: the report quotes what was measured" "$T/out" "^Functions passing their tests: 1/1\.$"
-check "pipeline: a log of every step" "$T/pipe/.botter/log.md" "add_row: done \(attempt 2\)"
-[ -x "$T/pipe/pipe.bot" ] && pass "pipeline: the .bot is executable" || fail "pipeline: the .bot is executable"
-printf '[{"tool": "start_build", "args": {"request": "continue", "resume": true}}, {"text": "Continuing."}, {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You add numbers with add_row.\\n"}}, {"text": "done"}]' >"$T/resume.json"
-stub_start --script "$T/resume.json"
-printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/pipe/.env"
-(cd "$T/pipe" && timeout 120 "$ROOT/artifacts/botter.bot" --run "continue the build" >"$T/out" 2>"$T/err")
-check "pipeline: resume continues the build in .botter/" "$T/pipe/.botter/log.md" "^- resumed: continue the build"
-check "pipeline: finished tasks are not redone" "$T/out" "^Functions passing their tests: 1/1\.$"
-check_not "pipeline: the job is not studied again" "$T/rec/requests.jsonl" "You are Botter.s analyst"
-# a fix that breaks passing tests is undone; tests that stay red are set aside and the rest still builds
-for d in ex stuck noagent; do rm -rf "$T/$d" && mkdir -p "$T/$d" && printf 'a,b\n1,2\n3,4\n' >"$T/$d/data.csv"; done
-printf 'a,b,sum\n2,2,5\n' >"$T/ex/sample_expected.csv"
-python3 - "$T" <<'PY'
-import json, sys
-t = sys.argv[1]
-test = 'function test_add()\n  assert(add_row(1, 2) == 3, "1 + 2")\nend\n'
-code = '--- Add a and b.\n---@param a number  a\n---@param b number  b\n---@return number  the sum\nfunction add_row(a, b)\n  return a + b\nend\n'
-broken = code.replace("a + b", "a + b + 1")
-wrong = code.replace("a + b", "a * b")
-solver = ('--- Decide one case.\n---@param case table  the case\n---@return table  the answers\n'
-          'function solve_case(case)\n  return { sum = add_row(tonumber(case.a), tonumber(case.b)) }\nend\n')
-def job(examples):
-    j = [{"tool": "start_build", "args": {"request": "the adder"}}, {"text": "Starting."},
-         {"tool": "job_goal", "args": {"text": "Add a and b of each row."}},
-         {"tool": "job_input", "args": {"path": "data.csv", "description": "columns a, b"}},
-         {"tool": "job_output", "args": {"path": "out.csv", "columns": "sum", "description": "one sum per row"}},
-         {"tool": "job_rule", "args": {"text": "sum = a + b", "source": "brief", "kind": "exact"}},
-         {"tool": "job_success", "args": {"text": "every sum is right"}}]
-    if examples:
-        j.append({"tool": "job_examples", "args": {"path": "sample_expected.csv", "description": "a, b and the expected sum"}})
-    design = [{"text": "1 rule"},
-         {"tool": "design_kind", "args": {"kind": "batch", "why": "one row per line"}},
-         {"tool": "design_function", "args": {"name": "add_row", "params": "a number, b number", "returns": "number: the sum",
-                                               "purpose": "adds a and b; the caller writes out.csv", "rules": "R1"}},
-         {"text": "planned"}]
-    if examples:  # the examples hold answers: the design check asks for solve_case
-        design += [{"tool": "design_function", "args": {"name": "solve_case", "params": "case table", "returns": "table {sum}",
-                                                         "purpose": "decides one case with add_row", "rules": "", "uses": "add_row"}},
-                   {"text": "planned"}]
-    return j + design + [
-         {"tool": "fs_write", "args": {"path": "functions/tests/add_row.lua", "content": test}}, {"text": "tests written"}]
-def write(path, content, said="written"):
-    return [{"tool": "fs_write", "args": {"path": path, "content": content}}, {"text": said}]
-agent = write("AGENT.md", "You add numbers with add_row.\n")
-ex = job(True) + write("functions/add_row.lua", code) + write("functions/solve_case.lua", solver)
-for _ in range(4):
-    ex += write("functions/add_row.lua", broken, "fixed")
-json.dump(ex + agent, open(t + "/ex.json", "w"))
-stuck = job(False)
-for _ in range(3):
-    stuck += write("functions/add_row.lua", wrong)
-stuck += [{"text": "test right"}]
-for _ in range(2):
-    stuck += write("functions/add_row.lua", wrong)
-json.dump(stuck + agent, open(t + "/stuck.json", "w"))
-json.dump(job(False) + write("functions/add_row.lua", code) + [{"text": "I wrote nothing"}] * 3, open(t + "/noagent.json", "w"))
-PY
-for d in ex stuck noagent; do
-    stub_start --script "$T/$d.json"
-    printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/$d/.env"
-    (cd "$T/$d" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build the adder" >"$T/$d.out" 2>"$T/$d.err"; echo "exit $?" >>"$T/$d.err")
-    cp "$T/rec/requests.jsonl" "$T/$d.requests"
-done
-check "pipeline: a fix that breaks a passing test is sent back" "$T/ex.requests" "your change broke tests that passed before:.*add_row.lua: test_add"
-check "pipeline: a fix that still breaks tests is undone" "$T/ex/.botter/log.md" "^- fix examples 1: undone \(it broke passing tests\)"
-check "pipeline: the undone fix leaves the code as it was" "$T/ex/functions/add_row.lua" "^  return a \+ b$"
-check "pipeline: the report quotes the examples score" "$T/ex.out" "^Score on the brief's examples: 0/1\.$"
-check "pipeline: examples with answers need solve_case in the design" "$T/ex.requests" "sample_expected.csv holds 1 worked examples with the expected sum: plan solve_case\(case table\)"
-check "pipeline: Botter writes the examples scorer itself" "$T/ex/functions/tests/examples.lua" "^-- Botter wrote this file from sample_expected.csv"
-check "pipeline: the scorer compares the answer columns" "$T/ex/functions/tests/examples.lua" '^local SCORED = \{ "sum" \}'
-check "pipeline: solve_case is written against Botter's scorer" "$T/ex.requests" "You are Botter.s coder. You write solve_case\(case\)"
-check "pipeline: the report gives the right answers per column" "$T/ex.out" "^Right per answer \(Botter.s own comparison with the expected answers\): sum 0/1\.$"
-check "pipeline: the agent with a low score still builds" "$T/ex.out" "^Built .*ex\.bot"
-check "pipeline: tests that stay red are set aside" "$T/stuck/.botter/failing-tests/add_row.lua" "test_add"
-check "pipeline: the report lists the set-aside tests" "$T/stuck.out" "functions/tests/add_row.lua failed .*moved to .botter/failing-tests/"
-check "pipeline: the rest of the agent still builds" "$T/stuck.out" "^Built .*stuck\.bot"
-check "pipeline: the report counts the failing function" "$T/stuck.out" "^Functions passing their tests: 0/1\.$"
-check "pipeline: no AGENT.md, no agent" "$T/noagent.err" "AGENT.md was not written.*nothing was built"
-check "pipeline: a stopped build exits with status 1" "$T/noagent.err" "^exit 1$"
-check "pipeline: a finished build exits with status 0" "$T/ex.err" "^exit 0$"
-[ ! -e "$T/noagent/noagent.bot" ] && pass "pipeline: nothing is built without AGENT.md" || fail "pipeline: nothing is built without AGENT.md"
-rm -rf "$T/haiku" && mkdir -p "$T/haiku"
-python3 - "$T/haiku.json" <<'PY'
-import json, sys
-skill = "---\nname: haiku\ndescription: Writes a haiku. Use it when the user asks for a poem.\n---\n1. Read references/form.md.\n2. Write three lines in that form.\n"
-steps = [
-  {"tool": "start_build", "args": {"request": "a haiku agent"}}, {"text": "Starting."},
-  {"tool": "job_goal", "args": {"text": "Write haiku on request."}},
-  {"tool": "job_input", "args": {"path": "", "description": "a topic the user types"}},
-  {"tool": "job_output", "args": {"path": "", "columns": "", "description": "a haiku in the reply"}},
-  {"tool": "job_rule", "args": {"text": "three lines of 5, 7 and 5 syllables", "source": "request", "kind": "judgement"}},
-  {"tool": "job_success", "args": {"text": "the form is right"}}, {"text": "1 rule"},
-  {"tool": "design_kind", "args": {"kind": "chat", "why": "talks with a person"}},
-  {"tool": "design_skill", "args": {"name": "haiku", "description": "Writes a haiku. Use it when the user asks for a poem.",
-                                     "files": "references/form.md: the 5-7-5 form", "rules": "R1"}},
-  {"tool": "design_check", "args": {}}, {"text": "planned"},
-  {"tool": "fs_write", "args": {"path": "skills/haiku/SKILL.md", "content": skill}}, {"text": "SKILL.md written"},
-  {"tool": "fs_write", "args": {"path": "skills/haiku/references/form.md", "content": "# Form\nThree lines: 5, 7, 5 syllables.\n"}},
-  {"text": "reference written"},
-  {"tool": "fs_write", "args": {"path": "AGENT.md", "content": "You write haiku. Load the haiku skill for every poem.\n"}},
-  {"text": "AGENT.md written"},
-]
-json.dump(steps, open(sys.argv[1], "w"))
-PY
-stub_start --script "$T/haiku.json"
-printf 'BOTTER_BASE_URL=http://127.0.0.1:%s/v1\nBOTTER_MODEL=stub\n' "$PORT" >"$T/haiku/.env"
-(cd "$T/haiku" && timeout 120 "$ROOT/artifacts/botter.bot" --run "Build an agent that writes haiku" >"$T/out" 2>"$T/err")
-check "pipeline: a skill is planned with its files" "$T/haiku/.botter/design.md" "^  - references/form.md: the 5-7-5 form$"
-check "pipeline: design_check says the plan is complete" "$T/rec/requests.jsonl" '"last": "complete"'
-check "pipeline: the skill's files are written, each by its own task" "$T/rec/requests.jsonl" "Write skills/haiku/references/form.md \(the 5-7-5 form\)"
-check "pipeline: config.json lists the skill" "$T/haiku/config.json" '"skills": ?\["haiku"\]'
-check "pipeline: the report says how the skill came out" "$T/out" "^Skills: haiku \(done\)\.$"
-"$PACK" list "$T/haiku/haiku.bot" >"$T/list.log" 2>&1
-check "pipeline: the built agent carries the skill" "$T/list.log" "skills/haiku/references/form.md"
 
 # ---------------------------------------------------------------------------
 section "botter CLI: new, check, build, inspect, run, eval, skill"
@@ -1271,7 +1076,7 @@ EOF
 (cd "$E" && "$BOTTER" eval data/sample_orders.csv >"$T/eval.txt" 2>&1; echo "exit $?" >>"$T/eval.txt")
 check "eval: the input columns come from the CSV next to the examples" "$T/eval.txt" "inputs = the columns of data/orders.csv"
 check "eval: numbers match within 2% (20 for 20.3)" "$T/eval.txt" "^total +3/4"
-check "eval: words are compared exactly" "$T/eval.txt" "^label +2/4"
+check "eval: words are compared" "$T/eval.txt" "^label +2/4"
 check "eval: lists are compared item by item" "$T/eval.txt" "^parts +2/4"
 check "eval: whole rows" "$T/eval.txt" "^whole rows +1/4"
 check "eval: a long free-text column is shown, not scored" "$T/eval.txt" "not scored \(free text\): note"
@@ -1291,6 +1096,79 @@ check "agent --call: input that is not JSON is an error line" "$T/call.txt" '"er
 check "agent --call: a failed line makes the run fail" "$T/call.txt" "^exit 1"
 check "agent --call: runs without a model connection, and says so" "$T/call.err" "no model connection"
 
+# Examples without an id column, with Title Case headers, lists in another order, a prepare() step
+E2=$T/cli/tickets
+mkdir -p "$E2/data"
+echo "You sort tickets." >"$E2/AGENT.md"
+echo '{"name": "tickets", "version": "0.1.0", "description": "Sorts tickets.", "temperature": 0}' >"$E2/config.json"
+cat >"$E2/FLOW.lua" <<'EOF'
+function flow(input) return "use --call" end
+function prepare(cases)
+  local seen = {}
+  for _, c in ipairs(cases) do table.insert(seen, c.Company) end
+  bot.fs.write("cache/prepared.txt", table.concat(seen, ","))
+  return #cases
+end
+function solve_case(case)
+  local prepared = bot.fs.read("cache/prepared.txt")
+  return {status = "replied", ["Request Type"] = case.Company == "Visa" and "bug" or "invalid",
+          flags = "late;damaged", prepared = prepared}
+end
+EOF
+printf 'Issue,Company\n' >"$E2/data/tickets.csv"
+cat >"$E2/data/sample_tickets.csv" <<'EOF'
+Issue,Company,Status,Request Type,Flags
+"My card was charged twice, please help me get the money back",Visa,Replied,bug,damaged;late
+"Hello",Acme,Replied,bug,late;damaged
+EOF
+(cd "$E2" && "$BOTTER" eval data/sample_tickets.csv >"$T/eval2.txt" 2>&1; echo "exit $?" >>"$T/eval2.txt")
+check "eval: prepare(cases) runs first, with every case" "$T/eval2.txt" "^prepare\(\): done"
+check "eval: solve_case sees what prepare wrote" "$T/eval2.txt" "^Status +2/2"
+check "eval: words match in any case (Replied = replied)" "$T/eval2.txt" "^Status +2/2"
+check "eval: a result key in key form matches a Title Case column (Request Type)" "$T/eval2.txt" "^Request Type +1/2"
+check "eval: lists separated by ; match in any order" "$T/eval2.txt" "^Flags +2/2"
+check "eval: without an id column the cases are named by row number" "$T/eval2.txt" "row 2: Request Type: got invalid, want bug"
+(cd "$E2" && "$BOTTER" eval data/sample_tickets.csv --case 2 >"$T/eval2.txt" 2>&1)
+check "eval --case N: a case by its row number" "$T/eval2.txt" "✗ Request Type"
+
+# botter data: every data file in one screen
+D=$T/cli/dataprof
+mkdir -p "$D/data/media" "$D/docs/help"
+printf 'user_id,name,plan\nu1,Ann Lee,pro\nu2,Bo Chan,free\nu3,Cy Diaz,pro\n' >"$D/data/users.csv"
+cat >"$D/data/events.csv" <<'EOF'
+event_id,user_id,amount,date,status,note,tags
+e1,u1,10.5,2026-01-02,settled,"The customer paid for the yearly plan after the trial ended without a reminder",a;b
+e2,u2,7,2026-01-05,pending,"A refund was asked for because the order arrived late and the box was damaged",b
+e3,u1,,2026-02-01,settled,"Paid the invoice for March in full by card, nothing else to add to this record",a
+e4,u3,3,2026-02-03,settled,"The user wrote to support asking how to change the email address on the account",a;c
+EOF
+printf 'ID3 fake' >"$D/data/media/n1.mp3"; printf '# Help\ntext\n' >"$D/docs/help/a.md"; printf '# More\n' >"$D/docs/help/b.md"
+"$BOTTER" data "$D" >"$T/data.txt" 2>&1
+check "data: rows and columns per CSV" "$T/data.txt" "data/events.csv: 4 rows, 7 columns"
+check "data: an id column" "$T/data.txt" "event_id +unique id, e1 .. e4"
+check "data: a join to another file's id" "$T/data.txt" "user_id .*-> data/users.csv:user_id"
+check "data: numbers with their range and blanks" "$T/data.txt" "amount +number 3 .. 10.5.*blank 1"
+check "data: dates with their range" "$T/data.txt" "date +date 2026-01-02 .. 2026-02-03"
+check "data: a column with few values, with counts" "$T/data.txt" "status +one of 2: pending 1 settled 3"
+check "data: free text (for the model)" "$T/data.txt" "note +free text"
+check "data: lists and their items" "$T/data.txt" "tags +list .*a 3 b 2 c 1"
+check "data: other files counted by folder and type" "$T/data.txt" "docs/help/\*.md +2"
+check "data: media files counted" "$T/data.txt" "data/media/\*.mp3 +1"
+
+# botter new --here: the project starts in the folder that holds the data
+H=$T/cli/here
+mkdir -p "$H" && echo "keep me" >"$H/AGENT.md"
+(cd "$H" && "$BOTTER" new herebot --kind batch --here >"$T/cli.txt" 2>&1)
+check "cli: new --here writes the template into this folder" "$T/cli.txt" "started herebot here \(batch agent\)"
+check "cli: new --here never overwrites a file" "$H/AGENT.md" "^keep me$"
+[ -f "$H/functions/read.lua" ] && [ -f "$H/functions/tests/read.lua" ] &&
+    pass "cli: a batch project comes with read.lua and its tests" || fail "cli: a batch project comes with read.lua and its tests"
+(cd "$H" && "$BOTTER" check >"$T/cli.txt" 2>&1)
+check "cli: the batch template's tests pass" "$T/cli.txt" "function tests: 3 passed, 0 failed"
+mkdir -p "$H/s" && cp "$T/cli/sk/botter/assets/lib/search.lua" "$H/functions/" && cp "$T/cli/sk/botter/assets/lib/tests/search.lua" "$H/functions/tests/"
+(cd "$H" && "$BOTTER" check >"$T/cli.txt" 2>&1)
+check "cli: the skill's search.lua and its tests pass" "$T/cli.txt" "function tests: 6 passed, 0 failed"
+
 # ---------------------------------------------------------------------------
 section "Pack integrity"
 
@@ -1303,11 +1181,11 @@ check "truncated .bot refuses to start with a clear message" "$T/out" "this agen
 cp "$T/on.bot" "$T/grown.bot" && printf 'junk' >>"$T/grown.bot"
 drive "$T/grown.bot" "$T/ws"
 check ".bot with extra bytes appended is reported as damaged" "$T/out" "this agent file is damaged"
-cp "$T/proj/proj.bot" "$T/trunc2.bot" && truncate -s -40 "$T/trunc2.bot"
+cp "$T/cli/k-tool/k-tool" "$T/trunc2.bot" && truncate -s -40 "$T/trunc2.bot"
 drive "$T/trunc2.bot" "$T/ws"
-check "agent built by botter (runtime taken from botter) detects truncation" "$T/out" "truncated"
-drive "$T/proj/proj.bot" "$T/ws"
-check "agent built by botter runs" "$T/out" "Connected"
+check "agent built by botter build (runtime carried in botter) detects truncation" "$T/out" "truncated"
+drive "$T/cli/k-tool/k-tool" "$T/ws"
+check "agent built by botter build runs" "$T/out" "Connected"
 
 # ---------------------------------------------------------------------------
 section "HTTP client (local servers)"

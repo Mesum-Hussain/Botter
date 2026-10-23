@@ -101,6 +101,9 @@ class H(BaseHTTPRequestHandler):
         parts = [p for m in msgs for p in m.get("parts", [])]
         if parts:
             save("parts.txt", " ".join(p.get("type", "?") for p in parts))
+            fmts = [p.get("input_audio", {}).get("format", "?") for p in parts if p.get("type") == "input_audio"]
+            if fmts:
+                save("audio.txt", " ".join(fmts))
             with open(os.path.join(a.record, "parts_all.txt"), "a") as f:
                 f.write(" ".join(p.get("type", "?") for p in parts) + "\n")
         if stream and a.nostream:

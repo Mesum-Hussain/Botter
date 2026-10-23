@@ -868,7 +868,7 @@ static int l_worker(lua_State *L)
     return 1;
 }
 
-/* bot.llm(prompt) or bot.llm{prompt, system?, schema?, images?} -> text, or a table when there is a schema */
+/* bot.llm(prompt) or bot.llm{prompt, system?, schema?, images?, audio?} -> text, or a table when there is a schema */
 static int l_llm(lua_State *L)
 {
     bl_state *s = state_of(L);

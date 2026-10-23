@@ -55,7 +55,7 @@ static const char *agent_prompt(void)
 }
 
 /* config.json: the agent's name, display_name, version, description and settings (internet,
- * requires, builder). Parsed once; NULL if absent. *bad = present but not valid JSON. */
+ * requires). Parsed once; NULL if absent. *bad = present but not valid JSON. */
 static cJSON *agent_meta(int *bad)
 {
     static cJSON *meta;
@@ -80,11 +80,6 @@ static const char *meta_str(const char *key)
     return cJSON_IsString(v) && *v->valuestring ? v->valuestring : NULL;
 }
 
-/* config.json "builder": true: an agent that builds agents (Botter) can seal their keys (vault_seal). */
-static int agent_builder(void)
-{
-    return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(agent_meta(NULL), "builder"));
-}
 
 /* config.json "internet": false makes the agent offline; anything else (or no file) = online. */
 static int agent_offline(void)
@@ -455,7 +450,7 @@ static const char *tool_status(const char *name)
         {"recall", "Looking back"},
         {"get_time", "Checking the time"},
         {"delegate", "Handing work to another agent"},
-        {"vault_seal", "Sealing the agent's keys"}, {"image_view", "Looking at an image"},
+        {"image_view", "Looking at an image"},
     };
     for (size_t i = 0; i < sizeof(M) / sizeof(M[0]); i++) {
         if (strcmp(M[i][0], name) == 0) {
@@ -707,9 +702,9 @@ static void schema_gaps(const cJSON *schema, const cJSON *v, char *out, size_t c
 }
 
 /*
- * bot.llm{prompt, system?, schema?, images?}: one request to the agent's own model, no tools (counted in the
+ * bot.llm{prompt, system?, schema?, images?, audio?}: one request to the agent's own model, no tools (counted in the
  * usage like every other call). With a schema the reply must be one JSON object that has its fields; one
- * retry says what was wrong. Images are files in the working directory, sent with the prompt.
+ * retry says what was wrong. Images and audio are files in the working directory, sent with the prompt.
  */
 static char *run_llm(const char *spec_json, char *err, size_t el)
 {
@@ -737,6 +732,21 @@ static char *run_llm(const char *spec_json, char *err, size_t el)
             return NULL;
         }
         chat_add_image(&c, e->valuestring, mime, d, n);
+        free(d);
+    }
+    cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(spec, "audio"))
+    {
+        unsigned char *d = NULL;
+        size_t n = 0;
+        const char *format = NULL;
+        char why[400];
+        if (!cJSON_IsString(e) || fs_load_audio(e->valuestring, &d, &n, &format, why, sizeof(why)) != 0) {
+            snprintf(err, el, "%s", cJSON_IsString(e) ? why : "audio is a list of file paths");
+            chat_free(&c);
+            cJSON_Delete(spec);
+            return NULL;
+        }
+        chat_add_audio(&c, e->valuestring, format, d, n);
         free(d);
     }
     char *shape = schema ? cJSON_PrintUnformatted(schema) : NULL;
@@ -807,12 +817,10 @@ static char *flow_ask(const char *q)
     return in;
 }
 
-/* bot.say: a progress line (REPL: dim; Botter's UI: interim text; batch: stderr). */
+/* bot.say: a progress line (REPL: dim; front ends and batch: stderr). */
 static void flow_say(const char *t)
 {
-    if (front_active() && !front_remote()) {
-        front_event("text", "text", t, (char *)NULL);
-    } else if (front_remote()) {
+    if (front_remote()) {
         fprintf(stderr, "%s\n", t);
     } else {
         close_stream_line();
@@ -867,18 +875,10 @@ static char *delegate_call(const char *args)
 }
 
 /*
- * vault_seal (builder agents): ask the person, here and not through the model, for the keys the
- * agent in `dir` needs and for a password, and write them encrypted to <dir>/secrets.vault.
- * The model only learns which keys were sealed.
+ * --seal (botter seal): ask the person at the terminal for the keys the agent in the working directory
+ * needs and for a password, and write them encrypted to ./secrets.vault; botter build embeds it.
+ * Nothing goes through a model.
  */
-static const char SEAL_SCHEMA[] =
-    "{\"type\":\"function\",\"function\":{\"name\":\"vault_seal\",\"description\":\"Seal an agent's keys into it, "
-    "behind a password. Botter itself asks the user for each key (the LLM key, and the token of every MCP server "
-    "and remote agent in the project's config.json) and for the password, so you never see them and must never "
-    "ask for them in the conversation. Writes secrets.vault into the project; the next agent_build embeds it. "
-    "Returns which keys were sealed.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"dir\":{\"type\":"
-    "\"string\",\"description\":\"Agent project folder, default the working directory\"}}}}}";
-
 /* One typed answer (secret = not shown). NULL = the user gave up; "" is a valid answer. */
 static char *seal_ask(const char *prompt, int secret)
 {
@@ -945,11 +945,11 @@ static char *seal_call(const char *args)
     close_stream_line();
     puts("\n" ANSI_BOLD_BLUE "Sealing this agent's keys" ANSI_RESET "\n"
          "The keys you type next are encrypted with a password you choose and built into the agent file.\n"
-         "You type them here, on this machine: they are not shown, and Botter's model never sees them.");
+         "You type them here, on this machine: they are not shown, and no model sees them.");
 
     printf("\n" ANSI_BOLD_BLUE "1. The language model (LLM)" ANSI_RESET "\nThe model the agent thinks with. Its API key is what you pay the provider with.\n");
     char q[500];
-    snprintf(q, sizeof(q), ANSI_BLUE "  Use what Botter is using now (%.60s, model %.80s)? [Y/n]: " ANSI_RESET,
+    snprintf(q, sizeof(q), ANSI_BLUE "  Use the connection you just made (%.60s, model %.80s)? [Y/n]: " ANSI_RESET,
              provider_name(g_chat->base), g_chat->model);
     if (!(v = seal_ask(q, 0))) {
         goto end;
@@ -1065,14 +1065,14 @@ static char *seal_call(const char *args)
          "  - The password is checked on the machine itself: no account, no server, it works offline.\n"
          "  - Nothing is stored outside the agent file, so the file is all you copy to another machine.\n"
          "  - There is no reset. If the password is lost, seal the agent again with its keys and a new password.\n");
-    if (asprintf(&out, "Sealed into " VAULT_FILE ": %s. The user chose the password. Now build the agent: agent_build "
-                       "embeds the vault, and the built agent asks only for that password at start.", done) < 0) {
+    if (asprintf(&out, "Sealed into " VAULT_FILE ": %s. Now build the agent (botter build): it embeds the vault, and the "
+                       "built agent asks only for that password at start.", done) < 0) {
         out = NULL;
     }
 end:
     if (!ok && !out) {
         puts("  (sealing cancelled; nothing was written)");
-        out = strdup("ERROR: the user cancelled sealing; nothing was written. Build the agent without a vault unless they ask again.");
+        out = strdup("Sealing cancelled; nothing was written.");
     }
     for (int i = 0; i < 3; i++) {
         char *p = i == 0 ? v : i == 1 ? pw : pw2;
@@ -1110,12 +1110,6 @@ static char *on_tool(void *ud, const char *name, const char *args)
 
 static char *run_tool(const char *name, const char *args)
 {
-    if (!strcmp(name, "vault_seal") && agent_builder() && !front_remote()) {
-        front_event("tool", "name", name, "args", args, "status", tool_status(name), (char *)NULL);
-        char *res = seal_call(args);
-        front_event("tool_result", "text", res ? res : "ERROR", (char *)NULL);
-        return res;
-    }
     if (!strcmp(name, "delegate")) {
         if (front_active()) {
             front_event("tool", "name", name, "args", args, "status", tool_status(name), (char *)NULL);
@@ -1446,7 +1440,8 @@ int main(int argc, char **argv)
         fprintf(stderr, ANSI_BOLD_RED "Error:" ANSI_RESET " %s\n", vfs_error());
         return 1;
     }
-    front_init(argc, argv);
+    int seal = argc > 1 && strcmp(argv[1], "--seal") == 0; /* a person at a terminal seals the agent's keys */
+    front_init(seal ? 1 : argc, argv);
     fn_init();
 
     if (!front_active() && meta_str("name")) { /* plain REPL: say which agent this is */
@@ -1528,13 +1523,9 @@ int main(int argc, char **argv)
     fn_set_tool_runner(run_tool); /* bot.shell, bot.mcp and bot.agent run tools the way the model does */
     static const fn_host_t host = {run_worker, flow_ask, flow_say, run_llm};
     fn_set_host(&host);
-    tool_shell_pass_runtime(agent_builder());
     cJSON *tools = tools_schema(), *del = delegate_schema();
     if (del) {
         cJSON_AddItemToArray(tools, del);
-    }
-    if (agent_builder()) { /* agents that build agents can seal their keys */
-        cJSON_AddItemToArray(tools, cJSON_Parse(SEAL_SCHEMA));
     }
     g_chat = &chat;
     chat_set_tools(&chat, tools, on_tool, NULL);
@@ -1599,6 +1590,13 @@ int main(int argc, char **argv)
     front_event("info", "model", chat.model, "cwd", cwd, (char *)NULL);
     if (!(front_call() && saved == 0)) {
         puts(ANSI_BOLD_BLUE "Connected" ANSI_RESET);
+    }
+    if (seal) { /* --seal: the keys into ./secrets.vault, then stop */
+        char *res = seal_call("{}");
+        printf("%s\n", res ? res : "");
+        int failed = !res || strncmp(res, "Sealed into", 11) != 0;
+        free(res);
+        return failed;
     }
     show_mode();
     if (!landlock) {

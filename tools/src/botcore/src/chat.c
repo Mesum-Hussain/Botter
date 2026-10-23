@@ -142,6 +142,30 @@ int chat_add_image(chat_t *c, const char *label, const char *mime, const unsigne
     return 0;
 }
 
+/* A sound clip for the next message (OpenAI-style input_audio part), labelled like an image. */
+int chat_add_audio(chat_t *c, const char *label, const char *format, const unsigned char *data, size_t len)
+{
+    char *b = base64(data, len), note[300];
+    if (!b) {
+        return -1;
+    }
+    if (!c->images) {
+        c->images = cJSON_CreateArray();
+    }
+    cJSON *t = cJSON_CreateObject(), *au = cJSON_CreateObject(), *in;
+    snprintf(note, sizeof(note), "Audio %.200s:", label);
+    cJSON_AddStringToObject(t, "type", "text");
+    cJSON_AddStringToObject(t, "text", note);
+    cJSON_AddStringToObject(au, "type", "input_audio");
+    in = cJSON_AddObjectToObject(au, "input_audio");
+    cJSON_AddStringToObject(in, "data", b);
+    cJSON_AddStringToObject(in, "format", format);
+    cJSON_AddItemToArray(c->images, t);
+    cJSON_AddItemToArray(c->images, au);
+    free(b);
+    return 0;
+}
+
 /* After a turn: images leave the conversation (they are large); a note says where they were. */
 static void drop_images(chat_t *c)
 {
@@ -152,7 +176,7 @@ static void drop_images(chat_t *c)
         cJSON_ArrayForEach(part, (cJSON_IsArray(content) ? content : NULL))
         {
             const cJSON *ty = cJSON_GetObjectItemCaseSensitive(part, "type");
-            if (cJSON_IsString(ty) && !strcmp(ty->valuestring, "image_url")) {
+            if (cJSON_IsString(ty) && (!strcmp(ty->valuestring, "image_url") || !strcmp(ty->valuestring, "input_audio"))) {
                 cJSON *t = cJSON_CreateObject();
                 cJSON_AddStringToObject(t, "type", "text");
                 cJSON_AddStringToObject(t, "text", "(the image was shown here; use image_view again to look at it)");

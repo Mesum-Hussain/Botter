@@ -99,6 +99,7 @@ void chat_set_reasoning(const char *effort);
 int  chat_attach_image(const char *label, const char *mime, const unsigned char *data, size_t len);
 /* Add an image to c's next user message (bot.llm with images). 0 ok, -1 out of memory. */
 int  chat_add_image(chat_t *c, const char *label, const char *mime, const unsigned char *data, size_t len);
+int  chat_add_audio(chat_t *c, const char *label, const char *format, const unsigned char *data, size_t len);
 
 /* The conversation whose tool calls are running now (innermost), or NULL. */
 chat_t *chat_current(void);
