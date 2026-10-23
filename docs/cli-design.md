@@ -1,7 +1,7 @@
 # Botter as a CLI: design (experiment, 2026-10-22)
 
 Status: **experiment, not decided.** Nothing is deleted until the acceptance test below passes.
-Owner decisions 2026-10-22: no `.bot` by default (6); the TUI is dropped;
+Owner decisions 2026-10-22: no `.bot` by default (6); the TUI is dropped (removed 2026-10-23 with the builder agent);
 no `botter ask`; no `botter add` (the Botter skill teaches the coding agent to add outside skills).
 
 ## 1. The idea in one paragraph
@@ -197,15 +197,19 @@ How it would run:
   to a stronger one (SkillOpt reports transfer across model sizes).
 - SkillOpt is dev-time tooling: it never ships inside Botter or inside agents.
 
-## 11. Implementation status (2026-10-22)
+## 11. Implementation status (2026-10-23)
 
 - Runtime: `--call NAME` (JSON lines into a global Lua function, one JSON line out; runs without a model
-  connection, bot.llm then fails clearly), `--about` (name, version, description, requires, runtime).
-- CLI `tools/src/cli/botter.c` (one static file, ~920 KB with the runtime embedded via `.incbin`): new, check,
-  run, eval, build, inspect, skill, version, help. `seal` not yet (vault_seal stays in the runtime for now).
-- Skill `skill/botter/`: SKILL.md + references (layout, lua-api, flow, testing, scripts, agent-md,
-  outside-skills, checklist) + templates (chat, batch, tool). Its examples are neutral (no September details),
-  so the acceptance test stays fair.
-- `make` builds `./botter` (the CLI); `make builder` the old builder agent (artifacts/botter.bot) for the
-  tests until it is removed. TUI removed (tui/ and its tests).
-- Tests: 388 pass, 1 skipped (37 new CLI tests: new/check/build/inspect/run/eval/skill/--call/--about).
+  connection, bot.llm then fails clearly), `--about`, `--seal` (keys into ./secrets.vault, asked at the
+  terminal), `bot.llm{audio = {...}}` (MP3/WAV/OGG/FLAC/M4A as input_audio parts).
+- CLI `tools/src/cli/botter.c` (one static file, ~970 KB with the runtime and the skill embedded via
+  `.incbin`): data, new (`--here`), check, run, eval (`prepare(cases)` first when defined; words in any case;
+  lists `|`/`;` in any order; Title Case columns match result keys; row-number ids), build, inspect, seal,
+  skill, version, help.
+- Skill `skill/botter/`: SKILL.md (the fast path) + references + templates (chat, batch with
+  functions/read.lua, tool) + assets/lib/search.lua. Examples are neutral (no task-specific details).
+- Removed 2026-10-23 (the CLI replaced them): the builder agent (repo-root AGENT.md, FLOW.lua, config.json,
+  functions/, skills/), agent_tools, `make builder`, the TUI and its front end (BOTCORE_FRONTEND), config.json
+  `"builder"` (now a build error that names `botter seal`), the vault_seal model tool, BOTCORE_RUNTIME_FD. The
+  version lives in VERSION.
+- Tests: 354 pass, 1 skipped.
